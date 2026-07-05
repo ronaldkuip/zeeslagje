@@ -1,0 +1,1391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeeslagje — Chart Table</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --deep-sea:#0B2436;
+    --deep-sea-2:#0E2C42;
+    --chart-paper:#EFE6D3;
+    --chart-paper-dim:#E2D7BE;
+    --ink:#122031;
+    --brass:#B8892B;
+    --brass-bright:#D9A83E;
+    --coral:#C1503D;
+    --coral-bright:#D8674F;
+    --teal:#4FA9A0;
+    --grid-line:rgba(239,230,211,0.14);
+    --grid-line-strong:rgba(239,230,211,0.28);
+    --muted:#7C93A8;
+    --paper-muted:#8A7C5C;
+    --focus:#D9A83E;
+    --radius:3px;
+    --deep-water:#0A1F33;
+    --deep-water-border:rgba(159,199,224,0.16);
+    --shallow-water:#B7D9E8;
+    --shallow-water-border:rgba(20,60,90,0.35);
+    --cross-yellow:#F5D90A;
+    --discovered-orange:#E8821B;
+    --truth-blue:#1B3A6B;
+    --flag-green:#3F8F5C;
+  }
+
+  *{box-sizing:border-box;}
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important;}
+  }
+
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 800px at 15% -10%, #123350 0%, transparent 60%),
+      radial-gradient(1000px 700px at 110% 10%, #0e2c42 0%, transparent 55%),
+      var(--deep-sea);
+    color:var(--chart-paper);
+    font-family:'IBM Plex Sans', sans-serif;
+    min-height:100vh;
+    padding:32px 20px 60px;
+  }
+
+  a{color:inherit;}
+
+  .wrap{
+    max-width:1180px;
+    margin:0 auto;
+  }
+
+  header.masthead{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    gap:20px;
+    flex-wrap:wrap;
+    border-bottom:1px solid var(--grid-line-strong);
+    padding-bottom:18px;
+    margin-bottom:28px;
+  }
+  header.masthead h1{
+    font-family:'Newsreader', serif;
+    font-weight:600;
+    font-style:italic;
+    font-size:clamp(28px, 4vw, 40px);
+    letter-spacing:0.2px;
+    margin:0;
+    color:var(--chart-paper);
+  }
+  header.masthead .subtitle{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--brass-bright);
+  }
+  header.masthead .meta{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--muted);
+    text-align:right;
+    line-height:1.7;
+  }
+  header.masthead .meta b{color:var(--chart-paper);}
+
+  .layout{
+    display:grid;
+    grid-template-columns:minmax(0,560px) minmax(300px, 1fr);
+    gap:28px;
+    align-items:start;
+  }
+  @media (max-width:880px){
+    .layout{grid-template-columns:1fr;}
+  }
+
+  /* ---------- Chart panel ---------- */
+  .chart-card{
+    background:linear-gradient(180deg, var(--deep-sea-2), var(--deep-sea));
+    border:1px solid var(--grid-line-strong);
+    border-radius:6px;
+    padding:20px;
+    position:relative;
+  }
+  .chart-card::before{
+    content:"";
+    position:absolute; inset:0;
+    border-radius:6px;
+    pointer-events:none;
+    box-shadow:inset 0 0 60px rgba(0,0,0,0.35);
+  }
+
+  .grid-scale{
+    display:grid;
+    grid-template-columns:28px repeat(10, 1fr);
+    gap:3px;
+  }
+  .corner{ }
+  .col-label, .row-label{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--brass-bright);
+    letter-spacing:0.05em;
+  }
+  .row-label{ height:100%; }
+
+  .cell{
+    aspect-ratio:1/1;
+    background:rgba(239,230,211,0.03);
+    border:1px solid var(--grid-line);
+    border-radius:2px;
+    cursor:pointer;
+    position:relative;
+    transition:background 120ms ease, border-color 120ms ease, transform 80ms ease;
+  }
+  .cell.outer{
+    background:var(--deep-water);
+    border-color:var(--deep-water-border);
+  }
+  .cell.inner{
+    background:var(--shallow-water);
+    border-color:var(--shallow-water-border);
+  }
+  .cell:hover:not(.fired):not(.disabled){
+    background:rgba(217,168,62,0.14);
+    border-color:var(--brass);
+  }
+  .cell:focus-visible{
+    outline:2px solid var(--focus);
+    outline-offset:2px;
+  }
+  .cell.selected{
+    background:rgba(217,168,62,0.32);
+    border-color:var(--brass-bright);
+  }
+  .cell.fired{
+    cursor:default;
+    background:rgba(124,147,168,0.10);
+    border-color:var(--grid-line);
+  }
+  .cell.fired.selected{
+    background:rgba(217,168,62,0.32);
+    border-color:var(--brass-bright);
+  }
+  .cell.fired.refirable{
+    cursor:pointer;
+  }
+  .cell.fired.refirable:hover{
+    background:rgba(217,168,62,0.14);
+    border-color:var(--brass);
+  }
+  .cell.fired::after{
+    content:"";
+    position:absolute; left:50%; top:50%;
+    width:5px; height:5px;
+    background:var(--muted);
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+  }
+  .cell.suggested::before{
+    content:"";
+    position:absolute; inset:3px;
+    border:1.5px dashed var(--teal);
+    border-radius:2px;
+    animation:pulse-ring 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse-ring{
+    0%,100%{opacity:0.45;}
+    50%{opacity:1;}
+  }
+  .cell.disabled{cursor:not-allowed; opacity:0.5;}
+
+  .cell.cross-candidate{
+    outline:2px solid var(--cross-yellow);
+    outline-offset:-2px;
+  }
+
+  .cell.cross-identified{
+    background:var(--cross-yellow) !important;
+    border-color:var(--cross-yellow);
+  }
+
+  .cell.discovered3-candidate{
+    outline:2px solid var(--discovered-orange);
+    outline-offset:-2px;
+  }
+
+  /* A cell that's both a Battleship cross-4 candidate AND inside the
+     discovered-3 Cruiser region: swap the plain outlines for an alternating
+     yellow/orange striped border (3px dashes) instead of stacking two flat
+     outlines on top of each other. */
+  .cell.cross-candidate.discovered3-candidate{
+    outline:none;
+    border-width:3px;
+    border-style:solid;
+    border-image:repeating-linear-gradient(
+      45deg,
+      var(--cross-yellow) 0 3px,
+      var(--discovered-orange) 3px 6px
+    ) 3;
+  }
+
+  .chip-list{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    margin-bottom:8px;
+  }
+  .cross-chip{
+    background:rgba(245,217,10,0.14);
+    border:1px solid var(--cross-yellow);
+    color:#6b5b00;
+    padding:5px 10px;
+    border-radius:3px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    font-weight:600;
+  }
+  .cross-chip.identified{
+    background:var(--cross-yellow);
+    color:#3a3000;
+  }
+  .orange-chip{
+    background:rgba(232,130,27,0.14);
+    border:1px solid var(--discovered-orange);
+    color:#6b3a00;
+    padding:5px 10px;
+    border-radius:3px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    font-weight:600;
+  }
+  .orange-chip.discovered{
+    background:var(--discovered-orange);
+    color:#3a1f00;
+  }
+  .true-cruiser-coord{
+    border:2px solid var(--truth-blue);
+    border-radius:3px;
+    padding:1px 5px;
+    font-weight:600;
+  }
+  .ruled-out-coord{
+    border:2px solid var(--coral-bright);
+    border-radius:3px;
+    padding:1px 5px;
+    font-weight:600;
+  }
+  .coord-flag{
+    display:inline-block;
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    margin-left:5px;
+    vertical-align:middle;
+    border:1px solid rgba(0,0,0,0.25);
+  }
+  .coord-flag.flag-red{
+    background:var(--coral-bright);
+  }
+  .coord-flag.flag-green{
+    background:var(--flag-green);
+  }
+
+  .chart-footnote{
+    margin-top:14px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--muted);
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+  .legend-item{display:flex; align-items:center; gap:6px;}
+  .legend-swatch{width:10px; height:10px; border-radius:2px; display:inline-block;}
+
+  /* ---------- Sidebar ---------- */
+  .panel{
+    background:var(--chart-paper);
+    color:var(--ink);
+    border-radius:6px;
+    padding:18px 20px;
+    margin-bottom:18px;
+  }
+  .panel h2{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--paper-muted);
+    margin:0 0 12px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+  }
+
+  /* Advisory */
+  .advisory-readout{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:14px;
+    letter-spacing:0.06em;
+    display:flex;
+    gap:10px;
+    margin-bottom:12px;
+  }
+  .advisory-chip{
+    background:rgba(79,169,160,0.14);
+    border:1px solid var(--teal);
+    color:#245a54;
+    padding:5px 10px;
+    border-radius:3px;
+    font-weight:600;
+  }
+  .btn{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+    border:none;
+    border-radius:3px;
+    padding:9px 14px;
+    cursor:pointer;
+    transition:filter 120ms ease, transform 80ms ease;
+  }
+  .btn:active{transform:translateY(1px);}
+  .btn:disabled{cursor:not-allowed; opacity:0.45;}
+  .btn:focus-visible{outline:2px solid var(--deep-sea); outline-offset:2px;}
+  .btn-teal{background:var(--teal); color:#0c2320;}
+  .btn-teal:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-brass{background:var(--brass); color:#2a1c00;}
+  .btn-brass:hover:not(:disabled){filter:brightness(1.1);}
+  .btn-ghost{background:transparent; border:1px solid var(--paper-muted); color:var(--ink);}
+  .btn-ghost:hover:not(:disabled){background:rgba(0,0,0,0.05);}
+
+  .fire-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  .selection-slots{
+    display:flex; gap:6px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+  }
+  .slot{
+    min-width:38px;
+    padding:5px 6px;
+    text-align:center;
+    border:1px solid var(--paper-muted);
+    border-radius:3px;
+    color:var(--ink);
+    background:rgba(0,0,0,0.03);
+  }
+  .slot.empty{color:var(--paper-muted); font-style:italic;}
+
+  /* Fleet */
+  .fleet-group{margin-bottom:10px;}
+  .fleet-group-name{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--ink);
+    display:flex;
+    justify-content:space-between;
+    margin-bottom:5px;
+  }
+  .fleet-instances{display:flex; gap:5px;}
+  .hull{
+    display:flex; gap:1px;
+  }
+  .hull .seg{
+    width:9px; height:14px;
+    background:var(--brass);
+    border-radius:1px;
+  }
+  .hull.sunk .seg{
+    background:var(--coral);
+    opacity:0.55;
+  }
+
+  /* Log */
+  .log-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    max-height:320px;
+    overflow-y:auto;
+    padding-right:2px;
+  }
+  .log-entry{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12.5px;
+    border-left:2px solid var(--brass);
+    padding:4px 0 4px 10px;
+    line-height:1.6;
+  }
+  .log-entry .turn{color:var(--paper-muted); margin-right:6px;}
+  .log-entry .coords{color:var(--ink); font-weight:600;}
+  .log-entry .result{color:#245a54;}
+  .log-entry .sunk{
+    display:block;
+    color:var(--coral);
+    font-weight:600;
+    margin-top:2px;
+  }
+  .log-entry .discovered{
+    display:block;
+    color:#8a6d00;
+    font-weight:600;
+    margin-top:2px;
+  }
+  .log-empty{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--paper-muted);
+    font-style:italic;
+  }
+
+  .status-line{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--paper-muted);
+    margin-top:10px;
+    min-height:16px;
+  }
+
+  .victory-banner{
+    display:none;
+    background:var(--brass);
+    color:#2a1c00;
+    border-radius:6px;
+    padding:16px 20px;
+    margin-bottom:18px;
+    font-family:'Newsreader', serif;
+    font-style:italic;
+    font-weight:600;
+    font-size:20px;
+  }
+  .victory-banner.show{display:block;}
+
+  .loading-notice, .error-notice{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+    color:var(--muted);
+    padding:14px 16px;
+    border:1px dashed var(--grid-line-strong);
+    border-radius:4px;
+  }
+  .error-notice{color:var(--coral-bright); border-color:var(--coral);}
+
+  /* ---------- Debug modal ---------- */
+  .modal-backdrop{
+    position:fixed; inset:0;
+    background:rgba(5,14,22,0.72);
+    display:none;
+    align-items:center;
+    justify-content:center;
+    z-index:50;
+    padding:20px;
+  }
+  .modal-backdrop.show{display:flex;}
+  .modal-box{
+    background:var(--chart-paper);
+    color:var(--ink);
+    border-radius:6px;
+    max-width:760px;
+    width:100%;
+    max-height:85vh;
+    overflow-y:auto;
+    padding:20px 22px 24px;
+  }
+  .modal-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:14px;
+    border-bottom:1px solid var(--paper-muted);
+    padding-bottom:10px;
+  }
+  .modal-header h3{
+    font-family:'Newsreader', serif;
+    font-style:italic;
+    font-weight:600;
+    margin:0;
+    font-size:20px;
+  }
+  .modal-close{
+    background:none;
+    border:none;
+    cursor:pointer;
+    font-size:22px;
+    line-height:1;
+    color:var(--ink);
+    padding:2px 8px;
+  }
+  .modal-close:hover{color:var(--coral);}
+
+  .fsm-size-block{margin-bottom:20px;}
+  .fsm-size-block h4{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color:var(--paper-muted);
+    margin:0 0 8px;
+  }
+  .fsm-directions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:16px;
+  }
+  .fsm-direction-label{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--paper-muted);
+    margin-bottom:4px;
+  }
+  .fsm-line-table{
+    width:100%;
+    border-collapse:collapse;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11.5px;
+  }
+  .fsm-line-table th, .fsm-line-table td{
+    padding:3px 6px;
+    text-align:right;
+    border-bottom:1px solid rgba(0,0,0,0.07);
+  }
+  .fsm-line-table th{color:var(--paper-muted); font-weight:600;}
+  .fsm-line-table th:first-child, .fsm-line-table td:first-child{text-align:left;}
+  .fsm-line-table tr.outer-line td{color:var(--paper-muted); font-style:italic;}
+  .fsm-line-table tr.exhausted td{color:var(--coral);}
+
+  .alive-grid-table{
+    border-collapse:collapse;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    margin-bottom:16px;
+  }
+  .alive-grid-table th, .alive-grid-table td{
+    width:26px;
+    height:24px;
+    text-align:center;
+    border:1px solid rgba(0,0,0,0.08);
+    padding:0;
+  }
+  .alive-grid-table th{color:var(--paper-muted); font-weight:600;}
+  .alive-grid-table td.dead{
+    background:rgba(193,80,61,0.15);
+    color:var(--coral);
+    font-weight:700;
+  }
+
+  .ships-table{
+    width:100%;
+    border-collapse:collapse;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12.5px;
+  }
+  .ships-table th, .ships-table td{
+    padding:6px 8px;
+    text-align:left;
+    border-bottom:1px solid rgba(0,0,0,0.07);
+  }
+  .ships-table th{
+    color:var(--paper-muted);
+    text-transform:uppercase;
+    font-size:10.5px;
+    letter-spacing:0.08em;
+  }
+  .ships-table tr.sunk td{color:var(--coral);}
+  .ships-table tr.current-level td{color:var(--brass-bright); font-weight:600;}
+  .modal-footnote{
+    margin-top:12px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--paper-muted);
+    font-style:italic;
+  }
+  .refire-toggle-group{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  }
+  .refire-toggle{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--ink);
+    cursor:pointer;
+  }
+  .refire-toggle input[type="checkbox"]{
+    accent-color:var(--brass);
+    cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <h1>Zeeslagje</h1>
+      <div class="subtitle">Chart Table &amp; Salvo Log</div>
+    </div>
+    <div class="meta">
+      Turn <b id="turnNo">1</b> &nbsp;·&nbsp; Hits <b id="hitCount">0</b>/<span id="hitTotal">20</span>
+      <br><span style="opacity:0.5;">build 5</span>
+    </div>
+  </header>
+
+  <div id="bootNotice" class="loading-notice">Loading chart table…</div>
+
+  <div id="game" style="display:none;">
+    <div class="victory-banner" id="victoryBanner">All ships accounted for. Fleet destroyed in <span id="victoryTurns"></span> turns.</div>
+
+    <div class="layout">
+      <!-- Chart -->
+      <section class="chart-card">
+        <div class="grid-scale" id="gridScale">
+          <div class="corner"></div>
+          <!-- col labels injected -->
+        </div>
+        <div class="chart-footnote">
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--deep-water)"></span>outer ring — submarines only</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8×8 — all ships</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--cross-yellow); background:transparent"></span>Battleship cross candidate</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship identified</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--discovered-orange); background:transparent"></span>Discovered-3 Cruiser region</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:3px solid; border-image:repeating-linear-gradient(45deg, var(--cross-yellow) 0 3px, var(--discovered-orange) 3px 6px) 3; background:transparent"></span>Both candidate regions</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
+        </div>
+      </section>
+
+      <!-- Sidebar -->
+      <aside>
+        <div class="panel">
+          <h2>AI Advisory</h2>
+          <div class="advisory-readout" id="advisoryReadout"></div>
+          <button class="btn btn-teal" id="useAdvisoryBtn">Use these 3</button>
+        </div>
+
+        <div class="panel">
+          <h2>Fire Control</h2>
+          <div class="selection-slots" id="selectionSlots"></div>
+          <div class="fire-row" style="margin-top:12px;">
+            <button class="btn btn-brass" id="fireBtn" disabled>Fire salvo</button>
+            <button class="btn btn-ghost" id="clearBtn">Clear</button>
+          </div>
+          <div class="status-line" id="statusLine">Select 3 coordinates on the chart, or accept the AI's advisory.</div>
+        </div>
+
+        <div class="panel">
+          <h2>Fleet Status</h2>
+          <div id="fleetStatus"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Debug Tools</h2>
+          <div class="fire-row">
+            <button class="btn btn-ghost" id="fsmStatusBtn">FSM status</button>
+            <button class="btn btn-ghost" id="revealShipsBtn">Reveal ships</button>
+            <button class="btn btn-ghost" id="evalLevelBtn">Evaluation level</button>
+            <button class="btn btn-ghost" id="crossBagBtn">Cross-4 bag</button>
+            <button class="btn btn-ghost" id="cross3BagBtn">Cross-3 bags</button>
+            <button class="btn btn-ghost" id="cruiserAliveBtn">Ship alive grids</button>
+          </div>
+          <div class="refire-toggle-group">
+            <div class="modal-footnote" style="margin:10px 0 6px;">Let the AI advisory suggest already-fired cells while hunting:</div>
+            <label class="refire-toggle"><input type="checkbox" id="refireToggle4"> Battleship (4)</label>
+            <label class="refire-toggle"><input type="checkbox" id="refireToggle3"> Cruiser (3)</label>
+            <label class="refire-toggle"><input type="checkbox" id="refireToggle2"> Frigate (2)</label>
+          </div>
+          <div class="refire-toggle-group" style="margin-top:10px;">
+            <label class="refire-toggle"><input type="checkbox" id="freezeBeforeFrigatesToggle"> Don't drop evaluation level to 2 (Frigate) — freeze at 3 instead</label>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Salvo Log <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button></h2>
+          <div class="log-list" id="logList">
+            <div class="log-empty">No salvos fired yet.</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-header">
+        <h3 id="modalTitle"></h3>
+        <button class="modal-close" id="modalClose" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-content" id="modalContent"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  let init, Game;
+  let game = null;
+  let selected = [];      // array of flat indices, up to 3
+  let suggested = [];     // array of flat indices from ai_suggest
+  let won = false;
+
+  const bootNotice = document.getElementById('bootNotice');
+  const gameEl = document.getElementById('game');
+  const gridScale = document.getElementById('gridScale');
+  const advisoryReadout = document.getElementById('advisoryReadout');
+  const useAdvisoryBtn = document.getElementById('useAdvisoryBtn');
+  const selectionSlots = document.getElementById('selectionSlots');
+  const fireBtn = document.getElementById('fireBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const statusLine = document.getElementById('statusLine');
+  const fleetStatus = document.getElementById('fleetStatus');
+  const logList = document.getElementById('logList');
+  const resetBtn = document.getElementById('resetBtn');
+  const fsmStatusBtn = document.getElementById('fsmStatusBtn');
+  const revealShipsBtn = document.getElementById('revealShipsBtn');
+  const evalLevelBtn = document.getElementById('evalLevelBtn');
+  const crossBagBtn = document.getElementById('crossBagBtn');
+  const cross3BagBtn = document.getElementById('cross3BagBtn');
+  const cruiserAliveBtn = document.getElementById('cruiserAliveBtn');
+  const refireToggles = [
+    [document.getElementById('refireToggle4'), 4],
+    [document.getElementById('refireToggle3'), 3],
+    [document.getElementById('refireToggle2'), 2],
+  ];
+  const freezeBeforeFrigatesToggle = document.getElementById('freezeBeforeFrigatesToggle');
+  const modalBackdrop = document.getElementById('modalBackdrop');
+  const modalTitle = document.getElementById('modalTitle');
+  const modalContent = document.getElementById('modalContent');
+  const modalClose = document.getElementById('modalClose');
+  const victoryBanner = document.getElementById('victoryBanner');
+  const victoryTurns = document.getElementById('victoryTurns');
+  const turnNo = document.getElementById('turnNo');
+  const hitCount = document.getElementById('hitCount');
+  const hitTotal = document.getElementById('hitTotal');
+
+  const COL_LETTERS = ['A','B','C','D','E','F','G','H','I','J'];
+
+  function colLabelRow(){
+    // corner cell already present in DOM; explicit grid-row/column placement,
+    // so it doesn't matter what order elements land in the DOM.
+    const corner = gridScale.querySelector('.corner');
+    corner.style.gridColumn = '1';
+    corner.style.gridRow = '1';
+    for (let c = 0; c < 10; c++){
+      const div = document.createElement('div');
+      div.className = 'col-label';
+      div.textContent = COL_LETTERS[c];
+      div.style.gridColumn = String(c + 2);
+      div.style.gridRow = '1';
+      gridScale.appendChild(div);
+    }
+  }
+
+  function buildGrid(){
+    colLabelRow();
+    for (let r = 0; r < 10; r++){
+      const rowLabel = document.createElement('div');
+      rowLabel.className = 'row-label';
+      rowLabel.textContent = String(r + 1);
+      rowLabel.style.gridColumn = '1';
+      rowLabel.style.gridRow = String(r + 2);
+      gridScale.appendChild(rowLabel);
+
+      for (let c = 0; c < 10; c++){
+        const idx = r * 10 + c;
+        const cell = document.createElement('div');
+        const isOuter = (r === 0 || r === 9 || c === 0 || c === 9);
+        cell.className = 'cell ' + (isOuter ? 'outer' : 'inner');
+        cell.dataset.idx = idx;
+        cell.tabIndex = 0;
+        cell.setAttribute('role','button');
+        cell.setAttribute('aria-label', `${COL_LETTERS[c]}${r+1}`);
+        cell.style.gridColumn = String(c + 2);
+        cell.style.gridRow = String(r + 2);
+        cell.addEventListener('click', () => onCellClick(idx));
+        cell.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); onCellClick(idx); }
+        });
+        gridScale.appendChild(cell);
+      }
+    }
+  }
+
+  function cellEl(idx){
+    return gridScale.querySelector(`.cell[data-idx="${idx}"]`);
+  }
+
+  function idxToCoord(idx){
+    const r = Math.floor(idx / 10), c = idx % 10;
+    return `${COL_LETTERS[c]}${r + 1}`;
+  }
+
+  // Reading order humans expect for a coordinate list: A1..A10, then B1..B10,
+  // etc. — column (letter) first, then row (number) — rather than sorting by
+  // raw flat index, which groups by row first and jumps between letters.
+  function sortByColumnThenRow(indices){
+    return [...indices].sort((a, b) => {
+      const colA = a % 10, rowA = Math.floor(a / 10);
+      const colB = b % 10, rowB = Math.floor(b / 10);
+      return colA - colB || rowA - rowB;
+    });
+  }
+
+  function coordToIdx(coord){
+    const col = coord.charCodeAt(0) - 65;
+    const row = parseInt(coord.slice(1), 10) - 1;
+    return row * 10 + col;
+  }
+
+  function onCellClick(idx){
+    if (won) return;
+    const el = cellEl(idx);
+    if (el.classList.contains('fired') && !game.is_refire_allowed(game.ai_target_size())) return;
+
+    const pos = selected.indexOf(idx);
+    if (pos !== -1){
+      selected.splice(pos, 1);
+    } else {
+      if (selected.length >= 3){
+        statusLine.textContent = '3 already selected — deselect one or fire.';
+        return;
+      }
+      selected.push(idx);
+    }
+    renderSelection();
+  }
+
+  function refreshRefirableCells(){
+    const allowed = game.is_refire_allowed(game.ai_target_size());
+    gridScale.querySelectorAll('.cell.fired').forEach(el => el.classList.toggle('refirable', allowed));
+  }
+
+  function renderSelection(){
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('selected'));
+    selected.forEach(idx => cellEl(idx)?.classList.add('selected'));
+
+    selectionSlots.innerHTML = '';
+    for (let i = 0; i < 3; i++){
+      const slot = document.createElement('div');
+      if (selected[i] !== undefined){
+        slot.className = 'slot';
+        slot.textContent = idxToCoord(selected[i]);
+      } else {
+        slot.className = 'slot empty';
+        slot.textContent = '—';
+      }
+      selectionSlots.appendChild(slot);
+    }
+
+    fireBtn.disabled = won || selected.length !== 3;
+    if (!won){
+      statusLine.textContent = selected.length === 3
+        ? 'Ready — review your 3 coordinates and fire.'
+        : `Select ${3 - selected.length} more coordinate${3 - selected.length === 1 ? '' : 's'}.`;
+    }
+  }
+
+  function renderSuggested(){
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('suggested'));
+    suggested.forEach(idx => cellEl(idx)?.classList.add('suggested'));
+    advisoryReadout.innerHTML = '';
+    suggested.forEach(idx => {
+      const chip = document.createElement('span');
+      chip.className = 'advisory-chip';
+      chip.textContent = idxToCoord(idx);
+      advisoryReadout.appendChild(chip);
+    });
+  }
+
+  function refreshAdvisory(){
+    if (won) { advisoryReadout.innerHTML = ''; useAdvisoryBtn.disabled = true; return; }
+    const raw = game.ai_suggest();
+    suggested = JSON.parse(raw);
+    renderSuggested();
+  }
+
+  function refreshBattleshipCross(){
+    gridScale.querySelectorAll('.cell.cross-candidate').forEach(el => el.classList.remove('cross-candidate'));
+    let candidates = [];
+    try { candidates = JSON.parse(game.battleship_candidates_json()); }
+    catch { candidates = []; }
+    candidates.forEach(idx => cellEl(idx)?.classList.add('cross-candidate'));
+
+    gridScale.querySelectorAll('.cell.cross-identified').forEach(el => el.classList.remove('cross-identified'));
+    let identified = [];
+    try { identified = JSON.parse(game.battleship_identified_json()); }
+    catch { identified = []; }
+    identified.forEach(idx => cellEl(idx)?.classList.add('cross-identified'));
+  }
+
+  function refreshCruiserDiscovered(){
+    gridScale.querySelectorAll('.cell.discovered3-candidate').forEach(el => el.classList.remove('discovered3-candidate'));
+    let discovered = [];
+    try { discovered = JSON.parse(game.discovered_3_json()); }
+    catch { discovered = []; }
+    discovered.forEach(idx => cellEl(idx)?.classList.add('discovered3-candidate'));
+  }
+
+  function openModal(title, contentHtml){
+    modalTitle.textContent = title;
+    modalContent.innerHTML = contentHtml;
+    modalBackdrop.classList.add('show');
+  }
+
+  function closeModal(){
+    modalBackdrop.classList.remove('show');
+  }
+
+  function lineFsmRowsHtml(lines){
+    return lines.map(line => {
+      const isOuter = line.index === 0 || line.index === 9;
+      const isExhausted = !isOuter && line.alive === 0;
+      const cls = isOuter ? 'outer-line' : (isExhausted ? 'exhausted' : '');
+      const label = isOuter ? `${line.index} (outer)` : String(line.index);
+      return `<tr class="${cls}"><td>${label}</td><td>${line.state}</td><td>${line.alive}</td></tr>`;
+    }).join('');
+  }
+
+  function buildFsmStatusHtml(){
+    const ships = [
+      { size: 4, label: 'Battleship (size 4)' },
+      { size: 3, label: 'Cruiser (size 3)' },
+      { size: 2, label: 'Frigate (size 2)' },
+    ];
+    let html = '';
+    ships.forEach(({ size, label }) => {
+      let status = { rows: [], cols: [] };
+      try { status = JSON.parse(game.fsm_status_json(size)); } catch { /* keep default */ }
+      html += `
+        <div class="fsm-size-block">
+          <h4>${label}</h4>
+          <div class="fsm-directions">
+            <div>
+              <div class="fsm-direction-label">Horizontal — by row</div>
+              <table class="fsm-line-table">
+                <thead><tr><th>Row</th><th>State</th><th>Alive</th></tr></thead>
+                <tbody>${lineFsmRowsHtml(status.rows)}</tbody>
+              </table>
+            </div>
+            <div>
+              <div class="fsm-direction-label">Vertical — by column</div>
+              <table class="fsm-line-table">
+                <thead><tr><th>Col</th><th>State</th><th>Alive</th></tr></thead>
+                <tbody>${lineFsmRowsHtml(status.cols)}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>`;
+    });
+    html += `<div class="modal-footnote">Rows/cols 0 and 9 are the outer ring — the FSM never places size ≥2 ships there; shown for transparency only. "Alive" is the count of still-possible placements remaining in that line.</div>`;
+    return html;
+  }
+
+  function buildShipsHtml(){
+    let ships = [];
+    try { ships = JSON.parse(game.debug_ships_json()); } catch { ships = []; }
+    const rows = ships.map(s => `
+      <tr class="${s.sunk ? 'sunk' : ''}">
+        <td>${s.name}</td>
+        <td>${s.size}</td>
+        <td>${s.cells.join(', ')}</td>
+        <td>${s.sunk ? 'Sunk' : 'Afloat'}</td>
+      </tr>`).join('');
+    return `
+      <table class="ships-table">
+        <thead><tr><th>Ship</th><th>Size</th><th>Cells</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="modal-footnote">Debug view — reveals the true generated board, independent of what's been fired.</div>`;
+  }
+
+  const SIZE_NAMES = { 4: 'Battleship', 3: 'Cruiser', 2: 'Frigate', 1: 'Submarine' };
+
+  function buildEvaluationLevelHtml(){
+    let level = 4;
+    try { level = game.ai_target_size(); } catch { level = 4; }
+
+    let ships = [];
+    try { ships = JSON.parse(game.ships_json()); } catch { ships = []; }
+    const bySize = {};
+    ships.forEach(s => {
+      const bucket = bySize[s.size] || (bySize[s.size] = { total: 0, sunk: 0 });
+      bucket.total++;
+      if (s.sunk) bucket.sunk++;
+    });
+
+    const rows = [4, 3, 2, 1].map(size => {
+      const bucket = bySize[size] || { total: 0, sunk: 0 };
+      const isCurrent = size === level;
+      return `
+        <tr class="${isCurrent ? 'current-level' : ''}">
+          <td>${SIZE_NAMES[size]} (size ${size})</td>
+          <td>${bucket.sunk} / ${bucket.total} sunk</td>
+          <td>${isCurrent ? '← evaluating' : ''}</td>
+        </tr>`;
+    }).join('');
+
+    const frozenNote = (level === 3 && (bySize[3] || {}).sunk === (bySize[3] || {}).total && game.is_freeze_before_frigates())
+      ? `<div class="modal-footnote">"Don't drop evaluation level to 2" is on — every Cruiser is sunk, but the AI is being held at level 3 rather than advancing to Frigates.</div>`
+      : '';
+
+    return `
+      <table class="ships-table">
+        <thead><tr><th>Ship class</th><th>Progress</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="modal-footnote">The AI's shot-selection FSM always targets the largest not-yet-fully-sunk class, in priority order Battleship &gt; Cruiser &gt; Frigate &gt; Submarine. Submarine targeting isn't wired into shot selection yet — level 1 just means "nothing bigger is left."</div>
+      ${frozenNote}`;
+  }
+
+  function buildCrossBagHtml(){
+    let candidates = [];
+    try { candidates = JSON.parse(game.battleship_candidates_json()); } catch { candidates = []; }
+
+    if (candidates.length === 0){
+      return `<div class="modal-footnote">No Battleship hit detected yet — the cross-4 bag stays empty until a salvo comes back with a 4 in its result.</div>`;
+    }
+
+    let identified = [];
+    try { identified = JSON.parse(game.battleship_identified_json()); } catch { identified = []; }
+    const identifiedSet = new Set(identified);
+
+    const chips = [...candidates]
+      .sort((a, b) => a - b)
+      .map(idx => `<span class="cross-chip${identifiedSet.has(idx) ? ' identified' : ''}">${idxToCoord(idx)}</span>`)
+      .join('');
+
+    const status = identified.length > 0
+      ? `Identified — these ${identified.length} coordinates ARE the Battleship (solid chips). Nothing left to deduce; the AI just needs to finish firing at whichever are still unfired.`
+      : `Still narrowing — ${candidates.length} coordinate${candidates.length === 1 ? '' : 's'} could still be part of the Battleship. Not yet enough intersecting salvos to pin down the exact 4-cell layout.`;
+
+    let debug = { entries: [] };
+    try { debug = JSON.parse(game.cross4_debug_json()); } catch { /* keep default */ }
+
+    const entriesHtml = debug.entries.map((entry, i) => {
+      const ruledOutSet = new Set(entry.ruled_out_coords || []);
+      const coordsStr = entry.coords
+        .map(idx => {
+          const isRuledOut = ruledOutSet.has(idx);
+          const flag = `<span class="coord-flag ${isRuledOut ? 'flag-red' : 'flag-green'}" title="${isRuledOut ? 'Eliminated — no longer a possible Battleship hit' : 'Still a possible Battleship hit'}"></span>`;
+          return `${idxToCoord(idx)}${flag}`;
+        })
+        .join(', ');
+      return `<div><strong>Salvo #${i + 1}</strong>: ${coordsStr} &rarr; result: ${entry.values.join(' ')}</div>`;
+    }).join('');
+
+    return `
+      <div style="margin-bottom:14px;">${entriesHtml}</div>
+      <div class="chip-list">${chips}</div>
+      <div class="modal-footnote">${status}</div>`;
+  }
+
+  function buildCross3BagHtml(){
+    let debug = { entries: [], discovered: [] };
+    try { debug = JSON.parse(game.cross3_debug_json()); } catch { /* keep default */ }
+
+    if (debug.entries.length === 0){
+      return `<div class="modal-footnote">No Cruiser hit detected yet — a cross-3 bag is built the first time a salvo's result bag contains a 3.</div>`;
+    }
+
+    const entriesHtml = debug.entries.map((entry, i) => {
+      const trueCruiserSet = new Set(entry.true_cruiser_coords || []);
+      const ruledOutSet = new Set(entry.ruled_out_coords || []);
+      const coordsStr = entry.coords
+        .map(idx => {
+          const isRuledOut = ruledOutSet.has(idx);
+          const label = trueCruiserSet.has(idx)
+            ? `<span class="true-cruiser-coord">${idxToCoord(idx)}</span>`
+            : idxToCoord(idx);
+          const flag = `<span class="coord-flag ${isRuledOut ? 'flag-red' : 'flag-green'}" title="${isRuledOut ? 'Eliminated — no longer a possible Cruiser hit' : 'Still a possible Cruiser hit'}"></span>`;
+          return `${label}${flag}`;
+        })
+        .join(', ');
+      const bagChips = sortByColumnThenRow(entry.bag)
+        .map(idx => `<span class="orange-chip">${idxToCoord(idx)}</span>`)
+        .join('');
+      return `
+        <div style="margin-bottom:14px;">
+          <div><strong>Salvo #${i + 1}</strong>: ${coordsStr} &rarr; result: ${entry.values.join(' ')}</div>
+          <div class="chip-list">${bagChips}</div>
+        </div>`;
+    }).join('');
+
+    const truthNote = `<div class="modal-footnote">Coordinates outlined in dark blue are debug ground truth — the cell really does hold a Cruiser, independent of the "3" in the result bag (which is an unordered multiset and never says which of the 3 coordinates it belongs to). The dot after each coordinate is its elimination flag: green means it's still a possible Cruiser hit for this salvo, red means it's been proven impossible — no placement of size 3 passes through it any more.</div>`;
+
+    const discoveredHtml = debug.discovered.length > 0
+      ? `
+        <h4 style="margin:16px 0 6px;">Discovered-3 bag (${debug.discovered.length} cells)</h4>
+        <div class="chip-list">${sortByColumnThenRow(debug.discovered).map(idx =>
+          `<span class="orange-chip discovered">${idxToCoord(idx)}</span>`).join('')}</div>
+        <div class="modal-footnote">Two of the cross-3 bags above share zero cells — proof they're hits on the two different Cruisers. Everywhere outside this union is now ruled out for size 3.</div>`
+      : `<div class="modal-footnote">No two cross-3 bags are disjoint yet, so the two Cruisers haven't been told apart — nothing eliminated outside individual bags yet.</div>`;
+
+    return entriesHtml + truthNote + discoveredHtml;
+  }
+
+  function buildAliveGridTable(grid, title){
+    // grid is the inner 8x8 (board indices 1-8, 0-indexed), which everywhere
+    // else in the app displays as rows 2-9 and columns B-I (row label is
+    // r+1, column label is COL_LETTERS[c] starting at 'A'=0) — offset the
+    // headers here to match instead of mislabelling them 1-8 / A-H.
+    const colHeaders = COL_LETTERS.slice(1, 9).map(l => `<th>${l}</th>`).join('');
+    const rows = grid.map((rowVals, i) => {
+      const cells = rowVals.map(v => `<td class="${v === 0 ? 'dead' : ''}">${v}</td>`).join('');
+      return `<tr><th>${i + 2}</th>${cells}</tr>`;
+    }).join('');
+    return `
+      <div class="fsm-direction-label">${title}</div>
+      <table class="alive-grid-table">
+        <thead><tr><th></th>${colHeaders}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  function buildShipAliveGridsHtml(){
+    const sizes = [
+      { size: 4, label: 'Battleship (size 4)' },
+      { size: 3, label: 'Cruiser (size 3)' },
+      { size: 2, label: 'Frigate (size 2)' },
+    ];
+
+    const sections = sizes.map(({ size, label }) => {
+      let grids = { horizontal: [], vertical: [], combined: [] };
+      try { grids = JSON.parse(game.alive_grids_json(size)); } catch { /* keep default */ }
+
+      const horizontalHtml = buildAliveGridTable(grids.horizontal, 'Horizontal — row FSM value at this column');
+      const verticalHtml = buildAliveGridTable(grids.vertical, 'Vertical — column FSM value at this row');
+      const combinedHtml = buildAliveGridTable(grids.combined, 'Combined — horizontal + vertical');
+
+      return `
+        <div class="fsm-size-block">
+          <h4>${label}</h4>
+          ${horizontalHtml}
+          ${verticalHtml}
+          ${combinedHtml}
+        </div>`;
+    }).join('');
+
+    return `
+      ${sections}
+      <div class="modal-footnote">Cells shaded red have a combined value of 0 — no alive placement of that size, horizontal or vertical, passes through them any more. For Cruisers, that's exactly the criterion cells are swept out of every cross-3 bag after each salvo, even ones that were never individually fired. Battleship/Frigate grids are shown for inspection only — no equivalent cross-bag pruning exists for those sizes yet.</div>`;
+  }
+
+  function refreshFleet(){
+    const ships = JSON.parse(game.ships_json());
+    const groups = {};
+    for (const s of ships){
+      groups[s.name] ??= { size: s.size, instances: [] };
+      groups[s.name].instances.push(s.sunk);
+    }
+    fleetStatus.innerHTML = '';
+    // stable order by descending size
+    Object.entries(groups)
+      .sort((a,b) => b[1].size - a[1].size)
+      .forEach(([name, g]) => {
+        const row = document.createElement('div');
+        row.className = 'fleet-group';
+        const label = document.createElement('div');
+        label.className = 'fleet-group-name';
+        const sunkCount = g.instances.filter(Boolean).length;
+        label.innerHTML = `<span>${name}</span><span>${sunkCount}/${g.instances.length} sunk</span>`;
+        row.appendChild(label);
+
+        const instRow = document.createElement('div');
+        instRow.className = 'fleet-instances';
+        g.instances.forEach(sunk => {
+          const hull = document.createElement('div');
+          hull.className = 'hull' + (sunk ? ' sunk' : '');
+          for (let i = 0; i < g.size; i++){
+            const seg = document.createElement('div');
+            seg.className = 'seg';
+            hull.appendChild(seg);
+          }
+          instRow.appendChild(hull);
+        });
+        row.appendChild(instRow);
+        fleetStatus.appendChild(row);
+      });
+  }
+
+  function appendLogEntry(salvo){
+    if (logList.querySelector('.log-empty')) logList.innerHTML = '';
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    const discoveredLine = salvo.battleship_discovered
+      ? `<span class="discovered">◆ Battleship discovered</span>`
+      : '';
+    const sunkLine = salvo.sunk_names.length
+      ? `<span class="sunk">⚓ ${salvo.sunk_names.join(', ')} sunk</span>`
+      : '';
+    entry.innerHTML = `<span class="turn">T${String(salvo.turn).padStart(2,'0')}</span><span class="coords">${salvo.coords.join(' · ')}</span> → <span class="result">${salvo.result}</span>${discoveredLine}${sunkLine}`;
+    logList.prepend(entry);
+  }
+
+  function markFired(coords){
+    coords.forEach(coord => {
+      const idx = coordToIdx(coord);
+      const el = cellEl(idx);
+      if (el){
+        el.classList.add('fired');
+        el.classList.remove('selected', 'suggested');
+      }
+    });
+  }
+
+  function doFire(){
+    if (won || selected.length !== 3) return;
+    const idxArr = new Uint32Array(selected);
+    const raw = game.fire(idxArr);
+    let salvo;
+    try { salvo = JSON.parse(raw); }
+    catch { statusLine.textContent = 'Malformed response from engine.'; return; }
+
+    if (salvo.error){
+      statusLine.textContent = `Engine refused: ${salvo.error}`;
+      return;
+    }
+
+    markFired(salvo.coords);
+    appendLogEntry(salvo);
+    refreshFleet();
+    refreshBattleshipCross();
+    refreshCruiserDiscovered();
+    refreshRefirableCells();
+    selected = [];
+
+    turnNo.textContent = game.turn();
+    hitCount.textContent = countHits();
+
+    if (salvo.newly_ruled_out_coords && salvo.newly_ruled_out_coords.length > 0){
+      const list = salvo.newly_ruled_out_coords
+        .map(coord => `<span class="ruled-out-coord">${coord}</span>`)
+        .join(', ');
+      const plural = salvo.newly_ruled_out_coords.length > 1;
+      openModal(
+        'Cruiser hit ruled out',
+        `<p>${list} ${plural ? 'are' : 'is'} no longer a possible Cruiser hit — no placement of size 3 passes through ${plural ? 'them' : 'it'} any more.</p>
+         <div class="modal-footnote">Every cross-3 salvo's 3 fired coordinates are re-checked at the end of every round (see the Cross-3 bags debug popup).</div>`
+      );
+    }
+
+    if (game.is_won()){
+      won = true;
+      victoryTurns.textContent = salvo.turn;
+      victoryBanner.classList.add('show');
+      fireBtn.disabled = true;
+      useAdvisoryBtn.disabled = true;
+      statusLine.textContent = 'Fleet destroyed. Start a new game to sail again.';
+      selectionSlots.innerHTML = '';
+      advisoryReadout.innerHTML = '';
+      gridScale.querySelectorAll('.cell.suggested').forEach(el => el.classList.remove('suggested'));
+      return;
+    }
+
+    renderSelection();
+    refreshAdvisory();
+  }
+
+  function countHits(){
+    // total ships' combined size fired-and-hit == total_hits when won;
+    // we approximate live hit count via fleet + log is not directly exposed,
+    // so track cumulative from log entries' result digits > 0.
+    let hits = 0;
+    JSON.parse(game.log_json()).forEach(s => {
+      s.result.split(' ').forEach(v => { if (v !== '0') hits++; });
+    });
+    return hits;
+  }
+
+  function resetGame(){
+    game.reset();
+    // game.reset() rebuilds the AI from scratch (refire-allowed and the
+    // freeze-before-Frigates toggle both default to off) — reapply whatever
+    // the checkboxes currently show, so a debug preference survives starting
+    // a new game.
+    refireToggles.forEach(([el, size]) => game.set_refire_allowed(size, el.checked));
+    game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
+    selected = [];
+    won = false;
+    victoryBanner.classList.remove('show');
+    fireBtn.disabled = true;
+    useAdvisoryBtn.disabled = false;
+    logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','discovered3-candidate','refirable'));
+    turnNo.textContent = game.turn();
+    hitCount.textContent = '0';
+    renderSelection();
+    refreshFleet();
+    refreshAdvisory();
+    refreshBattleshipCross();
+    refreshCruiserDiscovered();
+    refreshRefirableCells();
+    statusLine.textContent = 'New chart laid out. Select 3 coordinates, or accept the AI\'s advisory.';
+  }
+
+  async function boot(){
+    try {
+      const mod = await import('./pkg/zeeslag.js');
+      init = mod.default;
+      Game = mod.Game;
+      await init();
+    } catch (err) {
+      bootNotice.className = 'error-notice';
+      bootNotice.textContent = 'Could not load the WASM module from ./pkg — run build.ps1 first, then serve this folder over HTTP (not file://).';
+      console.error(err);
+      return;
+    }
+
+    game = new Game();
+    bootNotice.style.display = 'none';
+    gameEl.style.display = 'block';
+
+    buildGrid();
+    hitTotal.textContent = 20;
+    turnNo.textContent = game.turn();
+    refreshFleet();
+    refreshAdvisory();
+    refreshBattleshipCross();
+    refreshCruiserDiscovered();
+    renderSelection();
+
+    fireBtn.addEventListener('click', doFire);
+    clearBtn.addEventListener('click', () => { selected = []; renderSelection(); });
+    useAdvisoryBtn.addEventListener('click', () => {
+      selected = suggested.slice(0, 3);
+      renderSelection();
+    });
+    resetBtn.addEventListener('click', resetGame);
+    fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
+    revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));
+    evalLevelBtn.addEventListener('click', () => openModal('Evaluation Level', buildEvaluationLevelHtml()));
+    crossBagBtn.addEventListener('click', () => openModal('Cross-4 Bag', buildCrossBagHtml()));
+    cross3BagBtn.addEventListener('click', () => openModal('Cross-3 Bags', buildCross3BagHtml()));
+    cruiserAliveBtn.addEventListener('click', () => openModal('Ship Alive Grids', buildShipAliveGridsHtml()));
+    refireToggles.forEach(([el, size]) => {
+      el.addEventListener('change', () => {
+        game.set_refire_allowed(size, el.checked);
+        refreshRefirableCells();
+      });
+    });
+    freezeBeforeFrigatesToggle.addEventListener('change', () => {
+      game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
+    });
+    modalClose.addEventListener('click', closeModal);
+    modalBackdrop.addEventListener('click', (e) => { if (e.target === modalBackdrop) closeModal(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && modalBackdrop.classList.contains('show')) closeModal();
+    });
+  }
+
+  boot();
+</script>
+</body>
+</html>
