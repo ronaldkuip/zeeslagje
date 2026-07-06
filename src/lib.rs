@@ -264,7 +264,12 @@ impl Game {
             if r > 9 || c > 9 {
                 return r#"{"error":"index out of range"}"#.to_string();
             }
-            if self.state.fired[r][c] && !refire_ok {
+            // The AI's own deliberate Cruiser-layout disambiguation refire
+            // (see `AiPlayer::pending_cruiser_disambiguation`) is always let
+            // through, independent of the general refire-allowed toggle —
+            // it's a specific internal strategy, not the debug relaxation.
+            let is_disambiguation_refire = self.ai.is_pending_cruiser_disambiguation(r, c);
+            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire {
                 return r#"{"error":"cell already fired"}"#.to_string();
             }
             if cells_to_fire.iter().any(|&(pr, pc)| pr == r && pc == c) {
@@ -423,6 +428,20 @@ impl Game {
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// Cells belonging to a Cruiser confirmed via `cruiser_combination_candidates`
+    /// narrowing to exactly one surviving combination — flat indices, one
+    /// array of 3 per found Cruiser. For the main grid to render these
+    /// coordinates distinctly (e.g. green) from the merely-candidate ones.
+    pub fn found_cruisers_json(&self) -> String {
+        let found: Vec<[usize; 3]> = self
+            .ai
+            .found_cruisers()
+            .iter()
+            .map(|combo| combo.map(|(r, c)| r * 10 + c))
+            .collect();
+        serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Debug/inspector: every 3-bearing salvo seen so far — its 3 coordinates,
     /// raw result values, and derived cross-3 bag — plus the discovered-3 bag
     /// (empty until found). All coordinates are flat indices.
@@ -447,6 +466,8 @@ impl Game {
         struct Cross3Debug {
             entries: Vec<Cross3EntryDebug>,
             discovered: Vec<usize>,
+            combinations: Vec<[usize; 3]>,
+            found: Vec<[usize; 3]>,
         }
 
         let is_cruiser_cell = |r: usize, c: usize| {
@@ -479,7 +500,21 @@ impl Game {
 
         let discovered: Vec<usize> = self.ai.discovered_3_cells().iter().map(|&(r, c)| r * 10 + c).collect();
 
-        serde_json::to_string(&Cross3Debug { entries, discovered }).unwrap_or_else(|_| "{}".to_string())
+        let combinations: Vec<[usize; 3]> = self
+            .ai
+            .cruiser_combination_candidates()
+            .iter()
+            .map(|combo| combo.map(|(r, c)| r * 10 + c))
+            .collect();
+
+        let found: Vec<[usize; 3]> = self
+            .ai
+            .found_cruisers()
+            .iter()
+            .map(|combo| combo.map(|(r, c)| r * 10 + c))
+            .collect();
+
+        serde_json::to_string(&Cross3Debug { entries, discovered, combinations, found }).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Debug/inspector: every 4-bearing salvo seen so far — its 3 coordinates,
@@ -1622,19 +1657,22 @@ mod tests {
     fn ai_discovered_3_bag_prunes_cells_later_proven_to_be_battleship() {
         let mut ai = AiPlayer::new();
 
-        // Cross-3 hit at (3,4): row-arm is row3 cols2-6, col-arm is col4
-        // rows1-5 — the col-arm reaches down into row4, where the Battleship
-        // will later be identified (row4 cols3-6). Hit at (7,7), far away,
-        // proves disjointness the same way as
+        // Cross-3 hit at (6,4): row-arm is row6 cols2-6, col-arm is col4
+        // rows4-8 — the col-arm reaches up into row4, where the Battleship
+        // will later be identified (row4 cols3-6). Row6 is 2 rows away from
+        // row4 (not Chebyshev-adjacent, unlike row3 or row5), so its arm is
+        // genuinely untouched by the Battleship's neighbour sweep. Hit at
+        // (7,7)'s reach-2 cross doesn't touch col4 or row6 either, so it
+        // still proves disjointness the same way as
         // `ai_cross3_disjoint_bags_discover_and_eliminate_elsewhere`.
-        ai.apply_salvo([(3, 4), (0, 0), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(6, 4), (0, 0), (0, 9)], [3, 0, 0]);
         ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
 
         let before: std::collections::HashSet<(usize, usize)> =
             ai.discovered_3_cells().into_iter().collect();
         assert!(before.contains(&(4, 4)), "sanity: (4,4) starts in the bag via col4's arm");
         assert!(before.contains(&(5, 4)), "sanity: (5,4) starts in the bag via col4's arm");
-        assert!(before.contains(&(3, 2)) && before.contains(&(3, 6)), "sanity: row3's arm is present");
+        assert!(before.contains(&(6, 2)) && before.contains(&(6, 6)), "sanity: row6's arm is present");
 
         // Identify the Battleship at row4 cols3-6 (same salvo pair proven in
         // ai_identifies_exact_battleship_layout_after_two_intersecting_crosses).
@@ -1645,11 +1683,14 @@ mod tests {
         let after: std::collections::HashSet<(usize, usize)> =
             ai.discovered_3_cells().into_iter().collect();
         assert!(!after.contains(&(4, 4)), "(4,4) is now a confirmed Battleship cell — must leave the bag");
-        // (5,4)'s only support was col4's arm, rows1-5; removing row4 splits it
-        // into {1,2,3} and a lone {5} — the lone cell no longer has room either.
-        assert!(!after.contains(&(5, 4)), "(5,4) lost its only room once (4,4) left the bag");
-        // Row3's arm never touches row4, so it's completely unrelated to the Battleship.
-        assert!(after.contains(&(3, 2)) && after.contains(&(3, 6)), "row3's arm is unrelated to the Battleship and must survive");
+        // (5,4)'s only support was col4's arm, rows4-8; removing row4 splits it
+        // into an empty gap and a surviving {6,7,8} — still a run of 3, so it's
+        // room, not a cascade, that keeps (5,4) out (it's Chebyshev-adjacent to
+        // (4,4), directly eliminated by the Battleship's own neighbour sweep).
+        assert!(!after.contains(&(5, 4)), "(5,4) is Chebyshev-adjacent to the Battleship, must leave the bag");
+        // Row6's arm is 2 rows from row4 — outside Chebyshev adjacency (unlike
+        // row3/row5) — so it's genuinely unrelated to the Battleship.
+        assert!(after.contains(&(6, 2)) && after.contains(&(6, 6)), "row6's arm is unrelated to the Battleship and must survive");
     }
 
     #[test]
@@ -1705,6 +1746,301 @@ mod tests {
             after.contains(&(4, 4)) && after.contains(&(4, 5)) && after.contains(&(4, 6)),
             "cols 4-6 still form a run of 3 and must survive"
         );
+    }
+
+    #[test]
+    fn ai_discovered_3_bag_prunes_cells_proven_dead_by_a_direct_hit_of_another_size() {
+        let mut ai = AiPlayer::new();
+
+        // Cross-3 hit at (4,4): row-arm row4 cols2-6, col-arm col4 rows2-6.
+        ai.apply_salvo([(4, 4), (0, 0), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
+
+        let before: std::collections::HashSet<(usize, usize)> =
+            ai.discovered_3_cells().into_iter().collect();
+        assert!(before.contains(&(4, 3)));
+
+        // (4,3) turns out to hold a Frigate — a direct, unambiguous bound=2
+        // hit (no "which of the 3" uncertainty, unlike a bound=3/4 salvo),
+        // which eliminates size 3 (and 4) at that EXACT cell via the normal
+        // apply_hit path. This is neither a confirmed miss (bound isn't 0),
+        // nor a Battleship cell, nor does it lack room within the bag mask
+        // before removal (row4's arm is still a full run of 5) — the only
+        // thing that proves it dead is its own combined alive value hitting
+        // zero directly, which none of the other three criteria check for.
+        ai.apply_salvo([(4, 3), (1, 1), (1, 8)], [2, 0, 0]);
+
+        let after: std::collections::HashSet<(usize, usize)> =
+            ai.discovered_3_cells().into_iter().collect();
+        assert!(!after.contains(&(4, 3)), "(4,3) is a confirmed Frigate cell — size 3 is impossible there now");
+        // (4,2)'s only support was row4's arm; removing (4,3) strands it alone.
+        assert!(!after.contains(&(4, 2)), "(4,2) lost its only room once (4,3) left the bag");
+        assert!(
+            after.contains(&(4, 4)) && after.contains(&(4, 5)) && after.contains(&(4, 6)),
+            "cols 4-6 still form a run of 3 and must survive"
+        );
+    }
+
+    #[test]
+    fn ai_cruiser_combination_candidates_needs_at_least_one_sunk_cruiser() {
+        let mut ai = AiPlayer::new();
+        assert!(ai.cruiser_combination_candidates().is_empty(), "sanity: no salvos yet");
+
+        // A real Cruiser at (2,2),(2,3),(2,4), each cell's real hit spread
+        // across its OWN salvo (3 cross-3 entries) — each salvo also carries
+        // one INNER decoy that stays green (never ruled out), so every entry
+        // has 2 candidates instead of a trivial 1, genuinely exercising the
+        // combination search.
+        ai.apply_salvo([(2, 2), (5, 5), (0, 0)], [3, 0, 0]);
+        ai.apply_salvo([(2, 3), (6, 6), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(2, 4), (7, 7), (9, 0)], [3, 0, 0]);
+        assert!(ai.cruiser_combination_candidates().is_empty(), "3 salvos exist, but no Cruiser is sunk yet");
+
+        ai.mark_sunk(3);
+        let combos = ai.cruiser_combination_candidates();
+        // 2 surviving (green) candidates per salvo => up to 8 combinations,
+        // but only one — the real ship's own 3 cells — is a valid straight-3
+        // line; (5,5)/(6,6)/(7,7) are diagonal, not a valid Cruiser shape,
+        // and every other mix is scattered.
+        assert_eq!(combos.len(), 1, "exactly one combination should form a valid straight-3 line: {:?}", combos);
+        assert_eq!(combos[0], [(2, 2), (2, 3), (2, 4)]);
+
+        // A second Cruiser sinking must NOT turn this back off — "at least
+        // one sunk" stays satisfied, and the same combination still holds
+        // (nothing about the entries themselves changed).
+        ai.mark_sunk(3);
+        let combos = ai.cruiser_combination_candidates();
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0], [(2, 2), (2, 3), (2, 4)]);
+    }
+
+    /// Builds a scenario with exactly 2 surviving straight-3 combinations:
+    /// a real Cruiser at (2,2),(2,3),(2,4), each cell's real hit spread
+    /// across its own salvo, but each salvo's decoy is chosen to be the
+    /// PREVIOUS real cell (already fired, reused as a decoy here — fine at
+    /// the raw AiPlayer level, no Game::fire validation involved), so a
+    /// second, "shifted" straight-3 line at (2,1),(2,2),(2,3) also survives.
+    /// Returns the AiPlayer with the Cruiser already marked sunk. The two
+    /// combos share (2,2)/(2,3); (2,4) is unique to the real one, (2,1) is
+    /// unique to the shifted (false) one.
+    fn build_two_combo_ambiguity() -> AiPlayer {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 1), (0, 0)], [3, 0, 0]);
+        ai.apply_salvo([(2, 3), (2, 2), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(2, 4), (2, 3), (9, 0)], [3, 0, 0]);
+        ai.mark_sunk(3);
+        ai
+    }
+
+    #[test]
+    fn ai_cruiser_disambiguation_targets_the_coordinate_unique_to_one_combo() {
+        let ai = build_two_combo_ambiguity();
+
+        let mut combos = ai.cruiser_combination_candidates();
+        combos.sort();
+        assert_eq!(combos, vec![[(2, 1), (2, 2), (2, 3)], [(2, 2), (2, 3), (2, 4)]], "sanity: exactly 2 combos");
+
+        // (2,4) is unique to the real combo; (2,1) is unique to the false
+        // one — either would be a valid disambiguator, but the coordinate
+        // choose_shots fires first must be one of the two, not one of the
+        // shared cells (2,2)/(2,3).
+        let shots = ai.choose_shots();
+        assert!(
+            shots[0] == (2, 4) || shots[0] == (2, 1),
+            "expected the first shot to be the disambiguating coordinate, got {:?}", shots
+        );
+        // The other 2 shots must be safe for size 3 (never mistaken for the
+        // disambiguating hit): either outer ring, or an inner cell already
+        // proven dead for size 3.
+        for &(r, c) in &shots[1..] {
+            let is_inner = (1..=8).contains(&r) && (1..=8).contains(&c);
+            if is_inner {
+                let (_, _, combined3) = ai.alive_grids(3);
+                assert_eq!(combined3[r - 1][c - 1], 0, "filler shot {:?} must be proven dead for size 3", (r, c));
+            }
+        }
+    }
+
+    #[test]
+    fn ai_cruiser_disambiguation_hit_confirms_the_combo_containing_the_target() {
+        let mut ai = build_two_combo_ambiguity();
+        assert!(ai.is_pending_cruiser_disambiguation(2, 4), "sanity: (2,4) is the disambiguation target");
+
+        // Fire (2,4) again, paired with 2 safe fillers, and this time it
+        // comes back WITH a 3 in the bag — confirming the combo containing
+        // (2,4): the real ship, (2,2)-(2,4).
+        ai.apply_salvo([(2, 4), (0, 1), (0, 2)], [3, 0, 0]);
+
+        assert_eq!(ai.found_cruisers(), &[[(2, 2), (2, 3), (2, 4)]]);
+        assert!(!ai.is_pending_cruiser_disambiguation(2, 4), "the pending target must be cleared once resolved");
+    }
+
+    #[test]
+    fn ai_cruiser_disambiguation_miss_confirms_the_other_combo() {
+        let mut ai = build_two_combo_ambiguity();
+        assert!(ai.is_pending_cruiser_disambiguation(2, 4), "sanity: (2,4) is the disambiguation target");
+
+        // Fire (2,4) again, paired with 2 safe fillers, and this time it
+        // comes back with NO 3 in the bag — confirming the combo that does
+        // NOT contain (2,4): the shifted, false layout at (2,1)-(2,3).
+        ai.apply_salvo([(2, 4), (0, 1), (0, 2)], [0, 0, 0]);
+
+        assert_eq!(ai.found_cruisers(), &[[(2, 1), (2, 2), (2, 3)]]);
+        assert!(!ai.is_pending_cruiser_disambiguation(2, 4), "the pending target must be cleared once resolved");
+    }
+
+    #[test]
+    fn game_fire_allows_disambiguation_refire_even_with_toggle_off() {
+        let mut game = Game::new();
+        assert!(!game.is_refire_allowed(3), "sanity: refire toggle is off by default");
+
+        // Drive the AI directly into the same pending ambiguity as the
+        // AiPlayer-level tests — Game's own board doesn't need to match this
+        // synthetic story, since only the fire() validation path is under
+        // test here, not full coherent gameplay.
+        game.ai.apply_salvo([(2, 2), (2, 1), (0, 0)], [3, 0, 0]);
+        game.ai.apply_salvo([(2, 3), (2, 2), (0, 9)], [3, 0, 0]);
+        game.ai.apply_salvo([(2, 4), (2, 3), (9, 0)], [3, 0, 0]);
+        game.ai.mark_sunk(3);
+        assert!(game.ai.is_pending_cruiser_disambiguation(2, 4));
+
+        // Simulate (2,4) already having been fired through the real game path.
+        game.state.fired[2][4] = true;
+
+        let result = game.fire(&[24, 1, 2]); // (2,4), (0,1), (0,2)
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("error").is_none(), "disambiguation refire should be allowed even with the toggle off: {parsed}");
+    }
+
+    #[test]
+    fn ai_found_cruiser_eliminates_size3_and_size2_at_own_cells_and_neighbours() {
+        let mut ai = AiPlayer::new();
+
+        // Real Cruiser at (4,4),(4,5),(4,6), each cell's hit spread across
+        // its own salvo with outer-ring decoys (so each entry's only green
+        // candidate is the real hit).
+        ai.apply_salvo([(4, 4), (0, 0), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(4, 5), (9, 0), (9, 9)], [3, 0, 0]);
+        ai.apply_salvo([(4, 6), (1, 9), (9, 1)], [3, 0, 0]);
+        ai.mark_sunk(3);
+        assert_eq!(ai.found_cruisers(), &[[(4, 4), (4, 5), (4, 6)]]);
+
+        // Own cells: no longer a Submarine candidate either (a cell can only
+        // ever hold one ship).
+        assert!(!ai.is_submarine_candidate(4, 4));
+        assert!(!ai.is_submarine_candidate(4, 5));
+        assert!(!ai.is_submarine_candidate(4, 6));
+
+        let (_, _, combined3) = ai.alive_grids(3);
+        let (_, _, combined2) = ai.alive_grids(2);
+        // Orthogonal neighbour directly above the middle cell.
+        assert_eq!(combined3[2][4], 0, "(3,5) is Chebyshev-adjacent to the found Cruiser, size 3 must be eliminated");
+        assert_eq!(combined2[2][4], 0, "(3,5) is Chebyshev-adjacent to the found Cruiser, size 2 must be eliminated");
+        // Diagonal neighbour of the ship's end cell.
+        assert_eq!(combined3[4][6], 0, "(5,7) is diagonally Chebyshev-adjacent to (4,6), size 3 must be eliminated");
+        assert_eq!(combined2[4][6], 0, "(5,7) is diagonally Chebyshev-adjacent to (4,6), size 2 must be eliminated");
+    }
+
+    #[test]
+    fn ai_found_cruisers_only_combines_distinct_salvo_entries() {
+        let mut ai = AiPlayer::new();
+
+        // Cruiser A (will be sunk) at (2,2),(2,3),(2,4), across 3 salvos —
+        // decoys are outer-ring corners, so each entry's only surviving
+        // (green) candidate is the real hit itself.
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
+        ai.apply_salvo([(2, 3), (9, 0), (9, 9)], [3, 0, 0]);
+        ai.apply_salvo([(2, 4), (1, 9), (9, 1)], [3, 0, 0]);
+
+        // mark_sunk immediately checks and finds the unique combination —
+        // it's promoted straight to `found_cruisers` (see
+        // `check_and_apply_found_cruisers`), which also eliminates size 3/2
+        // at its own cells and every neighbour.
+        ai.mark_sunk(3);
+        assert_eq!(ai.found_cruisers(), &[[(2, 2), (2, 3), (2, 4)]]);
+
+        // A 4th, unrelated cross-3 salvo touches the OTHER (still-afloat)
+        // Cruiser once — not enough to sink it, just adds a 4th entry to the
+        // table, simulating "made 4 successful shots" overall. With 4
+        // entries there are C(4,3) = 4 possible entry-triples to search, but
+        // only the triple made of entries 0,1,2 (Cruiser A's own 3 salvos)
+        // could ever yield a straight-3 line — any triple involving the 4th
+        // entry pulls in (7,7)/(1,1)/(8,8), nowhere near row 2, so it can't
+        // complete one. This must not fabricate a spurious second found
+        // Cruiser.
+        ai.apply_salvo([(7, 7), (1, 1), (8, 8)], [3, 0, 0]);
+        assert_eq!(
+            ai.found_cruisers().len(),
+            1,
+            "the 4th entry must not spuriously combine into a second found Cruiser: {:?}",
+            ai.found_cruisers()
+        );
+
+        // Cruiser A's own cells (and their neighbours) are now settled —
+        // they've been consumed out of the raw candidate search entirely
+        // (their own alive value for size 3 is now zero, so they no longer
+        // show as a "still possible" green coordinate in their entries).
+        assert!(
+            ai.cruiser_combination_candidates().is_empty(),
+            "the found combination should no longer appear as a mere candidate once settled"
+        );
+    }
+
+    #[test]
+    fn ai_cruiser_combination_candidates_needs_3_distinct_entries_not_just_3_coordinates() {
+        let mut ai = AiPlayer::new();
+
+        // Only 2 cross-3 entries exist, but entry 0's decoy at (2,3) happens
+        // to stay green (inner, never ruled out) and sits directly between
+        // entry 0's real hit (2,2) and entry 1's real hit (2,4) — so picking
+        // BOTH of entry 0's candidates plus entry 1's would complete a
+        // straight line. That must NOT be allowed: a valid combination needs
+        // 3 DISTINCT salvo entries, not just 3 coordinates, and there are
+        // only 2 entries here.
+        ai.apply_salvo([(2, 2), (2, 3), (0, 0)], [3, 0, 0]);
+        ai.apply_salvo([(2, 4), (9, 0), (9, 9)], [3, 0, 0]);
+        ai.mark_sunk(3); // synthetic: just exercising the boundary condition
+
+        assert!(
+            ai.cruiser_combination_candidates().is_empty(),
+            "must not fabricate a combination by pulling 2 coordinates from the same entry"
+        );
+    }
+
+    #[test]
+    fn ai_eliminates_everywhere_outside_cross3_salvo_union_once_both_cruisers_sunk() {
+        let mut ai = AiPlayer::new();
+
+        // Simulate sinking each Cruiser outright in a single salvo, firing
+        // exactly at its 3 real cells (values [3,3,3], no decoys needed) —
+        // so each cross-3 entry's raw coordinates are exactly that ship's
+        // true straight-3 footprint.
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        let (_, _, combined3) = ai.alive_grids(3);
+        assert!(combined3[4][4] > 0, "sanity: (5,5) still alive before both Cruisers are confirmed sunk");
+
+        // First Cruiser sunk — on its own, not enough to trigger the full
+        // elimination (only one of the two is accounted for).
+        ai.mark_sunk(3);
+        let (_, _, combined3) = ai.alive_grids(3);
+        assert!(combined3[4][4] > 0, "sanity: still not eliminated with only 1 of 2 Cruisers sunk");
+
+        // Second Cruiser sunk — now BOTH are accounted for, so every cell
+        // outside the union of the two salvos' raw fired coordinates must be
+        // eliminated for size 3.
+        ai.apply_salvo([(7, 5), (7, 6), (7, 7)], [3, 3, 3]);
+        ai.mark_sunk(3);
+
+        let (_, _, combined3) = ai.alive_grids(3);
+        // The union of both ships' true cells is exactly 2 valid straight-3
+        // runs, each still a legitimate alive window even once everything
+        // else on the board is eliminated — so their middle cells (which
+        // need no OTHER cell's help to form a window) stay nonzero.
+        assert!(combined3[1][2] > 0, "(2,3) is the middle of Cruiser A's real run and must remain alive");
+        assert!(combined3[6][5] > 0, "(7,6) is the middle of Cruiser B's real run and must remain alive");
+        // Anything entirely outside both salvos' coordinates is now
+        // eliminated with total certainty.
+        assert_eq!(combined3[4][4], 0, "(5,5) is outside every cross-3 salvo's coordinates, must now be eliminated");
     }
 
     #[test]

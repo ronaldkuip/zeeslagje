@@ -218,6 +218,11 @@
     outline-offset:-2px;
   }
 
+  .cell.found-cruiser{
+    background:var(--flag-green) !important;
+    border-color:var(--flag-green);
+  }
+
   /* A cell that's both a Battleship cross-4 candidate AND inside the
      discovered-3 Cruiser region: swap the plain outlines for an alternating
      yellow/orange striped border (3px dashes) instead of stacking two flat
@@ -275,6 +280,13 @@
   }
   .ruled-out-coord{
     border:2px solid var(--coral-bright);
+    border-radius:3px;
+    padding:1px 5px;
+    font-weight:600;
+  }
+  .found-cruiser-coord{
+    border:2px solid var(--flag-green);
+    background:rgba(63,143,92,0.14);
     border-radius:3px;
     padding:1px 5px;
     font-weight:600;
@@ -657,6 +669,7 @@
           <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--cross-yellow); background:transparent"></span>Battleship cross candidate</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship identified</span>
           <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--discovered-orange); background:transparent"></span>Discovered-3 Cruiser region</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser found</span>
           <span class="legend-item"><span class="legend-swatch" style="border:3px solid; border-image:repeating-linear-gradient(45deg, var(--cross-yellow) 0 3px, var(--discovered-orange) 3px 6px) 3; background:transparent"></span>Both candidate regions</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
@@ -933,6 +946,14 @@
     discovered.forEach(idx => cellEl(idx)?.classList.add('discovered3-candidate'));
   }
 
+  function refreshFoundCruisers(){
+    gridScale.querySelectorAll('.cell.found-cruiser').forEach(el => el.classList.remove('found-cruiser'));
+    let found = [];
+    try { found = JSON.parse(game.found_cruisers_json()); }
+    catch { found = []; }
+    found.flat().forEach(idx => cellEl(idx)?.classList.add('found-cruiser'));
+  }
+
   function openModal(title, contentHtml){
     modalTitle.textContent = title;
     modalContent.innerHTML = contentHtml;
@@ -1128,7 +1149,25 @@
         <div class="modal-footnote">Two of the cross-3 bags above share zero cells — proof they're hits on the two different Cruisers. Everywhere outside this union is now ruled out for size 3.</div>`
       : `<div class="modal-footnote">No two cross-3 bags are disjoint yet, so the two Cruisers haven't been told apart — nothing eliminated outside individual bags yet.</div>`;
 
-    return entriesHtml + truthNote + discoveredHtml;
+    const foundHtml = (debug.found && debug.found.length > 0)
+      ? `
+        <h4 style="margin:16px 0 6px;">Found Cruisers</h4>
+        ${debug.found.map((combo, i) =>
+          `<div>found ship #${i + 1}: ${combo.map(idx => `<span class="found-cruiser-coord">${idxToCoord(idx)}</span>`).join(', ')}</div>`
+        ).join('')}
+        <div class="modal-footnote">Confirmed — each of these narrowed to the only possible straight-3 line once at least one Cruiser was sunk. Also shaded green on the main chart; every one of these cells and their neighbours is now ruled out for any other ship.</div>`
+      : '';
+
+    const combinationsHtml = (debug.combinations && debug.combinations.length > 0)
+      ? `
+        <h4 style="margin:16px 0 6px;">Still-open combinations</h4>
+        ${debug.combinations.map((combo, i) =>
+          `<div>combination #${i + 1}: ${combo.map(idx => idxToCoord(idx)).join(', ')}</div>`
+        ).join('')}
+        <div class="modal-footnote">At least one Cruiser is sunk, so every one of its 3 real cells must be the (unknown-which-one) hit in some cross-3 salvo, with no two coming from the same salvo. These are every remaining combination of one still-possible (green) coordinate from 3 distinct salvos that forms a valid straight-3 line.</div>`
+      : '';
+
+    return entriesHtml + truthNote + discoveredHtml + foundHtml + combinationsHtml;
   }
 
   function buildAliveGridTable(grid, title){
@@ -1258,6 +1297,7 @@
     refreshFleet();
     refreshBattleshipCross();
     refreshCruiserDiscovered();
+    refreshFoundCruisers();
     refreshRefirableCells();
     selected = [];
 
@@ -1318,7 +1358,7 @@
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
-    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','discovered3-candidate','refirable'));
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','discovered3-candidate','refirable','found-cruiser'));
     turnNo.textContent = game.turn();
     hitCount.textContent = '0';
     renderSelection();
@@ -1326,6 +1366,7 @@
     refreshAdvisory();
     refreshBattleshipCross();
     refreshCruiserDiscovered();
+    refreshFoundCruisers();
     refreshRefirableCells();
     statusLine.textContent = 'New chart laid out. Select 3 coordinates, or accept the AI\'s advisory.';
   }
@@ -1354,6 +1395,7 @@
     refreshAdvisory();
     refreshBattleshipCross();
     refreshCruiserDiscovered();
+    refreshFoundCruisers();
     renderSelection();
 
     fireBtn.addEventListener('click', doFire);

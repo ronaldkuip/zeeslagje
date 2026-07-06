@@ -145,6 +145,29 @@ pub struct AiPlayer {
     /// despite never being deliberately targeted, `current_target_size`
     /// still moves on to 1 normally.
     freeze_before_frigates: bool,
+    /// Cells already fed into the size-3 FSM as misses because both Cruisers
+    /// are confirmed sunk and they fell outside the union of every cross-3
+    /// salvo's raw coordinates, so we don't redrive the same transition
+    /// twice. See `apply_full_cruiser_elimination`.
+    cruiser_fully_sunk_processed: [[bool; 10]; 10],
+    /// Straight-3 Cruiser layouts confirmed via `cruiser_combination_candidates`
+    /// narrowing to exactly one surviving combination — recorded so each is
+    /// only acted on (adjacency elimination) once, and so the debug UI can
+    /// show them as "found" (green) rather than merely candidates.
+    found_cruisers: Vec<[(usize, usize); 3]>,
+    /// Cells already fed into the size-3/size-2 FSMs via a found Cruiser's
+    /// "its neighbours can't hold another ship" deduction, so repeated calls
+    /// don't redrive the same transition twice. See
+    /// `apply_found_cruiser_adjacency_elimination`.
+    found_cruiser_adjacency_processed: [[bool; 10]; 10],
+    /// Set when `cruiser_combination_candidates` narrows to exactly 2
+    /// possible layouts and a disambiguating coordinate (present in exactly
+    /// one of the two) has been picked as the next salvo's first shot. `.0`
+    /// is that coordinate; `.1` is the combo it belongs to (confirmed if the
+    /// salvo that fires it comes back with a 3 in the bag); `.2` is the
+    /// other combo (confirmed if it doesn't). See `choose_shots` and
+    /// `refresh_cruiser_disambiguation`.
+    pending_cruiser_disambiguation: Option<((usize, usize), [(usize, usize); 3], [(usize, usize); 3])>,
 }
 
 const INNER_LO: usize = 1;
@@ -177,6 +200,10 @@ impl AiPlayer {
             confirmed_miss: [[false; 10]; 10],
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
+            cruiser_fully_sunk_processed: [[false; 10]; 10],
+            found_cruisers: Vec::new(),
+            found_cruiser_adjacency_processed: [[false; 10]; 10],
+            pending_cruiser_disambiguation: None,
         }
     }
 
@@ -298,10 +325,57 @@ impl AiPlayer {
         if size >= 1 && size <= 4 {
             self.sunk_sizes[size] += 1;
         }
+        if size == 3 {
+            // Once this call is the one that confirms both Cruisers sunk, every
+            // real Cruiser cell is now guaranteed to be among the cross-3 salvos
+            // seen so far — eliminate everywhere else immediately.
+            if self.size_fully_found(3) {
+                self.apply_full_cruiser_elimination();
+            }
+            // `Game::fire` calls `apply_salvo` (which also runs this same
+            // check) BEFORE calling `mark_sunk` for whatever just sank — so
+            // the exact salvo that sinks a Cruiser would otherwise see a
+            // stale (pre-sinking) sunk count during its own apply_salvo call
+            // and miss a combination that only becomes checkable once this
+            // call's sunk_sizes bump has landed. Re-checking here closes
+            // that one-round gap; the found_cruisers guard makes repeating
+            // the check from both places harmless.
+            self.check_and_apply_found_cruisers();
+            self.refresh_cruiser_disambiguation();
+        }
     }
 
     fn size_fully_found(&self, size: usize) -> bool {
         self.sunk_sizes[size] >= self.remaining_sizes[size]
+    }
+
+    /// Once both Cruisers are confirmed sunk, all 6 of their cells are
+    /// guaranteed to have been hit at some point — and any salvo that hits a
+    /// Cruiser cell reports a "3" in its result bag, which is exactly what
+    /// makes `apply_cruiser_cross_tracking` record that salvo's 3 raw fired
+    /// coordinates as a `Cross3Entry` (see there). So the union of every
+    /// cross-3 salvo's coordinates seen over the whole game is guaranteed to
+    /// contain all 6 real Cruiser cells, with total certainty — no more
+    /// Cruisers exist anywhere else, so every OTHER inner cell can be
+    /// eliminated for size 3 outright. This is strictly stronger than the
+    /// discovered-3 bag (a geometric heuristic that can narrow things down
+    /// earlier, before both ships are sunk, but only ever proves a superset
+    /// of the truth) — once this fires, it settles size 3 completely.
+    fn apply_full_cruiser_elimination(&mut self) {
+        let mut candidate = [[false; 10]; 10];
+        for entry in &self.cross3_entries {
+            for &(r, c) in &entry.coords {
+                candidate[r][c] = true;
+            }
+        }
+        for row in INNER_LO..=INNER_HI {
+            for col in INNER_LO..=INNER_HI {
+                if !candidate[row][col] && !self.cruiser_fully_sunk_processed[row][col] {
+                    self.cruiser_fully_sunk_processed[row][col] = true;
+                    self.eliminate_size_at(row, col, 3);
+                }
+            }
+        }
     }
 
     /// Process a salvo result: 3 coordinates and their result values as an unordered
@@ -386,6 +460,40 @@ impl AiPlayer {
             self.apply_cruiser_cross_tracking(coords, values);
         }
 
+        // Refresh flags now (not just at the end of the round) so the
+        // combination search below sees anything this salvo already proved
+        // impossible — a stale (too-green) view could only under-narrow the
+        // search, never misidentify a wrong combination as the unique one
+        // (a real Cruiser's true hit is never flagged red), so this is safe
+        // even though the full end-of-round refresh runs again below.
+        self.refresh_cross3_entry_flags();
+
+        // If this salvo is the deliberate disambiguation shot `choose_shots`
+        // queued up (see `pending_cruiser_disambiguation`), interpret its
+        // result: the other 2 coordinates in that salvo were chosen to be
+        // already-proven-impossible for a Cruiser, so a 3 anywhere in this
+        // bag can only have come from the disambiguating coordinate itself —
+        // confirming whichever of the 2 layouts contains it. No 3 confirms
+        // the other layout instead (and would also already be settled by the
+        // normal apply_hit/apply_miss elimination above, since a bag with no
+        // 3 means bound < 3, which eliminates size 3 at every fired cell
+        // including this one via the ordinary path — but resolving it
+        // explicitly here is simpler than relying on that side effect).
+        if let Some((coord, combo_if_hit, combo_if_miss)) = self.pending_cruiser_disambiguation {
+            if coords.contains(&coord) {
+                let confirmed = if values.contains(&3) { combo_if_hit } else { combo_if_miss };
+                if !self.found_cruisers.contains(&confirmed) {
+                    self.found_cruisers.push(confirmed);
+                    self.apply_found_cruiser_adjacency_elimination(confirmed);
+                }
+                self.pending_cruiser_disambiguation = None;
+            }
+        }
+
+        // See `check_and_apply_found_cruisers` — also re-run from `mark_sunk`
+        // to close a one-round gap around the exact salvo that sinks a ship.
+        self.check_and_apply_found_cruisers();
+
         // Every salvo can prove cells impossible for a Cruiser that a stored
         // cross-3 bag doesn't know about yet (an ordinary miss elsewhere, the
         // Battleship's own elimination above, etc.) — sweep those out, then
@@ -405,6 +513,14 @@ impl AiPlayer {
         // zero by anything above (or by an unrelated salvo elsewhere) — flag
         // any that can no longer possibly be the real Cruiser hit.
         self.refresh_cross3_entry_flags();
+
+        // Now that everything above has settled, recompute the disambiguation
+        // target for next round (using the fully up-to-date combination
+        // search) — a no-op if nothing is ambiguous, or if a target is still
+        // pending and hasn't been fired yet (find_cruiser_disambiguation is
+        // deterministic given the same combos, so this just reselects the
+        // same one).
+        self.refresh_cruiser_disambiguation();
     }
 
     /// The Battleship forbids orthogonal *and* diagonal adjacency to any other
@@ -462,6 +578,59 @@ impl AiPlayer {
                         continue;
                     }
                     self.battleship_adjacency_processed[nr][nc] = true;
+                    self.eliminate_size_at(nr, nc, 3);
+                    self.eliminate_size_at(nr, nc, 2);
+                }
+            }
+        }
+    }
+
+    /// A found Cruiser (see `cruiser_combination_candidates`) forbids
+    /// orthogonal *and* diagonal adjacency to any other ship, exactly like
+    /// the Battleship (see `apply_battleship_adjacency_elimination`, which
+    /// this mirrors) — once its 3 cells are confirmed, every touching cell
+    /// rules out a Cruiser or Frigate, and the 3 cells themselves rule out
+    /// everything else (a board cell can only ever hold one ship). Submarines
+    /// are left alone at neighbouring cells for the same reason as there:
+    /// they only forbid orthogonal adjacency, so a diagonal neighbour could
+    /// still legitimately hold one.
+    ///
+    /// Eliminates unconditionally, even for already-fired cells, for the same
+    /// ambiguous-salvo reason `apply_battleship_adjacency_elimination` does —
+    /// safe to call repeatedly since the FSM tables are idempotent per column
+    /// and `found_cruiser_adjacency_processed` avoids the redundant work.
+    fn apply_found_cruiser_adjacency_elimination(&mut self, ship_cells: [(usize, usize); 3]) {
+        for &(row, col) in &ship_cells {
+            if self.found_cruiser_adjacency_processed[row][col] {
+                continue;
+            }
+            self.found_cruiser_adjacency_processed[row][col] = true;
+            self.eliminate_size_at(row, col, 3);
+            self.eliminate_size_at(row, col, 2);
+            self.sub_candidates[row][col] = false;
+        }
+
+        for &(row, col) in &ship_cells {
+            for dr in -1isize..=1 {
+                for dc in -1isize..=1 {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let nr = row as isize + dr;
+                    let nc = col as isize + dc;
+                    if !(INNER_LO as isize..=INNER_HI as isize).contains(&nr)
+                        || !(INNER_LO as isize..=INNER_HI as isize).contains(&nc)
+                    {
+                        continue;
+                    }
+                    let (nr, nc) = (nr as usize, nc as usize);
+                    if ship_cells.contains(&(nr, nc)) {
+                        continue; // part of the found Cruiser itself, not a neighbour
+                    }
+                    if self.found_cruiser_adjacency_processed[nr][nc] {
+                        continue;
+                    }
+                    self.found_cruiser_adjacency_processed[nr][nc] = true;
                     self.eliminate_size_at(nr, nc, 3);
                     self.eliminate_size_at(nr, nc, 2);
                 }
@@ -747,10 +916,20 @@ impl AiPlayer {
                     let is_battleship_cell =
                         battleship_cells.is_some_and(|cells| cells.contains(&(row, col)));
                     let is_confirmed_miss = self.confirmed_miss[row][col];
+                    // The direct, most general check: has ANYTHING (a real
+                    // hit whose bound is small enough to eliminate size 3 at
+                    // its own cell, e.g. a bound=2 Frigate hit; the Battleship
+                    // adjacency sweep; an unrelated row/column narrowing —
+                    // anything at all) already driven this cell's combined
+                    // alive value to zero? The other three checks below each
+                    // catch one *specific* route to that same conclusion, but
+                    // this is the ground truth the FSM itself tracks, and the
+                    // only one of the four that catches every route.
+                    let is_dead_for_size3 = self.alive_value(row, col, 3) == 0;
                     let h = Self::max_contiguous_run_horizontal(&discovered, row, col);
                     let v = Self::max_contiguous_run_vertical(&discovered, row, col);
                     let lacks_room = h < 3 && v < 3;
-                    if is_battleship_cell || is_confirmed_miss || lacks_room {
+                    if is_battleship_cell || is_confirmed_miss || is_dead_for_size3 || lacks_room {
                         discovered[row][col] = false;
                         removed = true;
                     }
@@ -786,6 +965,160 @@ impl AiPlayer {
     /// cross-3 bag. Exposed for the debug/inspector UI.
     pub fn cross3_entries(&self) -> &[Cross3Entry] {
         &self.cross3_entries
+    }
+
+    /// If exactly one straight-3 line survives `cruiser_combination_candidates`,
+    /// that's provably a sunk Cruiser's true layout — the real combination is
+    /// always among the candidates, so if it's the only survivor, it must be
+    /// it. Records it (once — `found_cruisers` de-dupes) and treats it
+    /// exactly like a found Battleship: its own cells and every neighbour
+    /// rule out a Cruiser or Frigate. Called from both `apply_salvo` (so
+    /// later salvos that organically complete the picture are caught) and
+    /// `mark_sunk` (to catch it immediately on the exact salvo that sinks a
+    /// ship, before `apply_salvo`'s own view of the sunk count goes stale).
+    fn check_and_apply_found_cruisers(&mut self) {
+        let found = self.cruiser_combination_candidates();
+        if found.len() == 1 && !self.found_cruisers.contains(&found[0]) {
+            self.found_cruisers.push(found[0]);
+            self.apply_found_cruiser_adjacency_elimination(found[0]);
+        }
+    }
+
+    /// When `cruiser_combination_candidates` narrows to exactly 2 possible
+    /// layouts, find a coordinate that belongs to only one of them (the two
+    /// combos are never identical, so at least one such cell always exists).
+    /// Firing it — alongside 2 cells already proven impossible to be a
+    /// Cruiser, so any "3" in the result can only be attributed to this one
+    /// — settles which of the two layouts is real: a 3 confirms the combo
+    /// containing it, no 3 confirms the other one (see `apply_salvo`'s
+    /// handling of `pending_cruiser_disambiguation`). Returns `None` unless
+    /// exactly 2 combos currently survive.
+    fn find_cruiser_disambiguation(
+        &self,
+    ) -> Option<((usize, usize), [(usize, usize); 3], [(usize, usize); 3])> {
+        let combos = self.cruiser_combination_candidates();
+        if combos.len() != 2 {
+            return None;
+        }
+        let (a, b) = (combos[0], combos[1]);
+        for &cell in &a {
+            if !b.contains(&cell) {
+                return Some((cell, a, b));
+            }
+        }
+        for &cell in &b {
+            if !a.contains(&cell) {
+                return Some((cell, b, a));
+            }
+        }
+        None // unreachable if a != b, which cruiser_combination_candidates guarantees
+    }
+
+    /// Recompute `pending_cruiser_disambiguation` from the current
+    /// combination search. Called at the end of `apply_salvo` and from
+    /// `mark_sunk`, mirroring `check_and_apply_found_cruisers`'s two call
+    /// sites for the same reason (catching the exact round something
+    /// changes, not just eventually on some later round).
+    fn refresh_cruiser_disambiguation(&mut self) {
+        self.pending_cruiser_disambiguation = self.find_cruiser_disambiguation();
+    }
+
+    /// True if (row, col) is the coordinate `choose_shots` deliberately fired
+    /// to disambiguate between 2 possible Cruiser layouts — used by
+    /// `Game::fire` to let that one specific refire through even when the
+    /// general refire-allowed toggle is off, since this is a deliberate
+    /// internal strategy, not the debug/experimentation relaxation.
+    pub fn is_pending_cruiser_disambiguation(&self, row: usize, col: usize) -> bool {
+        self.pending_cruiser_disambiguation
+            .is_some_and(|(coord, _, _)| coord == (row, col))
+    }
+
+    /// Once at least one Cruiser is sunk, there's an extra deduction
+    /// available regardless of how many cross-3 salvos have piled up by
+    /// then (could be exactly 3, could be 4, 5, or more if some salvos'
+    /// decoys never panned out): every sunk Cruiser's 3 real cells must each
+    /// have shown up as the (unknown-which-one) hit in some cross-3 salvo,
+    /// and — critically — no two of those 3 real cells can ever have come
+    /// from the SAME salvo entry, since each entry is one salvo's worth of
+    /// ambiguity contributing at most one real Cruiser hit to reason about
+    /// here (two real hits landing in the same salvo would show as two
+    /// separate 3s in that one salvo's bag, which is a different, simpler
+    /// case not handled by this combinatorial search).
+    ///
+    /// So: pick any 3 DISTINCT cross-3 entries (every possible such triple,
+    /// not just "the first 3"), take one still-possible (non-red-flagged —
+    /// see `Cross3Entry::coord_ruled_out`) coordinate from each of the 3
+    /// chosen entries, and keep the combination only if those 3 coordinates
+    /// form a valid straight, contiguous 3-cell line. Every survivor is a
+    /// candidate for what some sunk Cruiser's real layout could be. Purely a
+    /// reporting/debug aid for now — returns every surviving combination
+    /// (deduplicated), doesn't eliminate anything on its own. Empty unless
+    /// at least one Cruiser is sunk.
+    pub fn cruiser_combination_candidates(&self) -> Vec<[(usize, usize); 3]> {
+        if self.sunk_sizes[3] == 0 {
+            return Vec::new();
+        }
+
+        let candidates: Vec<Vec<(usize, usize)>> = self
+            .cross3_entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .coords
+                    .iter()
+                    .zip(entry.coord_ruled_out.iter())
+                    .filter(|(_, &ruled_out)| !ruled_out)
+                    .map(|(&c, _)| c)
+                    .collect()
+            })
+            .collect();
+
+        let n = candidates.len();
+        let mut combinations: Vec<[(usize, usize); 3]> = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                for k in (j + 1)..n {
+                    for &a in &candidates[i] {
+                        for &b in &candidates[j] {
+                            for &c in &candidates[k] {
+                                let mut combo = [a, b, c];
+                                if !Self::is_straight_run_of_3(&combo) {
+                                    continue;
+                                }
+                                combo.sort();
+                                if !combinations.contains(&combo) {
+                                    combinations.push(combo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        combinations
+    }
+
+    /// Every Cruiser layout confirmed so far via `cruiser_combination_candidates`
+    /// narrowing to exactly one surviving combination — for the debug UI to
+    /// render as "found" (e.g. coloured green), distinct from the merely
+    /// still-possible combinations reported elsewhere.
+    pub fn found_cruisers(&self) -> &[[(usize, usize); 3]] {
+        &self.found_cruisers
+    }
+
+    /// True if the 3 given cells, regardless of order, form a contiguous
+    /// straight line of exactly 3 cells — either horizontal (same row,
+    /// consecutive columns) or vertical (same column, consecutive rows).
+    fn is_straight_run_of_3(cells: &[(usize, usize); 3]) -> bool {
+        let mut sorted = *cells;
+        sorted.sort();
+        if sorted[0].0 == sorted[1].0 && sorted[1].0 == sorted[2].0 {
+            return sorted[1].1 == sorted[0].1 + 1 && sorted[2].1 == sorted[1].1 + 1;
+        }
+        if sorted[0].1 == sorted[1].1 && sorted[1].1 == sorted[2].1 {
+            return sorted[1].0 == sorted[0].0 + 1 && sorted[2].0 == sorted[1].0 + 1;
+        }
+        false
     }
 
     /// Every 4-bearing salvo processed so far, in order. Exposed for the
@@ -1295,6 +1628,13 @@ impl AiPlayer {
     /// (finishing the ship off directly), then falls back to the ordinary FSM search for
     /// any slots left over.
     pub fn choose_shots(&self) -> [(usize, usize); 3] {
+        // Resolving which of 2 possible Cruiser layouts is real is valuable
+        // enough to take priority over whatever size is currently being
+        // hunted — see `pending_cruiser_disambiguation`.
+        if let Some((coord, _, _)) = self.pending_cruiser_disambiguation {
+            return self.choose_disambiguation_shots(coord);
+        }
+
         let size = self.current_target_size();
 
         // Once every size >=2 ship is sunk, only submarines are left — the
@@ -1398,6 +1738,57 @@ impl AiPlayer {
                 }
                 if !self.fired[r][c] && !chosen.contains(&(r, c)) {
                     chosen.push((r, c));
+                }
+            }
+        }
+
+        [chosen[0], chosen[1], chosen[2]]
+    }
+
+    /// Builds the salvo that resolves a pending Cruiser-layout ambiguity:
+    /// `target` (the coordinate present in only one of the 2 candidate
+    /// layouts) goes first — deliberately re-fired regardless of whether
+    /// it's already been fired before, since this is a specific internal
+    /// strategy call, not the general refire-allowed relaxation (see
+    /// `Game::fire`'s `is_pending_cruiser_disambiguation` check). The other
+    /// 2 slots are filled with cells already proven impossible to be a
+    /// Cruiser (alive value 0, or outer ring, which never holds one either
+    /// way) — chosen so a 3 anywhere in the resulting bag can only have come
+    /// from `target` itself, making the result unambiguous.
+    fn choose_disambiguation_shots(&self, target: (usize, usize)) -> [(usize, usize); 3] {
+        let mut chosen: Vec<(usize, usize)> = vec![target];
+
+        'safe_unfired: for r in 0..10 {
+            for c in 0..10 {
+                if chosen.len() >= 3 {
+                    break 'safe_unfired;
+                }
+                if (r, c) == target || self.fired[r][c] || chosen.contains(&(r, c)) {
+                    continue;
+                }
+                let is_safe_for_cruiser = if (INNER_LO..=INNER_HI).contains(&r) && (INNER_LO..=INNER_HI).contains(&c) {
+                    self.alive_value(r, c, 3) == 0
+                } else {
+                    true // outer ring never holds a Cruiser
+                };
+                if is_safe_for_cruiser {
+                    chosen.push((r, c));
+                }
+            }
+        }
+
+        // Fallback (should be unreachable in practice — the outer ring alone
+        // is 36 cells, always safe): fill any remaining slot with whatever
+        // unfired cell is left, rather than failing to complete the salvo.
+        if chosen.len() < 3 {
+            for r in 0..10 {
+                for c in 0..10 {
+                    if chosen.len() >= 3 {
+                        break;
+                    }
+                    if (r, c) != target && !self.fired[r][c] && !chosen.contains(&(r, c)) {
+                        chosen.push((r, c));
+                    }
                 }
             }
         }
