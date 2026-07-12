@@ -2056,6 +2056,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ai_cruiser_disambiguation_shots_is_none_once_the_layout_is_fully_pinned() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+        assert_eq!(ai.cruiser_disambiguation_shots(), None, "only one consistent layout remains — nothing left to disambiguate");
+    }
+
+    #[test]
+    fn ai_cruiser_disambiguation_shots_returns_some_when_ambiguous_and_avoids_fired_cells() {
+        let mut ai = AiPlayer::new();
+        // Exactly one of these 3 cells is a real Cruiser hit, but the bag
+        // never says which — many different Cruiser-pair layouts stay
+        // consistent with this alone, so the layout remains genuinely
+        // ambiguous (mirrors the heatmap tests' "fractional" scenario).
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+
+        let heatmap = ai.cruiser_heatmap();
+        let has_fractional_cell = (1..=8).any(|r| (1..=8).any(|c| { let p = heatmap[r - 1][c - 1]; p > 0.0 && p < 1.0 }));
+        assert!(has_fractional_cell, "sanity: this scenario must actually be ambiguous");
+
+        let shots = ai.cruiser_disambiguation_shots().expect("ambiguous layout must produce a disambiguating salvo");
+        let mut seen = std::collections::HashSet::new();
+        for &(r, c) in &shots {
+            assert!((1..=8).contains(&r) && (1..=8).contains(&c), "disambiguation shot {:?} must land in the inner 8x8", (r, c));
+            assert!(!ai.is_fired(r, c), "disambiguation shot {:?} must not repeat an already-fired cell", (r, c));
+            assert!(seen.insert((r, c)), "disambiguation salvo must not repeat a coordinate: {:?}", shots);
+        }
+    }
+
+    #[test]
+    fn ai_choose_shots_prioritizes_cruiser_disambiguation_once_battleship_and_cruisers_are_sunk() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        ai.mark_sunk(4);
+        ai.mark_sunk(3);
+        ai.mark_sunk(3);
+
+        let expected = ai.cruiser_disambiguation_shots().expect("scenario must be ambiguous");
+        let actual = ai.choose_shots();
+        assert_eq!(actual, expected, "choose_shots must defer to cruiser disambiguation once Battleship + both Cruisers are sunk but the layout is still ambiguous");
+    }
+
+    #[test]
+    fn ai_choose_shots_prefers_cruiser_disambiguation_over_frigate_disambiguation() {
+        let mut ai = AiPlayer::new();
+        // Ambiguous evidence for BOTH classes at once.
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [2, 0, 0]);
+        ai.mark_sunk(4);
+        ai.mark_sunk(3);
+        ai.mark_sunk(3);
+        ai.mark_sunk(2);
+        ai.mark_sunk(2);
+        ai.mark_sunk(2);
+
+        let cruiser_expected = ai.cruiser_disambiguation_shots().expect("cruiser scenario must be ambiguous");
+        let frigate_expected = ai.frigate_disambiguation_shots().expect("frigate scenario must be ambiguous");
+        assert_ne!(cruiser_expected, frigate_expected, "sanity: the two disambiguation searches must actually differ here");
+
+        let actual = ai.choose_shots();
+        assert_eq!(actual, cruiser_expected, "Cruiser disambiguation must be tried first, per the explicit priority ordering");
+    }
+
+    #[test]
+    fn ai_choose_shots_falls_through_to_frigate_disambiguation_once_cruisers_are_fully_resolved() {
+        let mut ai = AiPlayer::new();
+        // Cruisers fully pinned down (unambiguous) via 2 all-3s salvos...
+        ai.apply_salvo([(1, 1), (1, 2), (1, 3)], [3, 3, 3]);
+        ai.apply_salvo([(8, 6), (8, 7), (8, 8)], [3, 3, 3]);
+        // ...but the Frigates are still ambiguous.
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [2, 0, 0]);
+        ai.mark_sunk(4);
+        ai.mark_sunk(3);
+        ai.mark_sunk(3);
+        ai.mark_sunk(2);
+        ai.mark_sunk(2);
+        ai.mark_sunk(2);
+
+        assert_eq!(ai.cruiser_disambiguation_shots(), None, "sanity: Cruisers must already be fully resolved");
+        let frigate_expected = ai.frigate_disambiguation_shots().expect("Frigate scenario must be ambiguous");
+        assert_eq!(ai.choose_shots(), frigate_expected, "with Cruisers resolved, choose_shots must move on to Frigate disambiguation");
+    }
+
 
 
 

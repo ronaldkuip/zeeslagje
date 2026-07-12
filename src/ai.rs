@@ -812,19 +812,15 @@ impl AiPlayer {
         possible
     }
 
-    /// Per-cell probability (0.0-1.0) that a Cruiser occupies it, under a
-    /// uniform prior over every currently-consistent pair of Cruiser
-    /// windows (see `consistent_with_salvo_history`): for each cell, the
-    /// fraction of consistent pairs that include it in either window. Same
-    /// 8x8 grid convention as `alive_grids` (indexed 0..8 for board
-    /// rows/cols 1..8). All zeros before any salvo has been fired (nothing
-    /// to condition on yet — every pair is equally "consistent" so no
-    /// single cell stands out; returning a flat 0 rather than a flat
-    /// nonzero avoids implying false precision).
-    pub fn cruiser_heatmap(&self) -> Vec<Vec<f64>> {
+    /// Every distinct pair of non-overlapping Cruiser windows currently
+    /// consistent with the full salvo history — one entry per hypothesis
+    /// "these 2 windows, and nothing else, are the real Cruisers". Shared
+    /// by `cruiser_heatmap` (which marginalizes over this list) and
+    /// `cruiser_disambiguation_shots` (which reasons about the individual
+    /// hypotheses directly, to find a shot that best tells them apart).
+    fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let windows = Self::all_cruiser_windows();
-        let mut counts = [[0u32; 10]; 10];
-        let mut total = 0u32;
+        let mut out = Vec::new();
         for i in 0..windows.len() {
             for j in (i + 1)..windows.len() {
                 if Self::windows_overlap_or_adjacent(&windows[i], &windows[j]) {
@@ -832,37 +828,25 @@ impl AiPlayer {
                 }
                 let union: std::collections::HashSet<(usize, usize)> = windows[i].iter().chain(windows[j].iter()).copied().collect();
                 if Self::consistent_with_salvo_history(&union, &self.salvo_history, 3) {
-                    total += 1;
-                    for &(r, c) in &union {
-                        counts[r][c] += 1;
-                    }
+                    out.push(union);
                 }
             }
         }
-        let mut grid = vec![vec![0.0f64; 8]; 8];
-        if total > 0 && !self.salvo_history.is_empty() {
-            for row in INNER_LO..=INNER_HI {
-                for col in INNER_LO..=INNER_HI {
-                    grid[row - INNER_LO][col - INNER_LO] = counts[row][col] as f64 / total as f64;
-                }
-            }
-        }
-        grid
+        out
     }
 
-    /// Same idea as `cruiser_heatmap`, one size down: per-cell probability
-    /// that a Frigate occupies it, under a uniform prior over every
-    /// currently-consistent TRIPLE of Frigate windows (3 Frigates, not 2).
-    /// Unfiltered triple enumeration over all 112 windows would be
-    /// ~227,920 combinations — `cells_possibly_size` narrows the candidate
-    /// pool first (usually drastically) before the O(n^3) search.
-    pub fn frigate_heatmap(&self) -> Vec<Vec<f64>> {
+    /// Every distinct TRIPLE of non-overlapping Frigate windows (3
+    /// Frigates, not 2) currently consistent with the full salvo history —
+    /// see `consistent_cruiser_candidates`. Unfiltered triple enumeration
+    /// over all 112 windows would be ~227,920 combinations —
+    /// `cells_possibly_size` narrows the candidate pool first (usually
+    /// drastically) before the O(n^3) search.
+    fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let windows = Self::all_frigate_windows();
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
         let candidates: Vec<[(usize, usize); 2]> = windows.into_iter().filter(|w| w.iter().all(|&(r, c)| possible[r][c])).collect();
 
-        let mut counts = [[0u32; 10]; 10];
-        let mut total = 0u32;
+        let mut out = Vec::new();
         let n = candidates.len();
         for i in 0..n {
             for j in (i + 1)..n {
@@ -875,14 +859,30 @@ impl AiPlayer {
                     }
                     let union: std::collections::HashSet<(usize, usize)> = candidates[i].iter().chain(candidates[j].iter()).chain(candidates[k].iter()).copied().collect();
                     if Self::consistent_with_salvo_history(&union, &self.salvo_history, 2) {
-                        total += 1;
-                        for &(r, c) in &union {
-                            counts[r][c] += 1;
-                        }
+                        out.push(union);
                     }
                 }
             }
         }
+        out
+    }
+
+    /// Marginalize a list of consistent candidate hypotheses (each the
+    /// full cell-set of one hypothesis) into a per-cell probability grid —
+    /// shared body for `cruiser_heatmap`/`frigate_heatmap`. Same 8x8 grid
+    /// convention as `alive_grids` (indexed 0..8 for board rows/cols 1..8).
+    /// All zeros before any salvo has been fired (nothing to condition on
+    /// yet — every hypothesis is equally "consistent" so no single cell
+    /// stands out; returning a flat 0 rather than a flat nonzero avoids
+    /// implying false precision).
+    fn heatmap_from_candidates(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Vec<Vec<f64>> {
+        let mut counts = [[0u32; 10]; 10];
+        for cand in candidates {
+            for &(r, c) in cand {
+                counts[r][c] += 1;
+            }
+        }
+        let total = candidates.len();
         let mut grid = vec![vec![0.0f64; 8]; 8];
         if total > 0 && !self.salvo_history.is_empty() {
             for row in INNER_LO..=INNER_HI {
@@ -892,6 +892,128 @@ impl AiPlayer {
             }
         }
         grid
+    }
+
+    /// Per-cell probability (0.0-1.0) that a Cruiser occupies it, under a
+    /// uniform prior over every currently-consistent pair of Cruiser
+    /// windows. See `heatmap_from_candidates`.
+    pub fn cruiser_heatmap(&self) -> Vec<Vec<f64>> {
+        self.heatmap_from_candidates(&self.consistent_cruiser_candidates())
+    }
+
+    /// Same idea as `cruiser_heatmap`, one size down: per-cell probability
+    /// that a Frigate occupies it, under a uniform prior over every
+    /// currently-consistent TRIPLE of Frigate windows. See
+    /// `heatmap_from_candidates`.
+    pub fn frigate_heatmap(&self) -> Vec<Vec<f64>> {
+        self.heatmap_from_candidates(&self.consistent_frigate_candidates())
+    }
+
+    /// Given the currently consistent candidate hypotheses for a ship
+    /// class, pick 3 unfired cells whose combined salvo result narrows the
+    /// candidate set as much as possible in the worst case — a minimax
+    /// "20 questions" search. `None` if there's nothing left to
+    /// disambiguate (0 or 1 consistent hypotheses).
+    ///
+    /// The search is scoped to "informative" cells — ones where the
+    /// hypotheses disagree (some include it, some don't) — since firing
+    /// anywhere else can't distinguish between any surviving hypothesis:
+    /// every consistent candidate already agrees on the rest of the board,
+    /// so the result there is 100% predictable and teaches nothing. Cells
+    /// already fired are excluded even if they still show a fractional
+    /// split (an earlier salvo whose bag didn't reveal which of its 3
+    /// cells was the hit) — we already know their true value from the
+    /// log, so re-firing teaches nothing new.
+    ///
+    /// The informative pool is capped for combinatorial feasibility,
+    /// keeping the individually most-discriminating cells (closest to an
+    /// even split) — a pragmatic approximation of the true joint-optimal
+    /// search, not guaranteed globally optimal, but always sound: any
+    /// salvo returned is guaranteed to strictly narrow the candidate set
+    /// on the worst-case outcome, never to leave it unchanged.
+    fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Option<[(usize, usize); 3]> {
+        if candidates.len() <= 1 {
+            return None;
+        }
+
+        let mut counts: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+        for cand in candidates {
+            for &cell in cand {
+                *counts.entry(cell).or_insert(0) += 1;
+            }
+        }
+        let total = candidates.len();
+        let mut informative: Vec<(usize, usize)> = counts
+            .iter()
+            .filter(|&(&(r, c), &n)| n > 0 && n < total && !self.fired[r][c])
+            .map(|(&cell, _)| cell)
+            .collect();
+
+        const MAX_POOL: usize = 14;
+        if informative.len() > MAX_POOL {
+            informative.sort_by_key(|cell| {
+                let n = counts[cell];
+                (n as isize - (total as isize - n as isize)).unsigned_abs()
+            });
+            informative.truncate(MAX_POOL);
+        }
+
+        let mut pool = informative;
+        if pool.len() < 3 {
+            // Rare: not enough distinct informative cells left to fill a
+            // full salvo. Pad with arbitrary unfired inner cells so a shot
+            // can still be formed — these carry no discriminating power of
+            // their own, they just fill out the salvo.
+            'pad: for r in INNER_LO..=INNER_HI {
+                for c in INNER_LO..=INNER_HI {
+                    if pool.len() >= 3 {
+                        break 'pad;
+                    }
+                    if !self.fired[r][c] && !pool.contains(&(r, c)) {
+                        pool.push((r, c));
+                    }
+                }
+            }
+        }
+        if pool.len() < 3 {
+            return None;
+        }
+
+        let mut best: Option<([(usize, usize); 3], usize)> = None;
+        for i in 0..pool.len() {
+            for j in (i + 1)..pool.len() {
+                for k in (j + 1)..pool.len() {
+                    let salvo = [pool[i], pool[j], pool[k]];
+                    // For every hypothesis, how many of these 3 cells it
+                    // predicts as hits — the only thing the resulting
+                    // bag's count of matching values can ever reveal about
+                    // which hypothesis is real (see
+                    // `consistent_with_salvo_history`).
+                    let mut buckets = [0usize; 4];
+                    for cand in candidates {
+                        let hits = salvo.iter().filter(|cell| cand.contains(cell)).count();
+                        buckets[hits] += 1;
+                    }
+                    let worst = *buckets.iter().max().unwrap();
+                    if best.as_ref().is_none_or(|(_, best_worst)| worst < *best_worst) {
+                        best = Some((salvo, worst));
+                    }
+                }
+            }
+        }
+        best.map(|(salvo, _)| salvo)
+    }
+
+    /// Best next salvo to disambiguate the Cruisers' exact layout, once
+    /// both are sunk but more than one placement remains consistent with
+    /// the evidence so far. See `disambiguation_shots`.
+    pub fn cruiser_disambiguation_shots(&self) -> Option<[(usize, usize); 3]> {
+        self.disambiguation_shots(&self.consistent_cruiser_candidates())
+    }
+
+    /// Same idea as `cruiser_disambiguation_shots`, one size down.
+    pub fn frigate_disambiguation_shots(&self) -> Option<[(usize, usize); 3]> {
+        self.disambiguation_shots(&self.consistent_frigate_candidates())
     }
 
     /// Re-check, for every cross-3 entry, whether each of its 3 ORIGINAL fired
@@ -1703,6 +1825,30 @@ impl AiPlayer {
         let avoid_as_filler: Vec<(usize, usize)> = Vec::new();
 
         let size = self.current_target_size();
+
+        // Disambiguation takes priority over ever moving on to a smaller
+        // class, but only once the Battleship and both Cruisers are fully
+        // sunk — Battleship hunting always wins first regardless (matching
+        // its priority everywhere else in this function), and Cruiser
+        // disambiguation is deliberately checked and resolved before
+        // Frigate disambiguation is even attempted: pinning down the
+        // Cruisers first also shrinks the Frigate candidate search once
+        // its turn comes (fewer cells left that could still be a Frigate,
+        // since a confirmed Cruiser cell can never also be a Frigate
+        // cell). Independent of `current_target_size`/`freeze_before_frigates`
+        // (a debug-only toggle for the ordinary hunting FSM) — this is a
+        // separate, higher-priority activity that only ever fires once
+        // there's nothing bigger left to actually hunt.
+        if self.size_fully_found(4) && self.size_fully_found(3) {
+            if let Some(shots) = self.cruiser_disambiguation_shots() {
+                return shots;
+            }
+            if self.size_fully_found(2) {
+                if let Some(shots) = self.frigate_disambiguation_shots() {
+                    return shots;
+                }
+            }
+        }
 
         // Once every size >=2 ship is sunk, only submarines are left — the
         // line-FSM tables above only cover sizes 4/3/2, so this must branch off
