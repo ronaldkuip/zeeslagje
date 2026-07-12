@@ -249,12 +249,6 @@
     padding:1px 5px;
     font-weight:600;
   }
-  .ruled-out-coord{
-    border:2px solid var(--coral-bright);
-    border-radius:3px;
-    padding:1px 5px;
-    font-weight:600;
-  }
   .coord-flag{
     display:inline-block;
     width:10px;
@@ -717,6 +711,7 @@
   let selected = [];      // array of flat indices, up to 3
   let suggested = [];     // array of flat indices from ai_suggest
   let won = false;
+  let fleetClearedShown = false; // true once the "all size >=2 ships sunk" popup has fired this game
 
   const bootNotice = document.getElementById('bootNotice');
   const gameEl = document.getElementById('game');
@@ -1271,16 +1266,16 @@
     turnNo.textContent = game.turn();
     hitCount.textContent = countHits();
 
-    if (salvo.newly_ruled_out_coords && salvo.newly_ruled_out_coords.length > 0){
-      const list = salvo.newly_ruled_out_coords
-        .map(coord => `<span class="ruled-out-coord">${coord}</span>`)
-        .join(', ');
-      const plural = salvo.newly_ruled_out_coords.length > 1;
-      openModal(
-        'Cruiser hit ruled out',
-        `<p>${list} ${plural ? 'are' : 'is'} no longer a possible Cruiser hit — no placement of size 3 passes through ${plural ? 'them' : 'it'} any more.</p>
-         <div class="modal-footnote">Every cross-3 salvo's 3 fired coordinates are re-checked at the end of every round (see the Cross-3 bags debug popup).</div>`
-      );
+    if (!fleetClearedShown && !game.is_won()){
+      const ships = JSON.parse(game.ships_json());
+      const bigShipsSunk = ships.length > 0 && ships.filter(s => s.size >= 2).every(s => s.sunk);
+      if (bigShipsSunk){
+        fleetClearedShown = true;
+        openModal(
+          'Fleet cleared',
+          `<p>Every Frigate, Cruiser, and the Battleship are sunk. Only Submarines remain.</p>`
+        );
+      }
     }
 
     if (game.is_won()){
@@ -1320,6 +1315,7 @@
     game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
     selected = [];
     won = false;
+    fleetClearedShown = false;
     victoryBanner.classList.remove('show');
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
