@@ -431,20 +431,6 @@
     min-height:16px;
   }
 
-  .victory-banner{
-    display:none;
-    background:var(--brass);
-    color:#2a1c00;
-    border-radius:6px;
-    padding:16px 20px;
-    margin-bottom:18px;
-    font-family:'Newsreader', serif;
-    font-style:italic;
-    font-weight:600;
-    font-size:20px;
-  }
-  .victory-banner.show{display:block;}
-
   .loading-notice, .error-notice{
     font-family:'IBM Plex Mono', monospace;
     font-size:13px;
@@ -621,8 +607,6 @@
   <div id="bootNotice" class="loading-notice">Loading chart table…</div>
 
   <div id="game" style="display:none;">
-    <div class="victory-banner" id="victoryBanner">All ships accounted for. Fleet destroyed in <span id="victoryTurns"></span> turns.</div>
-
     <div class="layout">
       <!-- Chart -->
       <section class="chart-card">
@@ -754,8 +738,6 @@
   const modalTitle = document.getElementById('modalTitle');
   const modalContent = document.getElementById('modalContent');
   const modalClose = document.getElementById('modalClose');
-  const victoryBanner = document.getElementById('victoryBanner');
-  const victoryTurns = document.getElementById('victoryTurns');
   const turnNo = document.getElementById('turnNo');
   const hitCount = document.getElementById('hitCount');
   const hitTotal = document.getElementById('hitTotal');
@@ -1282,28 +1264,34 @@
       const bigShipsSunk = ships.length > 0 && ships.filter(s => s.size >= 2).every(s => s.sunk);
       if (bigShipsSunk){
         fleetClearedShown = true;
-        openModal(
-          'Fleet cleared',
-          `<p>Every Frigate, Cruiser, and the Battleship are sunk. Only Submarines remain.</p>`
-        );
+        // No popup here — the auto-play button turning green (see
+        // runAutoPlay/setAutoPlayState) is signal enough, for both automated
+        // and manual play.
+        setAutoPlayState('green');
       }
     }
 
     if (game.is_won()){
       won = true;
-      victoryTurns.textContent = salvo.turn;
-      victoryBanner.classList.add('show');
-      fireBtn.disabled = true;
-      useAdvisoryBtn.disabled = true;
+      logGameEnd(salvo.turn);
       statusLine.textContent = 'Fleet destroyed. Start a new game to sail again.';
-      selectionSlots.innerHTML = '';
-      advisoryReadout.innerHTML = '';
-      gridScale.querySelectorAll('.cell.suggested').forEach(el => el.classList.remove('suggested'));
-      return;
     }
 
     renderSelection();
     refreshAdvisory();
+  }
+
+  // Best-effort: appends one line to simpleresult.txt via the local dev
+  // server's /log endpoint (see serve.py) — a plain browser can't write to
+  // the filesystem directly. Silently does nothing if that endpoint isn't
+  // available (e.g. serving via plain `python -m http.server`).
+  function logGameEnd(turns){
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    const line = `${date} ${time}  turns: ${turns}`;
+    fetch('/log', { method: 'POST', body: line }).catch(() => { /* no logging server available — ignore */ });
   }
 
   function sleep(ms){
@@ -1318,9 +1306,12 @@
   // Repeatedly uses the AI advisory and fires, exactly as a user clicking
   // "Use these 3" then "Fire salvo" would, up to a fixed shot cap — stopping
   // early the moment the Battleship, both Cruisers, and all 3 Frigates are
-  // sunk (the same milestone the "Fleet cleared" popup already reports; see
-  // its check in `doFire`). Turns the button green on that early, successful
-  // stop, or red if the cap is reached first without clearing the fleet.
+  // sunk (see the `fleetClearedShown` check in `doFire`, which also turns
+  // the button green live, whether that milestone is reached via this loop
+  // or ordinary manual play). No popup either way — the button colour alone
+  // reports the outcome. Turns red (with an explanatory popup, since colour
+  // alone doesn't say why) if the cap is reached first without clearing the
+  // fleet.
   async function runAutoPlay(){
     if (autoPlayRunning || won) return;
     autoPlayRunning = true;
@@ -1385,7 +1376,6 @@
     selected = [];
     won = false;
     fleetClearedShown = false;
-    victoryBanner.classList.remove('show');
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
     autoPlayBtn.disabled = false;

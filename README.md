@@ -44,11 +44,17 @@ This produces `pkg/` containing the WASM binary and JS bindings.
 ## Running
 
 ```bash
-python3 -m http.server 8080
+python3 serve.py 8080
 # open http://localhost:8080
 ```
 
 > **Note:** Must be served over HTTP (not `file://`) due to WASM/ES module restrictions.
+
+`serve.py` is a thin wrapper around `python -m http.server` that additionally
+accepts `POST /log`, which the page uses to append one line per finished game
+(date, time, turns played) to `simpleresult.txt`. Plain `python -m
+http.server` still works for playing — the page just silently skips logging
+if that endpoint isn't there.
 
 ## WASM API
 
