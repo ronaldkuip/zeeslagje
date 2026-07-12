@@ -1409,12 +1409,14 @@
       resetGame();
       autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
       await runAutoPlay();
+      batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
     }
 
     batchRunning = false;
     autoPlayBatchBtn.textContent = originalLabel;
     autoPlayBatchBtn.disabled = false;
     batchSizeInput.disabled = false;
+    batchSizeInput.value = n; // restore the original count, ready to run again
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
   }
