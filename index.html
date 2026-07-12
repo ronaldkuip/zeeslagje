@@ -343,6 +343,17 @@
   .btn-red:hover:not(:disabled){filter:brightness(1.08);}
   .btn-green{background:var(--flag-green); color:#eafff1;}
   .btn-green:hover:not(:disabled){filter:brightness(1.08);}
+  .batch-input{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+    width:80px;
+    padding:5px 6px;
+    border:1px solid var(--paper-muted);
+    border-radius:3px;
+    background:rgba(0,0,0,0.03);
+    color:var(--ink);
+  }
+  .batch-input:disabled{opacity:0.5;}
 
   .fire-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
   .selection-slots{
@@ -645,6 +656,11 @@
           <div class="fire-row" style="margin-top:10px;">
             <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire, up to 30 shots, stopping early once the Battleship, Cruisers, and Frigates are all sunk">Auto-play (30 shots)</button>
           </div>
+          <div class="fire-row" style="margin-top:10px;">
+            <label for="batchSizeInput" style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink);">Batch size</label>
+            <input type="number" id="batchSizeInput" class="batch-input" min="1" max="100000" step="1" value="1">
+            <button class="btn btn-teal" id="autoPlayBatchBtn" title="Start a fresh game and auto-play it, repeated batch-size times in a row">Autorun batch</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -706,6 +722,7 @@
   let won = false;
   let fleetClearedShown = false; // true once the "all size >=2 ships sunk" popup has fired this game
   let autoPlayRunning = false;
+  let batchRunning = false;
 
   const bootNotice = document.getElementById('bootNotice');
   const gameEl = document.getElementById('game');
@@ -716,6 +733,8 @@
   const fireBtn = document.getElementById('fireBtn');
   const clearBtn = document.getElementById('clearBtn');
   const autoPlayBtn = document.getElementById('autoPlayBtn');
+  const batchSizeInput = document.getElementById('batchSizeInput');
+  const autoPlayBatchBtn = document.getElementById('autoPlayBatchBtn');
   const statusLine = document.getElementById('statusLine');
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
@@ -1273,7 +1292,7 @@
 
     if (game.is_won()){
       won = true;
-      logGameEnd(salvo.turn);
+      logGameEnd('full-win', salvo.turn);
       statusLine.textContent = 'Fleet destroyed. Start a new game to sail again.';
     }
 
@@ -1284,13 +1303,15 @@
   // Best-effort: appends one line to simpleresult.txt via the local dev
   // server's /log endpoint (see serve.py) — a plain browser can't write to
   // the filesystem directly. Silently does nothing if that endpoint isn't
-  // available (e.g. serving via plain `python -m http.server`).
-  function logGameEnd(turns){
+  // available (e.g. serving via plain `python -m http.server`). `label`
+  // distinguishes WHY the game/run ended (a true full win, or an auto-play
+  // run stopping at fleet-cleared or timing out) — see call sites.
+  function logGameEnd(label, turns){
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
     const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
     const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-    const line = `${date} ${time}  turns: ${turns}`;
+    const line = `${date} ${time}  ${label}  turns: ${turns}`;
     fetch('/log', { method: 'POST', body: line }).catch(() => { /* no logging server available — ignore */ });
   }
 
@@ -1346,13 +1367,56 @@
 
     if (cleared){
       setAutoPlayState('green');
+      // `won` (a true full win) is logged separately, right when it happens,
+      // inside doFire — skip a second, redundant line for the same moment.
+      if (!won){
+        logGameEnd('auto-play cleared', game.turn());
+      }
     } else {
       setAutoPlayState('red');
+      logGameEnd('auto-play timeout', game.turn());
       openModal(
         'Things are not well',
         `<p>${shotsTaken} shots fired and the Battleship, Cruisers, and Frigates still aren't all sunk.</p>`
       );
     }
+  }
+
+  // Starts a fresh game and runs `runAutoPlay` on it, repeated `batchSizeInput`
+  // times in a row — each iteration is a full, independent game (same as
+  // clicking "New game" then "Auto-play" by hand, batch-size times).
+  // `autoPlayBtn` keeps reporting the MOST RECENT game's outcome live
+  // throughout, same as it does outside a batch; `autoPlayBatchBtn`'s own
+  // label just tracks overall batch progress.
+  async function runAutoPlayBatch(){
+    if (autoPlayRunning || batchRunning) return;
+    const n = parseInt(batchSizeInput.value, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 100000){
+      statusLine.textContent = 'Batch size must be a whole number between 1 and 100000.';
+      return;
+    }
+
+    batchRunning = true;
+    autoPlayBatchBtn.disabled = true;
+    autoPlayBtn.disabled = true;
+    batchSizeInput.disabled = true;
+    resetBtn.disabled = true;
+    restartSameBoardBtn.disabled = true;
+    const originalLabel = autoPlayBatchBtn.textContent;
+
+    for (let i = 1; i <= n; i++){
+      autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
+      resetGame();
+      autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
+      await runAutoPlay();
+    }
+
+    batchRunning = false;
+    autoPlayBatchBtn.textContent = originalLabel;
+    autoPlayBatchBtn.disabled = false;
+    batchSizeInput.disabled = false;
+    resetBtn.disabled = false;
+    restartSameBoardBtn.disabled = false;
   }
 
   function countHits(){
@@ -1442,6 +1506,7 @@
       renderSelection();
     });
     autoPlayBtn.addEventListener('click', runAutoPlay);
+    autoPlayBatchBtn.addEventListener('click', runAutoPlayBatch);
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
