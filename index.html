@@ -337,6 +337,12 @@
   .btn-brass:hover:not(:disabled){filter:brightness(1.1);}
   .btn-ghost{background:transparent; border:1px solid var(--paper-muted); color:var(--ink);}
   .btn-ghost:hover:not(:disabled){background:rgba(0,0,0,0.05);}
+  .btn-blue{background:var(--flag-blue); color:#eaf1ff;}
+  .btn-blue:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-red{background:var(--coral-bright); color:#3a0a00;}
+  .btn-red:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-green{background:var(--flag-green); color:#eafff1;}
+  .btn-green:hover:not(:disabled){filter:brightness(1.08);}
 
   .fire-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
   .selection-slots{
@@ -652,6 +658,9 @@
             <button class="btn btn-ghost" id="clearBtn">Clear</button>
           </div>
           <div class="status-line" id="statusLine">Select 3 coordinates on the chart, or accept the AI's advisory.</div>
+          <div class="fire-row" style="margin-top:10px;">
+            <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire, up to 30 shots, stopping early once the Battleship, Cruisers, and Frigates are all sunk">Auto-play (30 shots)</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -712,6 +721,7 @@
   let suggested = [];     // array of flat indices from ai_suggest
   let won = false;
   let fleetClearedShown = false; // true once the "all size >=2 ships sunk" popup has fired this game
+  let autoPlayRunning = false;
 
   const bootNotice = document.getElementById('bootNotice');
   const gameEl = document.getElementById('game');
@@ -721,6 +731,7 @@
   const selectionSlots = document.getElementById('selectionSlots');
   const fireBtn = document.getElementById('fireBtn');
   const clearBtn = document.getElementById('clearBtn');
+  const autoPlayBtn = document.getElementById('autoPlayBtn');
   const statusLine = document.getElementById('statusLine');
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
@@ -1295,6 +1306,64 @@
     refreshAdvisory();
   }
 
+  function sleep(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function setAutoPlayState(state){
+    autoPlayBtn.classList.remove('btn-blue', 'btn-red', 'btn-green');
+    autoPlayBtn.classList.add(`btn-${state}`);
+  }
+
+  // Repeatedly uses the AI advisory and fires, exactly as a user clicking
+  // "Use these 3" then "Fire salvo" would, up to a fixed shot cap — stopping
+  // early the moment the Battleship, both Cruisers, and all 3 Frigates are
+  // sunk (the same milestone the "Fleet cleared" popup already reports; see
+  // its check in `doFire`). Turns the button green on that early, successful
+  // stop, or red if the cap is reached first without clearing the fleet.
+  async function runAutoPlay(){
+    if (autoPlayRunning || won) return;
+    autoPlayRunning = true;
+    autoPlayBtn.disabled = true;
+    resetBtn.disabled = true;
+    restartSameBoardBtn.disabled = true;
+    const originalLabel = autoPlayBtn.textContent;
+    autoPlayBtn.textContent = 'Auto-playing…';
+
+    const MAX_SHOTS = 30;
+    let shotsTaken = 0;
+    let cleared = won || fleetClearedShown;
+
+    while (!cleared && shotsTaken < MAX_SHOTS){
+      useAdvisoryBtn.click();
+      if (fireBtn.disabled){
+        // No valid 3-cell advisory available (shouldn't normally happen) —
+        // stop rather than spin forever on a no-op.
+        break;
+      }
+      fireBtn.click();
+      shotsTaken++;
+      cleared = won || fleetClearedShown;
+      await sleep(300);
+    }
+
+    autoPlayRunning = false;
+    resetBtn.disabled = false;
+    restartSameBoardBtn.disabled = false;
+    autoPlayBtn.textContent = originalLabel;
+    autoPlayBtn.disabled = won;
+
+    if (cleared){
+      setAutoPlayState('green');
+    } else {
+      setAutoPlayState('red');
+      openModal(
+        'Things are not well',
+        `<p>${shotsTaken} shots fired and the Battleship, Cruisers, and Frigates still aren't all sunk.</p>`
+      );
+    }
+  }
+
   function countHits(){
     // total ships' combined size fired-and-hit == total_hits when won;
     // we approximate live hit count via fleet + log is not directly exposed,
@@ -1319,6 +1388,9 @@
     victoryBanner.classList.remove('show');
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
+    autoPlayBtn.disabled = false;
+    autoPlayBtn.textContent = 'Auto-play (30 shots)';
+    setAutoPlayState('blue');
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
     gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated'));
     turnNo.textContent = game.turn();
@@ -1379,6 +1451,7 @@
       selected = suggested.slice(0, 3);
       renderSelection();
     });
+    autoPlayBtn.addEventListener('click', runAutoPlay);
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
