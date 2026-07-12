@@ -173,6 +173,15 @@ pub struct AiPlayer {
     /// despite never being deliberately targeted, `current_target_size`
     /// still moves on to 1 normally.
     freeze_before_frigates: bool,
+    /// Every salvo ever processed, in order — coordinates and result values
+    /// exactly as fired, regardless of what they contained (unlike
+    /// `cross3_entries`/`cross2_entries`, which only keep salvos with at
+    /// least one 3 or 2 respectively). Needed for `cruiser_heatmap`/
+    /// `frigate_heatmap`'s full-history consistency check: a salvo with
+    /// NEITHER a 3 nor a 2 is still real evidence (it proves none of its 3
+    /// cells hold that ship size), and skipping it would understate how
+    /// much is actually known.
+    salvo_history: Vec<([(usize, usize); 3], [usize; 3])>,
 }
 
 const INNER_LO: usize = 1;
@@ -204,6 +213,7 @@ impl AiPlayer {
             cross2_entries: Vec::new(),
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
+            salvo_history: Vec::new(),
         }
     }
 
@@ -421,6 +431,7 @@ impl AiPlayer {
     /// possibility open while still letting us eliminate sizes that are impossible
     /// under every permutation.
     pub fn apply_salvo(&mut self, coords: [(usize, usize); 3], values: [usize; 3]) {
+        self.salvo_history.push((coords, values));
         for &(r, c) in &coords {
             self.mark_fired(r, c);
         }
@@ -711,6 +722,176 @@ impl AiPlayer {
             }
         }
         (horizontal, vertical, combined)
+    }
+
+    /// Mirrors `try_place`'s own adjacency check in lib.rs: overlap or any
+    /// orthogonal/diagonal neighbour (dr<=1 && dc<=1) between any cell of
+    /// `a` and any cell of `b`. Ship-size-agnostic — a Cruiser window and a
+    /// Frigate window are just as mutually exclusive as 2 windows of the
+    /// same size.
+    fn windows_overlap_or_adjacent(a: &[(usize, usize)], b: &[(usize, usize)]) -> bool {
+        a.iter().any(|&(ar, ac)| {
+            b.iter().any(|&(br, bc)| {
+                let dr = (ar as isize - br as isize).unsigned_abs();
+                let dc = (ac as isize - bc as isize).unsigned_abs();
+                dr <= 1 && dc <= 1
+            })
+        })
+    }
+
+    /// Is the hypothesis "the cells in `window_union` are exactly every
+    /// real cell of size `ship_value`, and nothing else is" consistent with
+    /// every salvo fired so far? See `salvo_history`'s doc comment for why
+    /// this needs the FULL raw history, not just `cross3_entries`/
+    /// `cross2_entries`. Necessary because a "3" (or "2") can only ever
+    /// come from a Cruiser (or Frigate) cell; sufficient because it pins
+    /// down, for every fired cell, whether it does or doesn't belong to
+    /// this hypothesis, without needing anything else about what's really
+    /// at the salvo's other 2 cells. This is the exact same, independently
+    /// self-validated algorithm as `measure_identifiability.rs` — see there
+    /// for the fuller derivation and the empirical confirmation that it
+    /// never disagrees with ground truth.
+    fn consistent_with_salvo_history(window_union: &std::collections::HashSet<(usize, usize)>, history: &[([(usize, usize); 3], [usize; 3])], ship_value: usize) -> bool {
+        history.iter().all(|(coords, values)| {
+            let hits_in_hypothesis = coords.iter().filter(|c| window_union.contains(c)).count();
+            let matches_in_bag = values.iter().filter(|&&v| v == ship_value).count();
+            hits_in_hypothesis == matches_in_bag
+        })
+    }
+
+    /// Every straight-3 window in the inner 8x8 grid (48 horizontal + 48
+    /// vertical = 96 total).
+    fn all_cruiser_windows() -> Vec<[(usize, usize); 3]> {
+        let mut windows = Vec::new();
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=(INNER_HI - 2) {
+                windows.push([(r, c), (r, c + 1), (r, c + 2)]);
+            }
+        }
+        for c in INNER_LO..=INNER_HI {
+            for r in INNER_LO..=(INNER_HI - 2) {
+                windows.push([(r, c), (r + 1, c), (r + 2, c)]);
+            }
+        }
+        windows
+    }
+
+    /// Every straight-2 window in the inner 8x8 grid (56 horizontal + 56
+    /// vertical = 112 total).
+    fn all_frigate_windows() -> Vec<[(usize, usize); 2]> {
+        let mut windows = Vec::new();
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=(INNER_HI - 1) {
+                windows.push([(r, c), (r, c + 1)]);
+            }
+        }
+        for c in INNER_LO..=INNER_HI {
+            for r in INNER_LO..=(INNER_HI - 1) {
+                windows.push([(r, c), (r + 1, c)]);
+            }
+        }
+        windows
+    }
+
+    /// A cell is provably NOT a cell of size `ship_value` if it was ever
+    /// fired as part of a salvo whose result bag contains no `ship_value`
+    /// at all. Cheap, always-sound necessary condition, used purely to
+    /// shrink the candidate pool before the combinatorial search below (an
+    /// imperfect/too-permissive filter would just mean more work, never a
+    /// wrong answer — the full consistency check is what actually decides
+    /// correctness).
+    fn cells_possibly_size(history: &[([(usize, usize); 3], [usize; 3])], ship_value: usize) -> [[bool; 10]; 10] {
+        let mut possible = [[true; 10]; 10];
+        for (coords, values) in history {
+            if !values.contains(&ship_value) {
+                for &(r, c) in coords {
+                    possible[r][c] = false;
+                }
+            }
+        }
+        possible
+    }
+
+    /// Per-cell probability (0.0-1.0) that a Cruiser occupies it, under a
+    /// uniform prior over every currently-consistent pair of Cruiser
+    /// windows (see `consistent_with_salvo_history`): for each cell, the
+    /// fraction of consistent pairs that include it in either window. Same
+    /// 8x8 grid convention as `alive_grids` (indexed 0..8 for board
+    /// rows/cols 1..8). All zeros before any salvo has been fired (nothing
+    /// to condition on yet — every pair is equally "consistent" so no
+    /// single cell stands out; returning a flat 0 rather than a flat
+    /// nonzero avoids implying false precision).
+    pub fn cruiser_heatmap(&self) -> Vec<Vec<f64>> {
+        let windows = Self::all_cruiser_windows();
+        let mut counts = [[0u32; 10]; 10];
+        let mut total = 0u32;
+        for i in 0..windows.len() {
+            for j in (i + 1)..windows.len() {
+                if Self::windows_overlap_or_adjacent(&windows[i], &windows[j]) {
+                    continue;
+                }
+                let union: std::collections::HashSet<(usize, usize)> = windows[i].iter().chain(windows[j].iter()).copied().collect();
+                if Self::consistent_with_salvo_history(&union, &self.salvo_history, 3) {
+                    total += 1;
+                    for &(r, c) in &union {
+                        counts[r][c] += 1;
+                    }
+                }
+            }
+        }
+        let mut grid = vec![vec![0.0f64; 8]; 8];
+        if total > 0 && !self.salvo_history.is_empty() {
+            for row in INNER_LO..=INNER_HI {
+                for col in INNER_LO..=INNER_HI {
+                    grid[row - INNER_LO][col - INNER_LO] = counts[row][col] as f64 / total as f64;
+                }
+            }
+        }
+        grid
+    }
+
+    /// Same idea as `cruiser_heatmap`, one size down: per-cell probability
+    /// that a Frigate occupies it, under a uniform prior over every
+    /// currently-consistent TRIPLE of Frigate windows (3 Frigates, not 2).
+    /// Unfiltered triple enumeration over all 112 windows would be
+    /// ~227,920 combinations — `cells_possibly_size` narrows the candidate
+    /// pool first (usually drastically) before the O(n^3) search.
+    pub fn frigate_heatmap(&self) -> Vec<Vec<f64>> {
+        let windows = Self::all_frigate_windows();
+        let possible = Self::cells_possibly_size(&self.salvo_history, 2);
+        let candidates: Vec<[(usize, usize); 2]> = windows.into_iter().filter(|w| w.iter().all(|&(r, c)| possible[r][c])).collect();
+
+        let mut counts = [[0u32; 10]; 10];
+        let mut total = 0u32;
+        let n = candidates.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if Self::windows_overlap_or_adjacent(&candidates[i], &candidates[j]) {
+                    continue;
+                }
+                for k in (j + 1)..n {
+                    if Self::windows_overlap_or_adjacent(&candidates[i], &candidates[k]) || Self::windows_overlap_or_adjacent(&candidates[j], &candidates[k]) {
+                        continue;
+                    }
+                    let union: std::collections::HashSet<(usize, usize)> = candidates[i].iter().chain(candidates[j].iter()).chain(candidates[k].iter()).copied().collect();
+                    if Self::consistent_with_salvo_history(&union, &self.salvo_history, 2) {
+                        total += 1;
+                        for &(r, c) in &union {
+                            counts[r][c] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut grid = vec![vec![0.0f64; 8]; 8];
+        if total > 0 && !self.salvo_history.is_empty() {
+            for row in INNER_LO..=INNER_HI {
+                for col in INNER_LO..=INNER_HI {
+                    grid[row - INNER_LO][col - INNER_LO] = counts[row][col] as f64 / total as f64;
+                }
+            }
+        }
+        grid
     }
 
     /// Re-check, for every cross-3 entry, whether each of its 3 ORIGINAL fired

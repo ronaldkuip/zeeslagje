@@ -223,6 +223,17 @@
     border-color:var(--cross-yellow);
   }
 
+  .cell .heat-half{
+    position:absolute;
+    top:0; bottom:0;
+    width:50%;
+    pointer-events:none;
+    opacity:0;
+    transition:opacity 150ms ease;
+  }
+  .cell .heat-cruiser{ left:0; background:var(--coral-bright); }
+  .cell .heat-frigate{ right:0; background:#B15FE0; }
+
   .chip-list{
     display:flex;
     flex-wrap:wrap;
@@ -634,6 +645,8 @@
           <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
           <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half)</span>
         </div>
       </section>
 
@@ -643,6 +656,15 @@
           <h2>AI Advisory</h2>
           <div class="advisory-readout" id="advisoryReadout"></div>
           <button class="btn btn-teal" id="useAdvisoryBtn">Use these 3</button>
+        </div>
+
+        <div class="panel">
+          <h2>Probability Heatmap</h2>
+          <div class="refire-toggle-group">
+            <label class="refire-toggle"><input type="checkbox" id="heatmapCruiserToggle" checked> Cruiser (red, left half)</label>
+            <label class="refire-toggle"><input type="checkbox" id="heatmapFrigateToggle" checked> Frigate (purple, right half)</label>
+          </div>
+          <div class="modal-footnote" style="margin-top:8px;">Per-cell odds a Cruiser/Frigate occupies it, given every salvo fired so far — flat until the first hit narrows things down.</div>
         </div>
 
         <div class="panel">
@@ -753,6 +775,8 @@
     [document.getElementById('refireToggle2'), 2],
   ];
   const freezeBeforeFrigatesToggle = document.getElementById('freezeBeforeFrigatesToggle');
+  const heatmapCruiserToggle = document.getElementById('heatmapCruiserToggle');
+  const heatmapFrigateToggle = document.getElementById('heatmapFrigateToggle');
   const modalBackdrop = document.getElementById('modalBackdrop');
   const modalTitle = document.getElementById('modalTitle');
   const modalContent = document.getElementById('modalContent');
@@ -804,6 +828,14 @@
         cell.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); onCellClick(idx); }
         });
+        if (!isOuter){
+          const cruiserHeat = document.createElement('div');
+          cruiserHeat.className = 'heat-half heat-cruiser';
+          cell.appendChild(cruiserHeat);
+          const frigateHeat = document.createElement('div');
+          frigateHeat.className = 'heat-half heat-frigate';
+          cell.appendChild(frigateHeat);
+        }
         gridScale.appendChild(cell);
       }
     }
@@ -921,6 +953,36 @@
     try { cells = JSON.parse(game.fully_eliminated_cells_json()); }
     catch { cells = []; }
     cells.forEach(idx => cellEl(idx)?.classList.add('fully-eliminated'));
+  }
+
+  // Inner 8x8 grid convention (grid[i][j] == board row/col i+1, j+1, 0-indexed)
+  // matches `alive_grids_json` and every other per-cell debug endpoint.
+  function refreshHeatmaps(){
+    const showCruiser = heatmapCruiserToggle.checked;
+    const showFrigate = heatmapFrigateToggle.checked;
+    let cruiserGrid = null, frigateGrid = null;
+    if (showCruiser){ try { cruiserGrid = JSON.parse(game.cruiser_heatmap_json()); } catch { cruiserGrid = null; } }
+    if (showFrigate){ try { frigateGrid = JSON.parse(game.frigate_heatmap_json()); } catch { frigateGrid = null; } }
+
+    for (let i = 0; i < 8; i++){
+      for (let j = 0; j < 8; j++){
+        const idx = (i + 1) * 10 + (j + 1);
+        const el = cellEl(idx);
+        if (!el) continue;
+        const cProb = cruiserGrid ? cruiserGrid[i][j] : 0;
+        const fProb = frigateGrid ? frigateGrid[i][j] : 0;
+        const cruiserEl = el.querySelector('.heat-cruiser');
+        const frigateEl = el.querySelector('.heat-frigate');
+        if (cruiserEl){
+          cruiserEl.style.opacity = cProb > 0 ? String(0.12 + cProb * 0.75) : '0';
+          cruiserEl.title = cProb > 0 ? `Cruiser probability: ${(cProb * 100).toFixed(0)}%` : '';
+        }
+        if (frigateEl){
+          frigateEl.style.opacity = fProb > 0 ? String(0.12 + fProb * 0.75) : '0';
+          frigateEl.title = fProb > 0 ? `Frigate probability: ${(fProb * 100).toFixed(0)}%` : '';
+        }
+      }
+    }
   }
 
   function openModal(title, contentHtml){
@@ -1273,6 +1335,7 @@
     refreshBattleshipCross();
     refreshFullyEliminatedCells();
     refreshRefirableCells();
+    refreshHeatmaps();
     selected = [];
 
     turnNo.textContent = game.turn();
@@ -1457,6 +1520,7 @@
     refreshBattleshipCross();
     refreshFullyEliminatedCells();
     refreshRefirableCells();
+    refreshHeatmaps();
     statusLine.textContent = message;
   }
 
@@ -1499,6 +1563,7 @@
     refreshAdvisory();
     refreshBattleshipCross();
     refreshFullyEliminatedCells();
+    refreshHeatmaps();
     renderSelection();
 
     fireBtn.addEventListener('click', doFire);
@@ -1527,6 +1592,8 @@
     freezeBeforeFrigatesToggle.addEventListener('change', () => {
       game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
     });
+    heatmapCruiserToggle.addEventListener('change', refreshHeatmaps);
+    heatmapFrigateToggle.addEventListener('change', refreshHeatmaps);
     modalClose.addEventListener('click', closeModal);
     modalBackdrop.addEventListener('click', (e) => { if (e.target === modalBackdrop) closeModal(); });
     document.addEventListener('keydown', (e) => {

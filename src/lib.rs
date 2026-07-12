@@ -636,6 +636,20 @@ impl Game {
         serde_json::to_string(&AliveGrids { horizontal, vertical, combined }).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Per-cell probability (0.0-1.0) that a Cruiser occupies it, given
+    /// every salvo fired so far — see `AiPlayer::cruiser_heatmap`. Same 8x8
+    /// grid convention as `alive_grids_json`.
+    pub fn cruiser_heatmap_json(&self) -> String {
+        serde_json::to_string(&self.ai.cruiser_heatmap()).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Per-cell probability (0.0-1.0) that a Frigate occupies it — see
+    /// `AiPlayer::frigate_heatmap`. Same 8x8 grid convention as
+    /// `alive_grids_json`.
+    pub fn frigate_heatmap_json(&self) -> String {
+        serde_json::to_string(&self.ai.frigate_heatmap()).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Every inner cell where all 3 combined "alive" values — Battleship,
     /// Cruiser, and Frigate (see `alive_grids_json`) — have dropped to zero:
     /// nothing of size >=2 can occupy it any more, only a Submarine or
@@ -1949,8 +1963,98 @@ mod tests {
         assert!(!newly.contains(&(4, 4)), "(4,4) still has room and isn't ruled out");
     }
 
+    #[test]
+    fn ai_cruiser_heatmap_is_all_zero_before_any_salvo() {
+        let ai = AiPlayer::new();
+        let heatmap = ai.cruiser_heatmap();
+        assert_eq!(heatmap.len(), 8);
+        for row in &heatmap {
+            assert_eq!(row.len(), 8);
+            assert!(row.iter().all(|&p| p == 0.0), "no evidence yet — nothing should stand out: {row:?}");
+        }
+    }
 
+    #[test]
+    fn ai_frigate_heatmap_is_all_zero_before_any_salvo() {
+        let ai = AiPlayer::new();
+        let heatmap = ai.frigate_heatmap();
+        assert_eq!(heatmap.len(), 8);
+        for row in &heatmap {
+            assert_eq!(row.len(), 8);
+            assert!(row.iter().all(|&p| p == 0.0), "no evidence yet — nothing should stand out: {row:?}");
+        }
+    }
 
+    #[test]
+    fn ai_cruiser_heatmap_shows_certainty_once_both_cruisers_are_fully_pinned() {
+        let mut ai = AiPlayer::new();
+        // Firing a straight-3 run directly, all 3 cells coming back "3",
+        // leaves only one geometrically possible reading: this exact
+        // window IS a Cruiser (see `consistent_with_salvo_history` — no
+        // other combination of 2 non-overlapping, non-adjacent Cruiser
+        // windows could produce "all 3 fired cells inside the union" for
+        // this salvo without simply BEING this window). Two such salvos,
+        // far enough apart to never conflict, pin down the entire 2-Cruiser
+        // layout with total certainty.
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+
+        let heatmap = ai.cruiser_heatmap();
+        let true_cells: std::collections::HashSet<(usize, usize)> = [(2, 2), (2, 3), (2, 4), (6, 6), (6, 7), (6, 8)].into_iter().collect();
+        for row in 1..=8 {
+            for col in 1..=8 {
+                let p = heatmap[row - 1][col - 1];
+                if true_cells.contains(&(row, col)) {
+                    assert_eq!(p, 1.0, "known Cruiser cell {:?} must show certainty, got {p}", (row, col));
+                } else {
+                    assert_eq!(p, 0.0, "cell {:?} isn't part of the only consistent layout, got {p}", (row, col));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ai_frigate_heatmap_shows_certainty_once_all_3_frigates_are_fully_pinned() {
+        let mut ai = AiPlayer::new();
+        // Same reasoning as the Cruiser version, one size down: an
+        // all-2s salvo on a straight-2 run pins that exact window down
+        // with total certainty. Well-separated so none conflict.
+        ai.apply_salvo([(2, 2), (2, 3), (0, 0)], [2, 2, 0]);
+        ai.apply_salvo([(5, 5), (5, 6), (0, 1)], [2, 2, 0]);
+        ai.apply_salvo([(8, 2), (8, 3), (0, 2)], [2, 2, 0]);
+
+        let heatmap = ai.frigate_heatmap();
+        let true_cells: std::collections::HashSet<(usize, usize)> =
+            [(2, 2), (2, 3), (5, 5), (5, 6), (8, 2), (8, 3)].into_iter().collect();
+        for row in 1..=8 {
+            for col in 1..=8 {
+                let p = heatmap[row - 1][col - 1];
+                if true_cells.contains(&(row, col)) {
+                    assert_eq!(p, 1.0, "known Frigate cell {:?} must show certainty, got {p}", (row, col));
+                } else {
+                    assert_eq!(p, 0.0, "cell {:?} isn't part of the only consistent layout, got {p}", (row, col));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ai_heatmaps_never_place_weight_on_a_cell_proven_to_lack_that_size() {
+        let mut ai = AiPlayer::new();
+        // A miss (bag with no 3 or 2 at all) proves these 3 cells hold
+        // neither a Cruiser nor a Frigate — no window in either heatmap's
+        // enumeration ever includes them, so both must show exactly 0 here
+        // regardless of how much genuine ambiguity remains elsewhere.
+        ai.apply_salvo([(4, 4), (4, 5), (4, 6)], [0, 0, 0]);
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // some unrelated real evidence, so history isn't empty
+
+        let cruiser_heatmap = ai.cruiser_heatmap();
+        let frigate_heatmap = ai.frigate_heatmap();
+        for &(r, c) in &[(4, 4), (4, 5), (4, 6)] {
+            assert_eq!(cruiser_heatmap[r - 1][c - 1], 0.0, "{:?} proven miss, must be 0 in the Cruiser heatmap", (r, c));
+            assert_eq!(frigate_heatmap[r - 1][c - 1], 0.0, "{:?} proven miss, must be 0 in the Frigate heatmap", (r, c));
+        }
+    }
 
 
 
