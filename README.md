@@ -78,3 +78,26 @@ Flat index: `row * 10 + col`, both 0-based.
 ```bash
 cargo test
 ```
+
+## Cruiser identifiability measurement
+
+`src/bin/measure_identifiability.rs` is a standalone tool (not part of the
+game itself) that answers a specific question: once both Cruisers are sunk,
+is their exact layout always uniquely recoverable from the raw salvo
+history alone? It re-derives this from first principles — brute-force
+checking every possible pair of Cruiser windows against every salvo fired
+so far — independent of the AI's own (fallible) deduction code, so it can
+be trusted as ground truth for that question.
+
+```bash
+cargo run --release --bin measure_identifiability -- 2000   # number of self-play games
+```
+
+Writes `cruiser_identifiability.csv` (one row per turn, from the turn the
+first Cruiser sinks onward: game id, turn, how many Cruisers are sunk, how
+many candidate layouts are still consistent with the evidence, and whether
+the true layout is among them — always true unless there's a bug in the
+tool itself) and prints a summary. Empirically, at the exact moment both
+Cruisers sink, the layout is uniquely determined only about half the time
+— see the session notes for why this is a fundamental limit of the
+unordered-bag observation model, not a fixable bug.
