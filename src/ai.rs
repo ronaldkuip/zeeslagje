@@ -29,22 +29,42 @@ impl LineState {
     }
 }
 
-/// One salvo whose result bag held at least one 3 (a Cruiser hit), together
-/// with its derived "cross-3" bag: the union of a reach-2 cross around each of
-/// the salvo's 3 coordinates — analogous to the Battleship's cross-4 bag, but
-/// reach 2 instead of 3, since a Cruiser is only 3 cells long (so any two
-/// cells of the *same* Cruiser are at most 2 apart along its line).
+/// One salvo whose result bag held at least one 3 (a Cruiser hit). Cruiser
+/// exact-cell identification (pinpointing which specific cells a Cruiser
+/// occupies, and so also disambiguating between 2 possible layouts) is
+/// deliberately not attempted — see `refresh_cross3_entry_flags` — only the
+/// raw per-salvo Cross-3 Bag "traffic light" tracking (recomputed purely
+/// from `alive_value(_, _, 3) == 0`) remains. Mirrors `Cross2Entry`.
 #[derive(Clone)]
 pub struct Cross3Entry {
     pub coords: [(usize, usize); 3],
     pub values: [usize; 3],
-    pub bag: Vec<(usize, usize)>,
     /// Per-coordinate flag, parallel to `coords`: true once that specific
     /// fired cell has been proven impossible to be a Cruiser cell (its alive
     /// value for size 3 has dropped to zero — or it's on the outer ring,
     /// which never holds a ship of size >=2) — i.e. this salvo's ambiguous
     /// "3" result can no longer have come from that particular cell.
     /// Recomputed at the end of every round by `refresh_cross3_entry_flags`.
+    /// Monotonic: once true, always true, since alive values only ever
+    /// shrink toward zero.
+    pub coord_ruled_out: [bool; 3],
+}
+
+/// One salvo whose result bag held at least one 2 (a Frigate hit) — same
+/// shape as `Cross3Entry`, one level down in ship size.
+#[derive(Clone)]
+pub struct Cross2Entry {
+    pub coords: [(usize, usize); 3],
+    pub values: [usize; 3],
+    /// Per-coordinate flag, parallel to `coords`: true once that specific
+    /// fired cell has been proven impossible to be a Frigate cell (its alive
+    /// value for size 2 has dropped to zero — or it's on the outer ring,
+    /// which never holds a ship of size >=2) — i.e. this salvo's ambiguous
+    /// "2" result can no longer have come from that particular cell.
+    /// Recomputed at the end of every round by `refresh_cross2_entry_flags`
+    /// purely from the size-2 FSM's own alive value — deliberately just
+    /// this "traffic light" read-out, with no combination search or
+    /// same-Frigate pairing/identification logic layered on top.
     /// Monotonic: once true, always true, since alive values only ever
     /// shrink toward zero.
     pub coord_ruled_out: [bool; 3],
@@ -61,10 +81,19 @@ pub struct Cross4Entry {
     pub coords: [(usize, usize); 3],
     pub values: [usize; 3],
     /// Per-coordinate flag, parallel to `coords` — same convention as
-    /// `Cross3Entry::coord_ruled_out`. Currently always false (green): the
-    /// rule for when a Battleship salvo's coordinate should flip red is not
-    /// yet defined.
+    /// `Cross3Entry::coord_ruled_out`: true once that specific fired cell's
+    /// combined size-4 alive value has dropped to zero (or it's on the
+    /// outer ring, which never holds a Battleship at all), meaning this
+    /// salvo's "4" can no longer have come from that particular cell.
+    /// Recomputed every round by `refresh_cross4_entry_flags`.
     pub coord_ruled_out: [bool; 3],
+    /// True for a coordinate proven to be a genuine Battleship hit: this
+    /// bag contains a "4", and every OTHER coordinate has been ruled out,
+    /// so this one is the only cell left that could possibly have produced
+    /// it — see `derive_confirmed_battleship_hits_by_elimination`, which
+    /// mirrors `derive_confirmed_cruiser_hits_by_elimination`/
+    /// `derive_confirmed_frigate_hits_by_elimination` one size up.
+    pub coord_confirmed_battleship_hit: [bool; 3],
 }
 
 pub struct AiPlayer {
@@ -87,6 +116,18 @@ pub struct AiPlayer {
     /// never back). Outer-ring cells are always false — the Battleship can't be
     /// there regardless of any cross logic.
     battleship_candidates: [[bool; 10]; 10],
+    /// The Battleship's exact 4-cell layout, captured permanently the
+    /// moment it's confirmed sunk (see `apply_full_battleship_elimination`)
+    /// — unlike
+    /// `battleship_candidates`/`battleship_identified` (both live,
+    /// hunting-only concepts that get cleared once sunk, since there's
+    /// nothing left to hunt for), this is a permanent record for the
+    /// board/debug UI to keep rendering even after the live candidate
+    /// state is gone. `None` if the ship sank via ordinary fire before
+    /// `battleship_identified` ever narrowed things down to a single
+    /// window — the exact layout genuinely isn't knowable from fog-of-war
+    /// information alone in that case.
+    found_battleship: Option<[(usize, usize); 4]>,
     /// Whether at least one salvo with a 4 has been seen yet. Until then,
     /// `battleship_candidates` is a meaningless "everything's possible" default,
     /// not an actual deduction — so we keep this flag to know when it's real.
@@ -107,27 +148,14 @@ pub struct AiPlayer {
     /// neighbours can't hold another ship" deduction, so repeated calls once the
     /// ship is identified don't redrive the same transition twice.
     battleship_adjacency_processed: [[bool; 10]; 10],
-    /// Every 3-bearing salvo processed so far, in order, with its derived
-    /// cross-3 bag. Kept as a running history rather than intersected together
-    /// like the Battleship's single cross-4 bag — there are 2 Cruisers, so two
-    /// different salvos might be hits on two entirely different ships, and
-    /// blindly intersecting everything would wrongly narrow down to nothing.
+    /// Every 3-bearing salvo processed so far, in order. Kept as a running
+    /// history — there are 2 Cruisers, so two different salvos might be hits
+    /// on two entirely different ships.
     cross3_entries: Vec<Cross3Entry>,
-    /// Once two entries above turn out to share zero cells, that's proof they're
-    /// hits on two *different* Cruisers (a single Cruiser's cross-3 bag always
-    /// contains any other hit belonging to the same ship). This becomes the
-    /// union of that first disjoint pair — everywhere else on the board can
-    /// then be ruled out for size 3.
-    discovered_3_bag: Option<[[bool; 10]; 10]>,
-    /// Cells already fed into the size-3 FSM as misses because they fell
-    /// outside `discovered_3_bag`, so we don't redrive the same transition twice.
-    discovered_3_processed: [[bool; 10]; 10],
-    /// Cells proven to hold no ship at all: part of a salvo whose whole result
-    /// bag was zero, so every one of its 3 cells is a guaranteed miss (unlike
-    /// an ambiguous bound=3/4 salvo, there's no "which of the 3" uncertainty
-    /// here). Used by `prune_discovered_3_bag` to strip out bag cells that
-    /// can't possibly be a Cruiser after all.
-    confirmed_miss: [[bool; 10]; 10],
+    /// Every 2-bearing salvo processed so far, in order — see `Cross2Entry`.
+    /// Kept as a running history for the same reason as `cross3_entries`,
+    /// just with 3 Frigates instead of 2 Cruisers.
+    cross2_entries: Vec<Cross2Entry>,
     /// Per-size toggle (indexed by size 1..4, size 0 unused): when true for
     /// the size currently being hunted, `choose_shots`/`ai_suggest` may
     /// recommend a cell that's already been fired at instead of always
@@ -145,29 +173,6 @@ pub struct AiPlayer {
     /// despite never being deliberately targeted, `current_target_size`
     /// still moves on to 1 normally.
     freeze_before_frigates: bool,
-    /// Cells already fed into the size-3 FSM as misses because both Cruisers
-    /// are confirmed sunk and they fell outside the union of every cross-3
-    /// salvo's raw coordinates, so we don't redrive the same transition
-    /// twice. See `apply_full_cruiser_elimination`.
-    cruiser_fully_sunk_processed: [[bool; 10]; 10],
-    /// Straight-3 Cruiser layouts confirmed via `cruiser_combination_candidates`
-    /// narrowing to exactly one surviving combination — recorded so each is
-    /// only acted on (adjacency elimination) once, and so the debug UI can
-    /// show them as "found" (green) rather than merely candidates.
-    found_cruisers: Vec<[(usize, usize); 3]>,
-    /// Cells already fed into the size-3/size-2 FSMs via a found Cruiser's
-    /// "its neighbours can't hold another ship" deduction, so repeated calls
-    /// don't redrive the same transition twice. See
-    /// `apply_found_cruiser_adjacency_elimination`.
-    found_cruiser_adjacency_processed: [[bool; 10]; 10],
-    /// Set when `cruiser_combination_candidates` narrows to exactly 2
-    /// possible layouts and a disambiguating coordinate (present in exactly
-    /// one of the two) has been picked as the next salvo's first shot. `.0`
-    /// is that coordinate; `.1` is the combo it belongs to (confirmed if the
-    /// salvo that fires it comes back with a 3 in the bag); `.2` is the
-    /// other combo (confirmed if it doesn't). See `choose_shots` and
-    /// `refresh_cruiser_disambiguation`.
-    pending_cruiser_disambiguation: Option<((usize, usize), [(usize, usize); 3], [(usize, usize); 3])>,
 }
 
 const INNER_LO: usize = 1;
@@ -189,21 +194,16 @@ impl AiPlayer {
             sunk_sizes: [0; 5],
             remaining_sizes,
             battleship_candidates: Self::initial_battleship_candidates(),
+            found_battleship: None,
             battleship_cross_seen: false,
             battleship_cross_processed: [[false; 10]; 10],
             four_bearing_salvo_count: 0,
             cross4_entries: Vec::new(),
             battleship_adjacency_processed: [[false; 10]; 10],
             cross3_entries: Vec::new(),
-            discovered_3_bag: None,
-            discovered_3_processed: [[false; 10]; 10],
-            confirmed_miss: [[false; 10]; 10],
+            cross2_entries: Vec::new(),
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
-            cruiser_fully_sunk_processed: [[false; 10]; 10],
-            found_cruisers: Vec::new(),
-            found_cruiser_adjacency_processed: [[false; 10]; 10],
-            pending_cruiser_disambiguation: None,
         }
     }
 
@@ -245,32 +245,33 @@ impl AiPlayer {
         if size == 1 {
             return; // submarines handled via sub_candidates directly
         }
-        // Row FSM: only meaningful if col is within inner range (a size>=2 ship lies
-        // horizontally within row `row`, using inner columns). We drive the row's FSM
-        // using `col` as the fired column, IF col is inner.
-        if (INNER_LO..=INNER_HI).contains(&col) {
-            let table_col = col - INNER_LO; // 0..7
-            let cur = Self::line_state_for_size(&self.row_state[row], size);
-            let next = match size {
-                4 => TRANSITIONS_SIZE4[cur][table_col] as usize,
-                3 => TRANSITIONS_SIZE3[cur][table_col] as usize,
-                2 => TRANSITIONS_SIZE2[cur][table_col] as usize,
-                _ => unreachable!(),
-            };
-            Self::set_line_state_for_size(&mut self.row_state[row], size, next);
+        // A size>=2 ship placement lies entirely within the inner 8x8 grid, so a
+        // fired cell can only be relevant to either FSM if BOTH its row and column
+        // are inner — if either is on the outer ring, this cell can never be part
+        // of any such placement at all, and `row_state`/`col_state` for outer-ring
+        // lines (0 and 9) must stay untouched at their initial state forever.
+        if !(INNER_LO..=INNER_HI).contains(&row) || !(INNER_LO..=INNER_HI).contains(&col) {
+            return;
         }
-        // Column FSM: symmetric, using `row` as the fired row within column `col`.
-        if (INNER_LO..=INNER_HI).contains(&row) {
-            let table_row = row - INNER_LO;
-            let cur = Self::line_state_for_size(&self.col_state[col], size);
-            let next = match size {
-                4 => TRANSITIONS_SIZE4[cur][table_row] as usize,
-                3 => TRANSITIONS_SIZE3[cur][table_row] as usize,
-                2 => TRANSITIONS_SIZE2[cur][table_row] as usize,
-                _ => unreachable!(),
-            };
-            Self::set_line_state_for_size(&mut self.col_state[col], size, next);
-        }
+        let table_col = col - INNER_LO; // 0..7
+        let cur = Self::line_state_for_size(&self.row_state[row], size);
+        let next = match size {
+            4 => TRANSITIONS_SIZE4[cur][table_col] as usize,
+            3 => TRANSITIONS_SIZE3[cur][table_col] as usize,
+            2 => TRANSITIONS_SIZE2[cur][table_col] as usize,
+            _ => unreachable!(),
+        };
+        Self::set_line_state_for_size(&mut self.row_state[row], size, next);
+
+        let table_row = row - INNER_LO;
+        let cur = Self::line_state_for_size(&self.col_state[col], size);
+        let next = match size {
+            4 => TRANSITIONS_SIZE4[cur][table_row] as usize,
+            3 => TRANSITIONS_SIZE3[cur][table_row] as usize,
+            2 => TRANSITIONS_SIZE2[cur][table_row] as usize,
+            _ => unreachable!(),
+        };
+        Self::set_line_state_for_size(&mut self.col_state[col], size, next);
     }
 
     /// Apply a miss at (row, col): eliminate all ship sizes >=2 through this cell
@@ -280,7 +281,6 @@ impl AiPlayer {
             self.eliminate_size_at(row, col, size);
         }
         self.sub_candidates[row][col] = false;
-        self.confirmed_miss[row][col] = true;
     }
 
     /// Apply a hit of given `size` at (row, col): eliminate all LARGER sizes through
@@ -326,22 +326,40 @@ impl AiPlayer {
             self.sunk_sizes[size] += 1;
         }
         if size == 3 {
-            // Once this call is the one that confirms both Cruisers sunk, every
-            // real Cruiser cell is now guaranteed to be among the cross-3 salvos
-            // seen so far — eliminate everywhere else immediately.
-            if self.size_fully_found(3) {
-                self.apply_full_cruiser_elimination();
-            }
-            // `Game::fire` calls `apply_salvo` (which also runs this same
-            // check) BEFORE calling `mark_sunk` for whatever just sank — so
+            // Cruiser discovery (pinpointing exact cells) is deliberately
+            // not attempted — see `refresh_cross3_entry_flags`. Re-running
+            // this here closes the same one-round gap as the Frigate/
+            // Battleship branches: `Game::fire` calls `apply_salvo` (which
+            // also refreshes cross-3 flags) BEFORE calling `mark_sunk`, so
             // the exact salvo that sinks a Cruiser would otherwise see a
-            // stale (pre-sinking) sunk count during its own apply_salvo call
-            // and miss a combination that only becomes checkable once this
-            // call's sunk_sizes bump has landed. Re-checking here closes
-            // that one-round gap; the found_cruisers guard makes repeating
-            // the check from both places harmless.
-            self.check_and_apply_found_cruisers();
-            self.refresh_cruiser_disambiguation();
+            // stale (pre-sinking) sunk count during its own apply_salvo call.
+            self.refresh_cross3_entry_flags();
+        }
+        if size == 2 {
+            // Frigate discovery (pinpointing exact cells) is deliberately
+            // not attempted — see `refresh_cross2_entry_flags`. Re-running
+            // it here closes the same one-round gap as the Cruiser/
+            // Battleship branches: `Game::fire` calls `apply_salvo` (which
+            // also refreshes cross-2 flags) BEFORE calling `mark_sunk`, so
+            // the exact salvo that sinks a Frigate would otherwise see a
+            // stale (pre-sinking) sunk count during its own apply_salvo call.
+            self.refresh_cross2_entry_flags();
+        }
+        if size == 4 {
+            // There is exactly 1 Battleship, so the moment this fires it's
+            // unconditionally `size_fully_found(4)` — unlike Cruisers/
+            // Frigates, there's no "wait for the LAST one" case to gate on.
+            // Whether or not the cross-4 deduction ever narrowed the
+            // candidate cross down to a single straight-4 window (a ship
+            // can perfectly well sink via ordinary fire before 2+
+            // intersecting salvos ever resolve that ambiguity), hunting for
+            // size 4 is now entirely over — there is nothing left to search
+            // for, so nothing should keep looking. Without this, a
+            // still-ambiguous candidate cross from before the ship sank
+            // would otherwise linger forever: the board/Cross-4 Bag UI kept
+            // showing "possible" cells for a mystery that's already solved.
+            self.refresh_cross4_entry_flags();
+            self.apply_full_battleship_elimination();
         }
     }
 
@@ -349,31 +367,44 @@ impl AiPlayer {
         self.sunk_sizes[size] >= self.remaining_sizes[size]
     }
 
-    /// Once both Cruisers are confirmed sunk, all 6 of their cells are
-    /// guaranteed to have been hit at some point — and any salvo that hits a
-    /// Cruiser cell reports a "3" in its result bag, which is exactly what
-    /// makes `apply_cruiser_cross_tracking` record that salvo's 3 raw fired
-    /// coordinates as a `Cross3Entry` (see there). So the union of every
-    /// cross-3 salvo's coordinates seen over the whole game is guaranteed to
-    /// contain all 6 real Cruiser cells, with total certainty — no more
-    /// Cruisers exist anywhere else, so every OTHER inner cell can be
-    /// eliminated for size 3 outright. This is strictly stronger than the
-    /// discovered-3 bag (a geometric heuristic that can narrow things down
-    /// earlier, before both ships are sunk, but only ever proves a superset
-    /// of the truth) — once this fires, it settles size 3 completely.
-    fn apply_full_cruiser_elimination(&mut self) {
-        let mut candidate = [[false; 10]; 10];
-        for entry in &self.cross3_entries {
-            for &(r, c) in &entry.coords {
-                candidate[r][c] = true;
+    /// Called the moment the (single) Battleship is confirmed sunk. The ship's own cells — whether that's
+    /// the exact 4-cell layout if `battleship_identified` succeeded, or the
+    /// still-broader candidate set if the ship sank via ordinary fire
+    /// before the cross-4 deduction ever narrowed a multi-window ambiguity
+    /// down to one — must NOT have their own size-4 alive value eliminated
+    /// here. A previous version did exactly that (eliminating size 4
+    /// unconditionally everywhere), which — combined with those same cells
+    /// already correctly having size 2/3 eliminated (a cell can only hold
+    /// one ship) — made the just-identified Battleship's own cells satisfy
+    /// "no ship of size >=2 possible" and render as dead water, as if the
+    /// ship had simply vanished the instant it sank. Only cells that were
+    /// NEVER a candidate get eliminated; the candidate set itself is then
+    /// cleared (a UI-only concern, unrelated to the FSM) so the board/
+    /// Cross-4 Bag stop showing a "still possible" region for a mystery
+    /// that's already solved.
+    ///
+    /// Before that clearing happens, snapshot `battleship_identified` (if
+    /// it succeeded) into `found_battleship` — a SEPARATE, permanent record.
+    /// Without this, clearing
+    /// `battleship_candidates` also empties `battleship_identified`'s own
+    /// output (both read the same live mask), so the board loses every
+    /// trace of "this was the Battleship" the instant it sinks — no more
+    /// candidate outline, but also no permanent "found" marker to replace
+    /// it with, unlike a found Cruiser/Frigate's lasting green/purple cells.
+    fn apply_full_battleship_elimination(&mut self) {
+        self.found_battleship = self.battleship_identified();
+
+        let candidate = self.battleship_candidates;
+        for row in INNER_LO..=INNER_HI {
+            for col in INNER_LO..=INNER_HI {
+                if !candidate[row][col] {
+                    self.eliminate_size_at(row, col, 4);
+                }
             }
         }
         for row in INNER_LO..=INNER_HI {
             for col in INNER_LO..=INNER_HI {
-                if !candidate[row][col] && !self.cruiser_fully_sunk_processed[row][col] {
-                    self.cruiser_fully_sunk_processed[row][col] = true;
-                    self.eliminate_size_at(row, col, 3);
-                }
+                self.battleship_candidates[row][col] = false;
             }
         }
     }
@@ -408,6 +439,26 @@ impl AiPlayer {
             } else {
                 // Eliminate all ship sizes strictly greater than `bound` through this cell.
                 self.apply_hit(r, c, bound);
+            }
+        }
+
+        // Beyond that ">bound" elimination, every cell's true value is
+        // guaranteed to be EXACTLY one of the 3 actual values in this bag —
+        // so any ship size that doesn't appear anywhere in `values` at all
+        // is impossible at every one of these 3 cells, even sizes SMALLER
+        // than `bound` (e.g. bag [3, 1, 0] has no 2 anywhere, ruling out a
+        // Frigate at all 3 cells despite 2 < bound == 3). Battleship (4)
+        // doesn't need handling here: whenever it's absent, bound < 4
+        // already eliminated it via the ">bound" rule above, and the
+        // dedicated "no 4 in bag" branch below folds in its own stronger
+        // cross-tracking on top.
+        if bound > 0 {
+            for &size in &[3usize, 2] {
+                if !values.contains(&size) {
+                    for &(r, c) in &coords {
+                        self.eliminate_size_at(r, c, size);
+                    }
+                }
             }
         }
 
@@ -459,68 +510,17 @@ impl AiPlayer {
         if values.contains(&3) {
             self.apply_cruiser_cross_tracking(coords, values);
         }
+        // Same idea, one size down: a 2 anywhere in the bag means one of
+        // these 3 cells is a genuine Frigate hit.
+        if values.contains(&2) {
+            self.apply_frigate_cross_tracking(coords, values);
+        }
 
-        // Refresh flags now (not just at the end of the round) so the
-        // combination search below sees anything this salvo already proved
-        // impossible — a stale (too-green) view could only under-narrow the
-        // search, never misidentify a wrong combination as the unique one
-        // (a real Cruiser's true hit is never flagged red), so this is safe
-        // even though the full end-of-round refresh runs again below.
+        // Refresh flags so the debug UI reflects anything this salvo proved
+        // impossible.
         self.refresh_cross3_entry_flags();
-
-        // If this salvo is the deliberate disambiguation shot `choose_shots`
-        // queued up (see `pending_cruiser_disambiguation`), interpret its
-        // result: the other 2 coordinates in that salvo were chosen to be
-        // already-proven-impossible for a Cruiser, so a 3 anywhere in this
-        // bag can only have come from the disambiguating coordinate itself —
-        // confirming whichever of the 2 layouts contains it. No 3 confirms
-        // the other layout instead (and would also already be settled by the
-        // normal apply_hit/apply_miss elimination above, since a bag with no
-        // 3 means bound < 3, which eliminates size 3 at every fired cell
-        // including this one via the ordinary path — but resolving it
-        // explicitly here is simpler than relying on that side effect).
-        if let Some((coord, combo_if_hit, combo_if_miss)) = self.pending_cruiser_disambiguation {
-            if coords.contains(&coord) {
-                let confirmed = if values.contains(&3) { combo_if_hit } else { combo_if_miss };
-                if !self.found_cruisers.contains(&confirmed) {
-                    self.found_cruisers.push(confirmed);
-                    self.apply_found_cruiser_adjacency_elimination(confirmed);
-                }
-                self.pending_cruiser_disambiguation = None;
-            }
-        }
-
-        // See `check_and_apply_found_cruisers` — also re-run from `mark_sunk`
-        // to close a one-round gap around the exact salvo that sinks a ship.
-        self.check_and_apply_found_cruisers();
-
-        // Every salvo can prove cells impossible for a Cruiser that a stored
-        // cross-3 bag doesn't know about yet (an ordinary miss elsewhere, the
-        // Battleship's own elimination above, etc.) — sweep those out, then
-        // re-check for a disjoint pair, since pruning can reveal one just as
-        // well as adding a new entry can.
-        self.prune_cross3_bags();
-        if self.discovered_3_bag.is_none() {
-            self.recheck_cross3_disjoint_pairs();
-        }
-        self.prune_discovered_3_bag();
-        if let Some(discovered) = self.discovered_3_bag {
-            self.apply_discovered_3_elimination(discovered);
-        }
-
-        // End-of-round check: every cross-3 entry's 3 original fired
-        // coordinates may have had their alive value for size 3 driven to
-        // zero by anything above (or by an unrelated salvo elsewhere) — flag
-        // any that can no longer possibly be the real Cruiser hit.
-        self.refresh_cross3_entry_flags();
-
-        // Now that everything above has settled, recompute the disambiguation
-        // target for next round (using the fully up-to-date combination
-        // search) — a no-op if nothing is ambiguous, or if a target is still
-        // pending and hasn't been fired yet (find_cruiser_disambiguation is
-        // deterministic given the same combos, so this just reselects the
-        // same one).
-        self.refresh_cruiser_disambiguation();
+        self.refresh_cross2_entry_flags();
+        self.refresh_cross4_entry_flags();
     }
 
     /// The Battleship forbids orthogonal *and* diagonal adjacency to any other
@@ -585,59 +585,6 @@ impl AiPlayer {
         }
     }
 
-    /// A found Cruiser (see `cruiser_combination_candidates`) forbids
-    /// orthogonal *and* diagonal adjacency to any other ship, exactly like
-    /// the Battleship (see `apply_battleship_adjacency_elimination`, which
-    /// this mirrors) — once its 3 cells are confirmed, every touching cell
-    /// rules out a Cruiser or Frigate, and the 3 cells themselves rule out
-    /// everything else (a board cell can only ever hold one ship). Submarines
-    /// are left alone at neighbouring cells for the same reason as there:
-    /// they only forbid orthogonal adjacency, so a diagonal neighbour could
-    /// still legitimately hold one.
-    ///
-    /// Eliminates unconditionally, even for already-fired cells, for the same
-    /// ambiguous-salvo reason `apply_battleship_adjacency_elimination` does —
-    /// safe to call repeatedly since the FSM tables are idempotent per column
-    /// and `found_cruiser_adjacency_processed` avoids the redundant work.
-    fn apply_found_cruiser_adjacency_elimination(&mut self, ship_cells: [(usize, usize); 3]) {
-        for &(row, col) in &ship_cells {
-            if self.found_cruiser_adjacency_processed[row][col] {
-                continue;
-            }
-            self.found_cruiser_adjacency_processed[row][col] = true;
-            self.eliminate_size_at(row, col, 3);
-            self.eliminate_size_at(row, col, 2);
-            self.sub_candidates[row][col] = false;
-        }
-
-        for &(row, col) in &ship_cells {
-            for dr in -1isize..=1 {
-                for dc in -1isize..=1 {
-                    if dr == 0 && dc == 0 {
-                        continue;
-                    }
-                    let nr = row as isize + dr;
-                    let nc = col as isize + dc;
-                    if !(INNER_LO as isize..=INNER_HI as isize).contains(&nr)
-                        || !(INNER_LO as isize..=INNER_HI as isize).contains(&nc)
-                    {
-                        continue;
-                    }
-                    let (nr, nc) = (nr as usize, nc as usize);
-                    if ship_cells.contains(&(nr, nc)) {
-                        continue; // part of the found Cruiser itself, not a neighbour
-                    }
-                    if self.found_cruiser_adjacency_processed[nr][nc] {
-                        continue;
-                    }
-                    self.found_cruiser_adjacency_processed[nr][nc] = true;
-                    self.eliminate_size_at(nr, nc, 3);
-                    self.eliminate_size_at(nr, nc, 2);
-                }
-            }
-        }
-    }
-
     /// Mark a "beam" in both directions through (row, col), reaching `reach` cells
     /// either way (clipped to the inner 8x8 — the only place a ship of size >= 2
     /// can be): every cell that could be part of a ship of length `reach + 1`
@@ -674,6 +621,7 @@ impl AiPlayer {
             coords,
             values,
             coord_ruled_out: [false; 3],
+            coord_confirmed_battleship_hit: [false; 3],
         });
 
         let mut salvo_union = [[false; 10]; 10];
@@ -706,35 +654,26 @@ impl AiPlayer {
         self.prune_candidates_without_room();
     }
 
-    /// Given a salvo whose result bag contained a 3, build its cross-3 bag (union
-    /// of a reach-2 cross around each of the 3 fired coordinates — the true
-    /// Cruiser hit is one of them, we just don't know which) and record the
-    /// entry. Cells already proven impossible for a Cruiser (see
-    /// `alive_value`) are left out of the bag from the start — no point
-    /// recording a candidate that's already known dead.
-    ///
-    /// Disjointness against every other entry is (re)checked separately by
-    /// `recheck_cross3_disjoint_pairs`, called once per salvo after both this
-    /// and `prune_cross3_bags` have run — see there for why a single combined
-    /// check is more robust than checking only right after this one entry.
+    /// Given a salvo whose result bag contained a 3, record the entry — the
+    /// true Cruiser hit is one of its 3 coordinates, we just don't know
+    /// which yet (see `Cross3Entry::coord_ruled_out`, refreshed every round
+    /// by `refresh_cross3_entry_flags`).
     fn apply_cruiser_cross_tracking(&mut self, coords: [(usize, usize); 3], values: [usize; 3]) {
-        let mut bag_mask = [[false; 10]; 10];
-        for &(r, c) in &coords {
-            Self::mark_cross_reach(&mut bag_mask, r, c, 2);
-        }
-
-        let mut bag_cells = Vec::new();
-        for row in INNER_LO..=INNER_HI {
-            for col in INNER_LO..=INNER_HI {
-                if bag_mask[row][col] && self.alive_value(row, col, 3) > 0 {
-                    bag_cells.push((row, col));
-                }
-            }
-        }
         self.cross3_entries.push(Cross3Entry {
             coords,
             values,
-            bag: bag_cells,
+            coord_ruled_out: [false; 3],
+        });
+    }
+
+    /// Given a salvo whose result bag contained a 2, record the entry — the
+    /// true Frigate hit is one of its 3 coordinates, we just don't know which
+    /// yet (see `Cross2Entry::coord_ruled_out`, refreshed every round by
+    /// `refresh_cross2_entry_flags`).
+    fn apply_frigate_cross_tracking(&mut self, coords: [(usize, usize); 3], values: [usize; 3]) {
+        self.cross2_entries.push(Cross2Entry {
+            coords,
+            values,
             coord_ruled_out: [false; 3],
         });
     }
@@ -747,7 +686,7 @@ impl AiPlayer {
     /// horizontal *or* vertical, passes through this cell at all, regardless of
     /// whether the cell itself was ever individually fired or excluded. This is
     /// what the "Ship alive grids" debug view shows (see `alive_grids`), and
-    /// what `prune_cross3_bags` uses to decide a cell is dead for size 3.
+    /// what `refresh_cross3_entry_flags` uses to decide a cell is dead for size 3.
     fn alive_value(&self, row: usize, col: usize, size: usize) -> u32 {
         let horizontal = Self::line_state_score(Self::line_state_for_size(&self.row_state[row], size), size, col - INNER_LO);
         let vertical = Self::line_state_score(Self::line_state_for_size(&self.col_state[col], size), size, row - INNER_LO);
@@ -757,7 +696,7 @@ impl AiPlayer {
     /// The 3 debug grids for `size` (4, 3, or 2): horizontal alive value,
     /// vertical alive value, and their sum, one entry per inner cell (8x8,
     /// indexed 0..8 for board rows/cols 1..8). For size 3 the combined grid is
-    /// exactly the criterion `prune_cross3_bags` uses.
+    /// exactly the criterion `refresh_cross3_entry_flags` uses.
     pub fn alive_grids(&self, size: usize) -> (Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<Vec<u32>>) {
         let mut horizontal = vec![vec![0u32; 8]; 8];
         let mut vertical = vec![vec![0u32; 8]; 8];
@@ -772,30 +711,6 @@ impl AiPlayer {
             }
         }
         (horizontal, vertical, combined)
-    }
-
-    /// Strip any cell now proven impossible for a Cruiser out of every stored
-    /// cross-3 bag — a cell is dead once `alive_value(.., 3)` is zero,
-    /// regardless of whether it was ever individually fired. Bags are built
-    /// once, from raw geometry, when their salvo is processed — a *later*
-    /// salvo (an ordinary miss elsewhere, the Battleship being identified and
-    /// ruling out its neighbours, or the discovered-3 bag ruling out
-    /// everything outside it) can prove some of those cells impossible after
-    /// the fact — including cells that were never themselves fired, if enough
-    /// of their row or column has been eliminated that no placement can
-    /// possibly reach them any more. Without this, stale cells would linger
-    /// forever, which could make two bags that are ACTUALLY disjoint — once
-    /// you account for everything we now know — still look like they overlap.
-    fn prune_cross3_bags(&mut self) {
-        let mut alive = [[0u32; 10]; 10];
-        for row in INNER_LO..=INNER_HI {
-            for col in INNER_LO..=INNER_HI {
-                alive[row][col] = self.alive_value(row, col, 3);
-            }
-        }
-        for entry in &mut self.cross3_entries {
-            entry.bag.retain(|&(r, c)| alive[r][c] > 0);
-        }
     }
 
     /// Re-check, for every cross-3 entry, whether each of its 3 ORIGINAL fired
@@ -831,294 +746,166 @@ impl AiPlayer {
         }
     }
 
-    /// Check every pair of cross-3 entries for disjointness (see
-    /// `apply_cruiser_cross_tracking`'s doc comment for why disjoint proves two
-    /// different Cruisers). Re-derives from scratch every time it's called
-    /// rather than only checking the newest entry, because pruning stale cells
-    /// out of *existing* bags — not just adding a new one — can just as easily
-    /// be what makes a pair newly disjoint.
-    fn recheck_cross3_disjoint_pairs(&mut self) {
-        for i in 0..self.cross3_entries.len() {
-            for j in (i + 1)..self.cross3_entries.len() {
-                let disjoint = self.cross3_entries[i]
-                    .bag
-                    .iter()
-                    .all(|cell| !self.cross3_entries[j].bag.contains(cell));
-                if disjoint {
-                    let mut union = [[false; 10]; 10];
-                    for &(r, c) in &self.cross3_entries[i].bag {
-                        union[r][c] = true;
-                    }
-                    for &(r, c) in &self.cross3_entries[j].bag {
-                        union[r][c] = true;
-                    }
-                    self.discovered_3_bag = Some(union);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Every cell outside the discovered-3 bag can't hold either Cruiser — feed
-    /// it into the size-3 FSM the same way a real miss would be, guarded by
-    /// `discovered_3_processed` so this never redrives the same transition twice.
-    ///
-    /// Eliminates unconditionally, even for already-fired cells: a salvo whose
-    /// bound is 3 or 4 never eliminates size 3 for any of its 3 cells via the
-    /// normal apply_hit path (any of them could ambiguously be the real hit) —
-    /// see `apply_salvo`. So a decoy cell fired as part of such an ambiguous
-    /// salvo would otherwise never get size 3 eliminated at all, even once it's
-    /// proven to fall outside the discovered-3 region. Safe to call more than
-    /// once on the same cell — the FSM transition tables are idempotent per
-    /// column.
-    fn apply_discovered_3_elimination(&mut self, discovered: [[bool; 10]; 10]) {
-        for row in INNER_LO..=INNER_HI {
-            for col in INNER_LO..=INNER_HI {
-                if !discovered[row][col] && !self.discovered_3_processed[row][col] {
-                    self.discovered_3_processed[row][col] = true;
-                    self.eliminate_size_at(row, col, 3);
-                }
-            }
-        }
-    }
-
-    /// Tighten the discovered-3 bag itself, removing cells that can no longer
-    /// actually be a Cruiser cell even though they're still inside the union:
-    ///
-    /// - it's since been proven to hold the Battleship instead (a board cell
-    ///   can only ever hold one ship, so a confirmed Battleship cell is
-    ///   definitely not a Cruiser cell);
-    /// - it's a confirmed miss (part of an all-zero salvo, so it's plain
-    ///   water, not part of *either* ship);
-    /// - it can't physically fit a straight run of 3 within the bag itself —
-    ///   every real Cruiser cell's whole 3-length run must lie entirely
-    ///   inside the bag (see `apply_discovered_3_elimination`'s doc comment:
-    ///   everywhere outside is already ruled out), so a bag cell with no
-    ///   run of >=3 through it, horizontal or vertical, measured against the
-    ///   bag mask itself, is a contradiction.
-    ///
-    /// Re-scans to a fixed point, since shrinking the mask for one reason can
-    /// break the room another cell was relying on. Cells dropped here are
-    /// picked up by the next `apply_discovered_3_elimination` call the same
-    /// way any other newly-outside cell would be.
-    fn prune_discovered_3_bag(&mut self) {
-        let Some(mut discovered) = self.discovered_3_bag else {
-            return;
-        };
-        let battleship_cells = self.battleship_identified();
-        loop {
-            let mut removed = false;
-            for row in INNER_LO..=INNER_HI {
-                for col in INNER_LO..=INNER_HI {
-                    if !discovered[row][col] {
-                        continue;
-                    }
-                    let is_battleship_cell =
-                        battleship_cells.is_some_and(|cells| cells.contains(&(row, col)));
-                    let is_confirmed_miss = self.confirmed_miss[row][col];
-                    // The direct, most general check: has ANYTHING (a real
-                    // hit whose bound is small enough to eliminate size 3 at
-                    // its own cell, e.g. a bound=2 Frigate hit; the Battleship
-                    // adjacency sweep; an unrelated row/column narrowing —
-                    // anything at all) already driven this cell's combined
-                    // alive value to zero? The other three checks below each
-                    // catch one *specific* route to that same conclusion, but
-                    // this is the ground truth the FSM itself tracks, and the
-                    // only one of the four that catches every route.
-                    let is_dead_for_size3 = self.alive_value(row, col, 3) == 0;
-                    let h = Self::max_contiguous_run_horizontal(&discovered, row, col);
-                    let v = Self::max_contiguous_run_vertical(&discovered, row, col);
-                    let lacks_room = h < 3 && v < 3;
-                    if is_battleship_cell || is_confirmed_miss || is_dead_for_size3 || lacks_room {
-                        discovered[row][col] = false;
-                        removed = true;
-                    }
-                }
-            }
-            if !removed {
-                break;
-            }
-        }
-        self.discovered_3_bag = Some(discovered);
-    }
-
-    /// Cells in the discovered-3 bag (see `apply_cruiser_cross_tracking`) — empty
-    /// until two mutually-disjoint cross-3 bags have been found.
-    pub fn discovered_3_cells(&self) -> Vec<(usize, usize)> {
-        match &self.discovered_3_bag {
-            Some(mask) => {
-                let mut cells = Vec::new();
-                for row in INNER_LO..=INNER_HI {
-                    for col in INNER_LO..=INNER_HI {
-                        if mask[row][col] {
-                            cells.push((row, col));
-                        }
-                    }
-                }
-                cells
-            }
-            None => Vec::new(),
-        }
-    }
-
-    /// Every 3-bearing salvo processed so far, in order, with its derived
-    /// cross-3 bag. Exposed for the debug/inspector UI.
+    /// Every 3-bearing salvo processed so far, in order. Exposed for the
+    /// debug/inspector UI.
     pub fn cross3_entries(&self) -> &[Cross3Entry] {
         &self.cross3_entries
     }
 
-    /// If exactly one straight-3 line survives `cruiser_combination_candidates`,
-    /// that's provably a sunk Cruiser's true layout — the real combination is
-    /// always among the candidates, so if it's the only survivor, it must be
-    /// it. Records it (once — `found_cruisers` de-dupes) and treats it
-    /// exactly like a found Battleship: its own cells and every neighbour
-    /// rule out a Cruiser or Frigate. Called from both `apply_salvo` (so
-    /// later salvos that organically complete the picture are caught) and
-    /// `mark_sunk` (to catch it immediately on the exact salvo that sinks a
-    /// ship, before `apply_salvo`'s own view of the sunk count goes stale).
-    fn check_and_apply_found_cruisers(&mut self) {
-        let found = self.cruiser_combination_candidates();
-        if found.len() == 1 && !self.found_cruisers.contains(&found[0]) {
-            self.found_cruisers.push(found[0]);
-            self.apply_found_cruiser_adjacency_elimination(found[0]);
-        }
-    }
-
-    /// When `cruiser_combination_candidates` narrows to exactly 2 possible
-    /// layouts, find a coordinate that belongs to only one of them (the two
-    /// combos are never identical, so at least one such cell always exists).
-    /// Firing it — alongside 2 cells already proven impossible to be a
-    /// Cruiser, so any "3" in the result can only be attributed to this one
-    /// — settles which of the two layouts is real: a 3 confirms the combo
-    /// containing it, no 3 confirms the other one (see `apply_salvo`'s
-    /// handling of `pending_cruiser_disambiguation`). Returns `None` unless
-    /// exactly 2 combos currently survive.
-    fn find_cruiser_disambiguation(
-        &self,
-    ) -> Option<((usize, usize), [(usize, usize); 3], [(usize, usize); 3])> {
-        let combos = self.cruiser_combination_candidates();
-        if combos.len() != 2 {
-            return None;
-        }
-        let (a, b) = (combos[0], combos[1]);
-        for &cell in &a {
-            if !b.contains(&cell) {
-                return Some((cell, a, b));
+    /// Re-check, for every cross-2 entry, whether each of its 3 ORIGINAL fired
+    /// coordinates could still possibly be the real Frigate hit that produced
+    /// that salvo's "2" — mirrors `refresh_cross3_entry_flags` one size down,
+    /// but deliberately stops at this single "traffic light" read-out: purely
+    /// the size-2 FSM's own alive value fed straight back into the Cross-2
+    /// Bag's coordinate list, with no combination search, same-Frigate
+    /// pairing, or "found" identification layered on top (Frigate discovery
+    /// is intentionally not attempted — only sinking is tracked). A cell on
+    /// the outer ring never holds a ship of size >=2, so it's ruled out
+    /// immediately; an inner cell is ruled out once its own alive value for
+    /// size 2 has dropped to zero (see `alive_value`) — whether a Cruiser or
+    /// Battleship might ALSO still be possible there is irrelevant to
+    /// whether THIS cell could be a Frigate. Called at the end of every
+    /// round so `coord_ruled_out` always reflects everything the FSM has
+    /// deduced so far, not just what was known when the entry was created.
+    fn refresh_cross2_entry_flags(&mut self) {
+        let is_ruled_out = |ai: &Self, row: usize, col: usize| {
+            if (INNER_LO..=INNER_HI).contains(&row) && (INNER_LO..=INNER_HI).contains(&col) {
+                // Whether this coordinate could still be THIS bag's Frigate
+                // hit depends only on size 2's own alive value — whether a
+                // Cruiser or Battleship might ALSO still be possible here is
+                // irrelevant to that question (mirrors
+                // `refresh_cross3_entry_flags`, which only ever checks its
+                // own size 3 for the same reason).
+                ai.alive_value(row, col, 2) == 0
+            } else {
+                true // outer ring: never holds a ship of size >=2 in the first place
             }
-        }
-        for &cell in &b {
-            if !a.contains(&cell) {
-                return Some((cell, b, a));
-            }
-        }
-        None // unreachable if a != b, which cruiser_combination_candidates guarantees
-    }
-
-    /// Recompute `pending_cruiser_disambiguation` from the current
-    /// combination search. Called at the end of `apply_salvo` and from
-    /// `mark_sunk`, mirroring `check_and_apply_found_cruisers`'s two call
-    /// sites for the same reason (catching the exact round something
-    /// changes, not just eventually on some later round).
-    fn refresh_cruiser_disambiguation(&mut self) {
-        self.pending_cruiser_disambiguation = self.find_cruiser_disambiguation();
-    }
-
-    /// True if (row, col) is the coordinate `choose_shots` deliberately fired
-    /// to disambiguate between 2 possible Cruiser layouts — used by
-    /// `Game::fire` to let that one specific refire through even when the
-    /// general refire-allowed toggle is off, since this is a deliberate
-    /// internal strategy, not the debug/experimentation relaxation.
-    pub fn is_pending_cruiser_disambiguation(&self, row: usize, col: usize) -> bool {
-        self.pending_cruiser_disambiguation
-            .is_some_and(|(coord, _, _)| coord == (row, col))
-    }
-
-    /// Once at least one Cruiser is sunk, there's an extra deduction
-    /// available regardless of how many cross-3 salvos have piled up by
-    /// then (could be exactly 3, could be 4, 5, or more if some salvos'
-    /// decoys never panned out): every sunk Cruiser's 3 real cells must each
-    /// have shown up as the (unknown-which-one) hit in some cross-3 salvo,
-    /// and — critically — no two of those 3 real cells can ever have come
-    /// from the SAME salvo entry, since each entry is one salvo's worth of
-    /// ambiguity contributing at most one real Cruiser hit to reason about
-    /// here (two real hits landing in the same salvo would show as two
-    /// separate 3s in that one salvo's bag, which is a different, simpler
-    /// case not handled by this combinatorial search).
-    ///
-    /// So: pick any 3 DISTINCT cross-3 entries (every possible such triple,
-    /// not just "the first 3"), take one still-possible (non-red-flagged —
-    /// see `Cross3Entry::coord_ruled_out`) coordinate from each of the 3
-    /// chosen entries, and keep the combination only if those 3 coordinates
-    /// form a valid straight, contiguous 3-cell line. Every survivor is a
-    /// candidate for what some sunk Cruiser's real layout could be. Purely a
-    /// reporting/debug aid for now — returns every surviving combination
-    /// (deduplicated), doesn't eliminate anything on its own. Empty unless
-    /// at least one Cruiser is sunk.
-    pub fn cruiser_combination_candidates(&self) -> Vec<[(usize, usize); 3]> {
-        if self.sunk_sizes[3] == 0 {
-            return Vec::new();
-        }
-
-        let candidates: Vec<Vec<(usize, usize)>> = self
-            .cross3_entries
+        };
+        let flags: Vec<[bool; 3]> = self
+            .cross2_entries
             .iter()
             .map(|entry| {
-                entry
-                    .coords
-                    .iter()
-                    .zip(entry.coord_ruled_out.iter())
-                    .filter(|(_, &ruled_out)| !ruled_out)
-                    .map(|(&c, _)| c)
-                    .collect()
+                let mut flags = [false; 3];
+                for (i, &(r, c)) in entry.coords.iter().enumerate() {
+                    flags[i] = is_ruled_out(self, r, c);
+                }
+                flags
             })
             .collect();
+        for (entry, entry_flags) in self.cross2_entries.iter_mut().zip(flags) {
+            entry.coord_ruled_out = entry_flags;
+        }
+    }
 
-        let n = candidates.len();
-        let mut combinations: Vec<[(usize, usize); 3]> = Vec::new();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                for k in (j + 1)..n {
-                    for &a in &candidates[i] {
-                        for &b in &candidates[j] {
-                            for &c in &candidates[k] {
-                                let mut combo = [a, b, c];
-                                if !Self::is_straight_run_of_3(&combo) {
-                                    continue;
-                                }
-                                combo.sort();
-                                if !combinations.contains(&combo) {
-                                    combinations.push(combo);
-                                }
-                            }
-                        }
+    /// Every 2-bearing salvo processed so far, in order. Exposed for the
+    /// debug/inspector UI.
+    pub fn cross2_entries(&self) -> &[Cross2Entry] {
+        &self.cross2_entries
+    }
+
+    /// Re-check, for every cross-4 entry, whether each of its 3 original
+    /// fired coordinates could still possibly be the real Battleship hit
+    /// that produced that salvo's "4" — mirrors `refresh_cross3_entry_flags`/
+    /// `refresh_cross2_entry_flags` one size up, but simpler: there's only
+    /// one Battleship, so no found-ship entry overrides or same-ship pairing
+    /// are needed here, just the generic "has the combined size-4 alive
+    /// value at this coordinate dropped to zero" check.
+    fn refresh_cross4_entry_flags(&mut self) {
+        let is_ruled_out = |ai: &Self, row: usize, col: usize| {
+            if (INNER_LO..=INNER_HI).contains(&row) && (INNER_LO..=INNER_HI).contains(&col) {
+                ai.alive_value(row, col, 4) == 0
+            } else {
+                true // outer ring: never a Battleship cell in the first place
+            }
+        };
+        let flags: Vec<[bool; 3]> = self
+            .cross4_entries
+            .iter()
+            .map(|entry| {
+                let mut flags = [false; 3];
+                for (i, &(r, c)) in entry.coords.iter().enumerate() {
+                    flags[i] = is_ruled_out(self, r, c);
+                }
+                flags
+            })
+            .collect();
+        for (entry, entry_flags) in self.cross4_entries.iter_mut().zip(flags) {
+            entry.coord_ruled_out = entry_flags;
+        }
+        // If an entry's own OTHER 2 candidates are already ruled out, its
+        // one remaining candidate is confirmed with total certainty — see
+        // `derive_confirmed_battleship_hits_by_elimination`. Runs before
+        // the window-pruning step below so a cell confirmed this round
+        // feeds it immediately.
+        self.derive_confirmed_battleship_hits_by_elimination();
+        // Once at least one cell is a confirmed Battleship hit, the real
+        // ship must be one of the straight-4 windows passing through it —
+        // see `prune_candidates_not_through_confirmed`.
+        self.prune_candidates_not_through_confirmed();
+    }
+
+    /// Once a Cross-4 entry's bag contains a "4" and every coordinate but
+    /// one has been ruled out, that one is a certain Battleship hit —
+    /// mirrors `derive_confirmed_cruiser_hits_by_elimination`/
+    /// `derive_confirmed_frigate_hits_by_elimination` one size up.
+    fn derive_confirmed_battleship_hits_by_elimination(&mut self) {
+        for entry in &mut self.cross4_entries {
+            if !entry.values.contains(&4) {
+                continue;
+            }
+            let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
+            if let [only] = open[..] {
+                entry.coord_confirmed_battleship_hit[only] = true;
+            }
+        }
+    }
+
+    /// Once at least one cell is confirmed a genuine Battleship hit (see
+    /// `derive_confirmed_battleship_hits_by_elimination`), the real ship
+    /// must be exactly one of the straight-4 windows passing through EVERY
+    /// confirmed cell — any candidate that isn't part of at least one such
+    /// window can be eliminated outright, the same way
+    /// `apply_battleship_cross_elimination`'s union-of-crosses trick
+    /// already eliminates candidates outside the running cross
+    /// intersection.
+    fn prune_candidates_not_through_confirmed(&mut self) {
+        let confirmed: Vec<(usize, usize)> = self
+            .cross4_entries
+            .iter()
+            .flat_map(|e| {
+                e.coords
+                    .iter()
+                    .zip(e.coord_confirmed_battleship_hit.iter())
+                    .filter(|(_, &c)| c)
+                    .map(|(&coord, _)| coord)
+            })
+            .collect();
+        if confirmed.is_empty() {
+            return;
+        }
+        let windows = self.battleship_candidate_windows();
+        let surviving: Vec<&[(usize, usize); 4]> =
+            windows.iter().filter(|w| confirmed.iter().all(|c| w.contains(c))).collect();
+        if surviving.is_empty() {
+            return; // shouldn't happen on a consistent board; don't guess
+        }
+        let mut safe = [[false; 10]; 10];
+        for window in &surviving {
+            for &(r, c) in window.iter() {
+                safe[r][c] = true;
+            }
+        }
+        self.drop_candidates(|ai| {
+            let mut dead = Vec::new();
+            for row in INNER_LO..=INNER_HI {
+                for col in INNER_LO..=INNER_HI {
+                    if ai.battleship_candidates[row][col] && !safe[row][col] {
+                        dead.push((row, col));
                     }
                 }
             }
-        }
-        combinations
-    }
-
-    /// Every Cruiser layout confirmed so far via `cruiser_combination_candidates`
-    /// narrowing to exactly one surviving combination — for the debug UI to
-    /// render as "found" (e.g. coloured green), distinct from the merely
-    /// still-possible combinations reported elsewhere.
-    pub fn found_cruisers(&self) -> &[[(usize, usize); 3]] {
-        &self.found_cruisers
-    }
-
-    /// True if the 3 given cells, regardless of order, form a contiguous
-    /// straight line of exactly 3 cells — either horizontal (same row,
-    /// consecutive columns) or vertical (same column, consecutive rows).
-    fn is_straight_run_of_3(cells: &[(usize, usize); 3]) -> bool {
-        let mut sorted = *cells;
-        sorted.sort();
-        if sorted[0].0 == sorted[1].0 && sorted[1].0 == sorted[2].0 {
-            return sorted[1].1 == sorted[0].1 + 1 && sorted[2].1 == sorted[1].1 + 1;
-        }
-        if sorted[0].1 == sorted[1].1 && sorted[1].1 == sorted[2].1 {
-            return sorted[1].0 == sorted[0].0 + 1 && sorted[2].0 == sorted[1].0 + 1;
-        }
-        false
+            dead
+        });
     }
 
     /// Every 4-bearing salvo processed so far, in order. Exposed for the
@@ -1170,11 +957,23 @@ impl AiPlayer {
         if self.four_bearing_salvo_count < 2 {
             return None;
         }
+        let windows = self.battleship_candidate_windows();
+        if let [only] = windows[..] {
+            Some(only)
+        } else {
+            None
+        }
+    }
 
+    /// Every valid straight-4 window still consistent with the current
+    /// Battleship candidate mask (`battleship_candidates`) — the full list
+    /// `battleship_identified` collapses down to a single result (or none)
+    /// for, exposed here so a genuinely discriminating test shot can be
+    /// chosen when more than one window survives (see
+    /// `battleship_discriminating_test_cell`).
+    fn battleship_candidate_windows(&self) -> Vec<[(usize, usize); 4]> {
         let is_possible = |r: usize, c: usize| self.battleship_candidates[r][c];
-
-        let mut found: Option<[(usize, usize); 4]> = None;
-        let mut count = 0usize;
+        let mut windows = Vec::new();
 
         // Horizontal placements: every row, every starting column that keeps all
         // 4 cells within the inner 1..=8 range.
@@ -1182,8 +981,7 @@ impl AiPlayer {
             for start in INNER_LO..=(INNER_HI - 3) {
                 let cells = [(row, start), (row, start + 1), (row, start + 2), (row, start + 3)];
                 if cells.iter().all(|&(r, c)| is_possible(r, c)) {
-                    count += 1;
-                    found = Some(cells);
+                    windows.push(cells);
                 }
             }
         }
@@ -1192,17 +990,80 @@ impl AiPlayer {
             for start in INNER_LO..=(INNER_HI - 3) {
                 let cells = [(start, col), (start + 1, col), (start + 2, col), (start + 3, col)];
                 if cells.iter().all(|&(r, c)| is_possible(r, c)) {
-                    count += 1;
-                    found = Some(cells);
+                    windows.push(cells);
+                }
+            }
+        }
+        windows
+    }
+
+    /// A coordinate present in SOME but not EVERY still-possible Battleship
+    /// window — firing there teaches something (a miss rules out every
+    /// window containing it; a hit rules out every window that does NOT),
+    /// unlike a coordinate common to every surviving window, which is a
+    /// guaranteed hit but resolves nothing about which exact window is
+    /// real. `None` when
+    /// fewer than 2 windows survive (nothing left to discriminate
+    /// between), or in the degenerate case where every remaining
+    /// candidate cell happens to be common to every window.
+    ///
+    /// Requires at least 2 cross-4 salvos, same as `battleship_identified` —
+    /// after just 1, `battleship_candidates` is still a single raw cross,
+    /// not yet narrowed by any actual intersection, so it trivially
+    /// contains dozens of straight-4 sub-windows that don't reflect
+    /// genuine remaining ambiguity about the real ship. "Discriminating"
+    /// between those is noise, not signal: it can pick a coordinate with
+    /// almost no elimination value at all over one sitting in the middle
+    /// of the busiest, most-informative part of the cross, purely because
+    /// it happens to not appear in every one of those largely-arbitrary
+    /// sub-windows. Once a 2nd salvo's intersection has actually narrowed
+    /// the candidate set, the survivors are few enough that discriminating
+    /// between them is meaningful again.
+    fn battleship_discriminating_test_cell(&self) -> Option<(usize, usize)> {
+        if self.four_bearing_salvo_count < 2 {
+            return None;
+        }
+        let windows = self.battleship_candidate_windows();
+        if windows.len() < 2 {
+            return None;
+        }
+        let is_discriminating = |r: usize, c: usize| !windows.iter().all(|w| w.contains(&(r, c)));
+
+        // Prefer a fresh, never-fired discriminating cell when one exists.
+        for window in &windows {
+            for &(r, c) in window {
+                if !self.fired[r][c] && is_discriminating(r, c) {
+                    return Some((r, c));
                 }
             }
         }
 
-        if count == 1 {
-            found
-        } else {
-            None
+        // Every discriminating cell may already be fired — e.g. all of them
+        // were ambiguous decoys in earlier cross-4 salvos (a "5 adjacent
+        // candidates, 2 overlapping windows" cluster where both outer cells
+        // were already part of some salvo). Re-firing one is still the ONLY
+        // way to ever resolve which window is real: every OTHER surviving
+        // candidate is common to every window, so hitting one just confirms
+        // a hit without discriminating anything — the ambiguity would
+        // otherwise never close. See `is_battleship_discriminating_refire`,
+        // which lets this specific refire through even with the general
+        // refire-allowed toggle off.
+        for window in &windows {
+            for &(r, c) in window {
+                if is_discriminating(r, c) {
+                    return Some((r, c));
+                }
+            }
         }
+        None
+    }
+
+    /// True if (row, col) is the coordinate `choose_shots` deliberately
+    /// picked via `battleship_discriminating_test_cell` — used by
+    /// `Game::fire` to let that one specific refire through even when the
+    /// general refire-allowed toggle is off.
+    pub fn is_battleship_discriminating_refire(&self, row: usize, col: usize) -> bool {
+        self.fired[row][col] && self.battleship_discriminating_test_cell() == Some((row, col))
     }
 
     /// The Battleship's exact 4-cell layout, once `battleship_identified` has
@@ -1210,6 +1071,18 @@ impl AiPlayer {
     /// "candidate" outline. Empty until then.
     pub fn battleship_identified_cells(&self) -> Vec<(usize, usize)> {
         match self.battleship_identified() {
+            Some(cells) => cells.to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The Battleship's exact 4-cell layout, permanently, once confirmed
+    /// sunk (see `found_battleship`) — for the UI to keep rendering it even
+    /// after the live candidate/identified state is cleared. Empty if the
+    /// ship hasn't sunk yet, or if it sank via ordinary fire before
+    /// `battleship_identified` ever narrowed things down to one window.
+    pub fn found_battleship_cells(&self) -> Vec<(usize, usize)> {
+        match self.found_battleship {
             Some(cells) => cells.to_vec(),
             None => Vec::new(),
         }
@@ -1346,31 +1219,23 @@ impl AiPlayer {
         }
         let mut score = 0u32;
 
-        for &size in &SHIP_SIZES {
-            if self.size_fully_found(size) {
-                continue;
-            }
-            if (INNER_LO..=INNER_HI).contains(&col) {
-                let table_col = col - INNER_LO;
-                let cur = Self::line_state_for_size(&self.row_state[row], size);
-                let v = match size {
-                    4 => VALUES_SIZE4[cur][table_col],
-                    3 => VALUES_SIZE3[cur][table_col],
-                    2 => VALUES_SIZE2[cur][table_col],
+        let cell_is_inner = (INNER_LO..=INNER_HI).contains(&row) && (INNER_LO..=INNER_HI).contains(&col);
+        if cell_is_inner {
+            let table_col = col - INNER_LO;
+            let table_row = row - INNER_LO;
+            for &size in &SHIP_SIZES {
+                if self.size_fully_found(size) {
+                    continue;
+                }
+                let cur_row = Self::line_state_for_size(&self.row_state[row], size);
+                let cur_col = Self::line_state_for_size(&self.col_state[col], size);
+                let (v_row, v_col) = match size {
+                    4 => (VALUES_SIZE4[cur_row][table_col], VALUES_SIZE4[cur_col][table_row]),
+                    3 => (VALUES_SIZE3[cur_row][table_col], VALUES_SIZE3[cur_col][table_row]),
+                    2 => (VALUES_SIZE2[cur_row][table_col], VALUES_SIZE2[cur_col][table_row]),
                     _ => unreachable!(),
                 };
-                score += v as u32;
-            }
-            if (INNER_LO..=INNER_HI).contains(&row) {
-                let table_row = row - INNER_LO;
-                let cur = Self::line_state_for_size(&self.col_state[col], size);
-                let v = match size {
-                    4 => VALUES_SIZE4[cur][table_row],
-                    3 => VALUES_SIZE3[cur][table_row],
-                    2 => VALUES_SIZE2[cur][table_row],
-                    _ => unreachable!(),
-                };
-                score += v as u32;
+                score += v_row as u32 + v_col as u32;
             }
         }
 
@@ -1408,16 +1273,12 @@ impl AiPlayer {
     /// *hypothetical* working copy of that size's row/col FSM states (as opposed
     /// to `self.row_state`/`self.col_state`, which reflect only confirmed info).
     fn size_cell_score(row_line: &[usize; 10], col_line: &[usize; 10], row: usize, col: usize, size: usize) -> u32 {
-        let mut score = 0u32;
-        if (INNER_LO..=INNER_HI).contains(&col) {
-            let table_col = col - INNER_LO;
-            score += Self::line_state_score(row_line[row], size, table_col);
+        if !(INNER_LO..=INNER_HI).contains(&row) || !(INNER_LO..=INNER_HI).contains(&col) {
+            return 0;
         }
-        if (INNER_LO..=INNER_HI).contains(&row) {
-            let table_row = row - INNER_LO;
-            score += Self::line_state_score(col_line[col], size, table_row);
-        }
-        score
+        let table_col = col - INNER_LO;
+        let table_row = row - INNER_LO;
+        Self::line_state_score(row_line[row], size, table_col) + Self::line_state_score(col_line[col], size, table_row)
     }
 
     /// Fold a *hypothetical* miss at (row, col) into a working copy of `size`'s
@@ -1425,14 +1286,13 @@ impl AiPlayer {
     /// that size's FSM look like afterwards". Mirrors `eliminate_size_at`, but
     /// operates on local scratch state rather than `self`.
     fn apply_hypothetical_miss(row_line: &mut [usize; 10], col_line: &mut [usize; 10], row: usize, col: usize, size: usize) {
-        if (INNER_LO..=INNER_HI).contains(&col) {
-            let table_col = col - INNER_LO;
-            row_line[row] = Self::line_state_transition(row_line[row], size, table_col);
+        if !(INNER_LO..=INNER_HI).contains(&row) || !(INNER_LO..=INNER_HI).contains(&col) {
+            return;
         }
-        if (INNER_LO..=INNER_HI).contains(&row) {
-            let table_row = row - INNER_LO;
-            col_line[col] = Self::line_state_transition(col_line[col], size, table_row);
-        }
+        let table_col = col - INNER_LO;
+        let table_row = row - INNER_LO;
+        row_line[row] = Self::line_state_transition(row_line[row], size, table_col);
+        col_line[col] = Self::line_state_transition(col_line[col], size, table_row);
     }
 
     /// Find the unfired, not-yet-chosen-this-salvo cell with the highest score
@@ -1455,14 +1315,24 @@ impl AiPlayer {
     /// to cap how many of a salvo's 3 shots may land in that region (see
     /// `choose_shots`). Falls back to allowing candidate cells after all if no
     /// eligible non-candidate cell remains, rather than picking nothing.
+    ///
+    /// If `require_candidates` is set instead (mutually exclusive with
+    /// `forbid_candidates` — no caller sets both), only cells INSIDE that same
+    /// candidate set are considered — the opposite restriction, for when a shot
+    /// should specifically dig into the Battleship's already-narrowed region
+    /// rather than the raw per-cell score wandering off to some untouched row
+    /// or column elsewhere on the board that merely hasn't been narrowed by
+    /// anything yet (see `choose_shots`'s first-pick fallback). Falls back to
+    /// the ordinary unrestricted search if no eligible candidate cell remains.
     fn best_cell_by_score(
         &self,
         chosen_so_far: &[(usize, usize)],
         forbid_candidates: bool,
+        require_candidates: bool,
         allow_refired: bool,
         score_fn: impl Fn(usize, usize) -> u32,
     ) -> (usize, usize) {
-        let search = |forbid: bool| {
+        let search = |forbid: bool, require: bool| {
             let mut best_score: i64 = -1;
             let mut best_cell: Option<(usize, usize)> = None;
             for r in INNER_LO..=INNER_HI {
@@ -1471,6 +1341,9 @@ impl AiPlayer {
                         continue;
                     }
                     if forbid && self.battleship_candidates[r][c] {
+                        continue;
+                    }
+                    if require && !self.battleship_candidates[r][c] {
                         continue;
                     }
                     let score = score_fn(r, c) as i64;
@@ -1483,14 +1356,14 @@ impl AiPlayer {
             best_cell
         };
 
-        if let Some(cell) = search(forbid_candidates) {
+        if let Some(cell) = search(forbid_candidates, require_candidates) {
             return cell;
         }
 
-        if forbid_candidates {
-            // No eligible non-candidate cell left — better to use up our one
-            // candidate-region allowance than to fail outright.
-            if let Some(cell) = search(false) {
+        if forbid_candidates || require_candidates {
+            // No eligible cell satisfying the restriction — fall back to the
+            // ordinary unrestricted search rather than failing outright.
+            if let Some(cell) = search(false, false) {
                 return cell;
             }
         }
@@ -1517,10 +1390,11 @@ impl AiPlayer {
         col_line: &[usize; 10],
         chosen_so_far: &[(usize, usize)],
         forbid_candidates: bool,
+        require_candidates: bool,
         allow_refired: bool,
         size: usize,
     ) -> (usize, usize) {
-        self.best_cell_by_score(chosen_so_far, forbid_candidates, allow_refired, |r, c| {
+        self.best_cell_by_score(chosen_so_far, forbid_candidates, require_candidates, allow_refired, |r, c| {
             Self::size_cell_score(row_line, col_line, r, c, size)
         })
     }
@@ -1609,31 +1483,43 @@ impl AiPlayer {
     /// Once the cross-deduction trick has narrowed things down (`battleship_cross_seen`)
     /// but the exact cell isn't pinned down yet, only the *first* of the 3 shots gets an
     /// unrestricted, Battleship-only look — including at cells inside the current
-    /// candidate region. Reasoning: if two or more candidate cells were fired in the same
-    /// ambiguous salvo, a 4 in the result bag still wouldn't tell us *which* of them was
-    /// the hit — we'd be back to cross-intersecting again. Restricting the candidate
-    /// region to that first shot means a 4 can only have come from it, collapsing the
-    /// ambiguity immediately instead of costing another round of deduction.
+    /// candidate region. It specifically tries to test a coordinate that distinguishes
+    /// between the surviving candidate windows (see `battleship_discriminating_test_cell`,
+    /// which will refire an already-fired candidate if every discriminating cell happens
+    /// to have been fired already — that's still the only way the ambiguity ever closes).
+    /// Reasoning for why only one shot may ever touch the region: if two or more
+    /// candidate cells were fired in the same ambiguous salvo, a 4 in the result bag
+    /// still wouldn't tell us *which* of them was the hit — we'd be back to
+    /// cross-intersecting again, having wasted the whole point of the deliberate,
+    /// isolating test. Restricting the candidate region to that first shot means a 4 can
+    /// only have come from it, collapsing the ambiguity immediately instead of costing
+    /// another round of deduction. (An earlier version of this let the other 2 shots also
+    /// compete for the region on raw score — reverted: it let them land on OTHER
+    /// candidate cells in the very same salvo as the deliberate discriminating test,
+    /// destroying that test's whole reason for existing.)
     ///
     /// The other 2 shots are forced away from the candidate region regardless — they
-    /// can't help test it further this salvo — so rather than spend them purely hunting
-    /// the Battleship's line, they're scored against size-4 *and* size-3 (Cruiser)
-    /// combined. A shot that can't land near the Battleship anyway might as well also
-    /// make progress on the Cruisers instead of "wasting" its elimination value on a ship
-    /// whose region is already staked out.
+    /// can't help test it further this salvo — so rather than dig further into a
+    /// size-4 line that's already narrowed as far as this round's information allows,
+    /// they're scored purely against the Cruiser (size-3) FSM instead. A shot that
+    /// can't land near the Battleship anyway might as well make progress hunting the
+    /// Cruisers, rather than only ever re-confirming the same already-established
+    /// Battleship candidates.
     ///
     /// If `battleship_identified` has pinned down the exact 4-cell layout, none of that
-    /// applies any more — there's nothing left to protect or blend. Instead, this fills
+    /// applies any more — there's nothing left to protect or switch scoring for. Instead, this fills
     /// as many of the 3 shots as possible with that placement's still-unfired cells first
     /// (finishing the ship off directly), then falls back to the ordinary FSM search for
     /// any slots left over.
     pub fn choose_shots(&self) -> [(usize, usize); 3] {
-        // Resolving which of 2 possible Cruiser layouts is real is valuable
-        // enough to take priority over whatever size is currently being
-        // hunted — see `pending_cruiser_disambiguation`.
-        if let Some((coord, _, _)) = self.pending_cruiser_disambiguation {
-            return self.choose_disambiguation_shots(coord);
-        }
+        // Cruiser and Frigate discovery (pinpointing exact cells, and so
+        // also disambiguating between candidate layouts) are deliberately
+        // not attempted — see `refresh_cross3_entry_flags`/
+        // `refresh_cross2_entry_flags`. `chosen`/`avoid_as_filler` stay
+        // empty here; the loop below fills all 3 slots from the ordinary
+        // FSM search.
+        let mut chosen: Vec<(usize, usize)> = Vec::with_capacity(3);
+        let avoid_as_filler: Vec<(usize, usize)> = Vec::new();
 
         let size = self.current_target_size();
 
@@ -1641,7 +1527,7 @@ impl AiPlayer {
         // line-FSM tables above only cover sizes 4/3/2, so this must branch off
         // before touching them (line_state_for_size panics on anything else).
         if size == 1 {
-            return self.choose_submarine_shots();
+            return self.choose_submarine_shots(chosen, &avoid_as_filler);
         }
 
         let mut row_line: [usize; 10] = [0; 10];
@@ -1656,25 +1542,29 @@ impl AiPlayer {
         // The Battleship-specific cross machinery only makes sense while size 4
         // is still the target.
         let identified = if size == 4 { self.battleship_identified() } else { None };
-        let mut chosen: Vec<(usize, usize)> = Vec::with_capacity(3);
         if let Some(cells) = identified {
             for (r, c) in cells {
                 if chosen.len() >= 3 {
                     break;
                 }
-                if !self.fired[r][c] {
+                if !self.fired[r][c] && !chosen.contains(&(r, c)) {
                     chosen.push((r, c));
                 }
             }
         }
 
         // Still hunting the Battleship, hit it at least once, but haven't pinned
-        // down its exact cell: blend size-4 and size-3 scoring for every shot
-        // after the first (see doc comment above).
-        let blend_with_size3 = size == 4 && identified.is_none() && self.battleship_cross_seen;
+        // down its exact cell: the first shot targets the cross-4 bag itself
+        // (see below), but every shot after that is scored purely on the
+        // Cruiser FSM instead — deliberately searching OUTSIDE the cross-4
+        // bag (via `forbid_candidates`) rather than digging further into a
+        // region already narrowed as far as this round's information
+        // allows, so these 2 shots aren't wasted only ever re-confirming
+        // the same Battleship-candidate cells.
+        let hunt_with_cruiser_fsm = size == 4 && identified.is_none() && self.battleship_cross_seen;
         let mut row3: [usize; 10] = [0; 10];
         let mut col3: [usize; 10] = [0; 10];
-        if blend_with_size3 {
+        if hunt_with_cruiser_fsm {
             for r in 0..10 {
                 row3[r] = Self::line_state_for_size(&self.row_state[r], 3);
             }
@@ -1692,17 +1582,43 @@ impl AiPlayer {
             // Battleship's candidate region is a live concern at all.
             let forbid_candidates = size == 4 && identified.is_none() && self.battleship_cross_seen && !is_first_pick;
 
-            let next = if blend_with_size3 && !is_first_pick {
-                self.best_cell_by_score(&chosen, forbid_candidates, allow_refired, |r, c| {
-                    Self::size_cell_score(&row_line, &col_line, r, c, 4)
-                        + Self::size_cell_score(&row3, &col3, r, c, 3)
+            // Scoring must skip both the cells already chosen this round AND
+            // every cell reserved as "unsafe filler" above (see `avoid_as_filler`) —
+            // combined here since `best_cell_for_size`/`best_cell_by_score`
+            // only take a single exclusion list.
+            let exclude: Vec<(usize, usize)> = chosen.iter().chain(avoid_as_filler.iter()).copied().collect();
+
+            let next = if is_first_pick && size == 4 && identified.is_none() && self.battleship_cross_seen {
+                // The first shot, while the Battleship's exact cell is still
+                // unknown, is the one chance to test a coordinate that
+                // actually distinguishes between the surviving candidate
+                // windows — see `battleship_discriminating_test_cell`. Raw
+                // alive-value scoring below would otherwise happily settle
+                // for a coordinate common to every window (a guaranteed
+                // hit, but one that teaches nothing about which window is
+                // real), so try that first. If no such cell exists (e.g.
+                // early on, before enough cross-4 salvos have narrowed
+                // things down to well-formed windows at all), fall back to
+                // the generic scorer — but restricted to the candidate
+                // region already established by the cross-4 bag
+                // (`require_candidates`), rather than letting the raw
+                // per-cell score wander off to some untouched row or column
+                // elsewhere that merely hasn't been narrowed by anything
+                // yet and so looks deceptively "more alive". Digging
+                // further into the region we already have real information
+                // about is strictly more valuable than a blind guess
+                // outside it.
+                self.battleship_discriminating_test_cell().unwrap_or_else(|| {
+                    self.best_cell_for_size(&row_line, &col_line, &exclude, forbid_candidates, true, allow_refired, size)
                 })
+            } else if hunt_with_cruiser_fsm && !is_first_pick {
+                self.best_cell_for_size(&row3, &col3, &exclude, forbid_candidates, false, allow_refired, 3)
             } else {
-                self.best_cell_for_size(&row_line, &col_line, &chosen, forbid_candidates, allow_refired, size)
+                self.best_cell_for_size(&row_line, &col_line, &exclude, forbid_candidates, false, allow_refired, size)
             };
 
             Self::apply_hypothetical_miss(&mut row_line, &mut col_line, next.0, next.1, size);
-            if blend_with_size3 {
+            if hunt_with_cruiser_fsm {
                 Self::apply_hypothetical_miss(&mut row3, &mut col3, next.0, next.1, 3);
             }
             chosen.push(next);
@@ -1717,15 +1633,13 @@ impl AiPlayer {
     /// just prefers cells still marked as viable submarine candidates (see
     /// `sub_candidates`), then fills any remaining slots with whatever unfired
     /// cells are left.
-    fn choose_submarine_shots(&self) -> [(usize, usize); 3] {
-        let mut chosen: Vec<(usize, usize)> = Vec::with_capacity(3);
-
+    fn choose_submarine_shots(&self, mut chosen: Vec<(usize, usize)>, avoid: &[(usize, usize)]) -> [(usize, usize); 3] {
         'candidates: for r in 0..10 {
             for c in 0..10 {
                 if chosen.len() >= 3 {
                     break 'candidates;
                 }
-                if !self.fired[r][c] && self.sub_candidates[r][c] {
+                if !self.fired[r][c] && self.sub_candidates[r][c] && !chosen.contains(&(r, c)) && !avoid.contains(&(r, c)) {
                     chosen.push((r, c));
                 }
             }
@@ -1736,63 +1650,46 @@ impl AiPlayer {
                 if chosen.len() >= 3 {
                     break 'fallback;
                 }
+                if !self.fired[r][c] && !chosen.contains(&(r, c)) && !avoid.contains(&(r, c)) {
+                    chosen.push((r, c));
+                }
+            }
+        }
+
+        // Last-resort failsafe (should be unreachable in practice — `avoid`
+        // is only ever a small handful of coordinates): if steering clear of
+        // them left the salvo incomplete, fill remaining slots from them
+        // anyway rather than leaving `chosen` short.
+        'last_resort: for r in 0..10 {
+            for c in 0..10 {
+                if chosen.len() >= 3 {
+                    break 'last_resort;
+                }
                 if !self.fired[r][c] && !chosen.contains(&(r, c)) {
                     chosen.push((r, c));
                 }
             }
         }
 
-        [chosen[0], chosen[1], chosen[2]]
-    }
-
-    /// Builds the salvo that resolves a pending Cruiser-layout ambiguity:
-    /// `target` (the coordinate present in only one of the 2 candidate
-    /// layouts) goes first — deliberately re-fired regardless of whether
-    /// it's already been fired before, since this is a specific internal
-    /// strategy call, not the general refire-allowed relaxation (see
-    /// `Game::fire`'s `is_pending_cruiser_disambiguation` check). The other
-    /// 2 slots are filled with cells already proven impossible to be a
-    /// Cruiser (alive value 0, or outer ring, which never holds one either
-    /// way) — chosen so a 3 anywhere in the resulting bag can only have come
-    /// from `target` itself, making the result unambiguous.
-    fn choose_disambiguation_shots(&self, target: (usize, usize)) -> [(usize, usize); 3] {
-        let mut chosen: Vec<(usize, usize)> = vec![target];
-
-        'safe_unfired: for r in 0..10 {
+        // Absolute last resort — genuinely unreachable in ordinary play (a
+        // 100-cell board only ever needs 20 real hits to win, so this would
+        // require nearly the entire board fired without winning first), but
+        // if the board is ever THIS exhausted, refiring already-fired cells
+        // is still better than panicking with an incomplete salvo. `Game::
+        // fire` rejects a salvo containing the same cell twice, so these
+        // must still be distinct from each other and from `chosen` so far.
+        'absolute_last_resort: for r in 0..10 {
             for c in 0..10 {
                 if chosen.len() >= 3 {
-                    break 'safe_unfired;
+                    break 'absolute_last_resort;
                 }
-                if (r, c) == target || self.fired[r][c] || chosen.contains(&(r, c)) {
-                    continue;
-                }
-                let is_safe_for_cruiser = if (INNER_LO..=INNER_HI).contains(&r) && (INNER_LO..=INNER_HI).contains(&c) {
-                    self.alive_value(r, c, 3) == 0
-                } else {
-                    true // outer ring never holds a Cruiser
-                };
-                if is_safe_for_cruiser {
+                if !chosen.contains(&(r, c)) {
                     chosen.push((r, c));
                 }
             }
         }
 
-        // Fallback (should be unreachable in practice — the outer ring alone
-        // is 36 cells, always safe): fill any remaining slot with whatever
-        // unfired cell is left, rather than failing to complete the salvo.
-        if chosen.len() < 3 {
-            for r in 0..10 {
-                for c in 0..10 {
-                    if chosen.len() >= 3 {
-                        break;
-                    }
-                    if (r, c) != target && !self.fired[r][c] && !chosen.contains(&(r, c)) {
-                        chosen.push((r, c));
-                    }
-                }
-            }
-        }
-
         [chosen[0], chosen[1], chosen[2]]
     }
+
 }

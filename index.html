@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Zeeslagje — Chart Table</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%E2%9A%93</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -30,9 +31,9 @@
     --shallow-water:#B7D9E8;
     --shallow-water-border:rgba(20,60,90,0.35);
     --cross-yellow:#F5D90A;
-    --discovered-orange:#E8821B;
     --truth-blue:#1B3A6B;
     --flag-green:#3F8F5C;
+    --flag-blue:#3B6FC4;
   }
 
   *{box-sizing:border-box;}
@@ -208,34 +209,18 @@
     outline-offset:-2px;
   }
 
+  .cell.fully-eliminated{
+    outline:3px solid var(--truth-blue);
+    outline-offset:-3px;
+    background-image:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M2%206%20Q4%204%206%206%20T10%206%20T14%206%20T18%206%20T22%206'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M2%2012%20Q4%2010%206%2012%20T10%2012%20T14%2012%20T18%2012%20T22%2012'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M2%2018%20Q4%2016%206%2018%20T10%2018%20T14%2018%20T18%2018%20T22%2018'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;
+    background-position:center;
+    background-size:65% 65%;
+  }
+
   .cell.cross-identified{
     background:var(--cross-yellow) !important;
     border-color:var(--cross-yellow);
-  }
-
-  .cell.discovered3-candidate{
-    outline:2px solid var(--discovered-orange);
-    outline-offset:-2px;
-  }
-
-  .cell.found-cruiser{
-    background:var(--flag-green) !important;
-    border-color:var(--flag-green);
-  }
-
-  /* A cell that's both a Battleship cross-4 candidate AND inside the
-     discovered-3 Cruiser region: swap the plain outlines for an alternating
-     yellow/orange striped border (3px dashes) instead of stacking two flat
-     outlines on top of each other. */
-  .cell.cross-candidate.discovered3-candidate{
-    outline:none;
-    border-width:3px;
-    border-style:solid;
-    border-image:repeating-linear-gradient(
-      45deg,
-      var(--cross-yellow) 0 3px,
-      var(--discovered-orange) 3px 6px
-    ) 3;
   }
 
   .chip-list{
@@ -258,20 +243,6 @@
     background:var(--cross-yellow);
     color:#3a3000;
   }
-  .orange-chip{
-    background:rgba(232,130,27,0.14);
-    border:1px solid var(--discovered-orange);
-    color:#6b3a00;
-    padding:5px 10px;
-    border-radius:3px;
-    font-family:'IBM Plex Mono', monospace;
-    font-size:12px;
-    font-weight:600;
-  }
-  .orange-chip.discovered{
-    background:var(--discovered-orange);
-    color:#3a1f00;
-  }
   .true-cruiser-coord{
     border:2px solid var(--truth-blue);
     border-radius:3px;
@@ -280,13 +251,6 @@
   }
   .ruled-out-coord{
     border:2px solid var(--coral-bright);
-    border-radius:3px;
-    padding:1px 5px;
-    font-weight:600;
-  }
-  .found-cruiser-coord{
-    border:2px solid var(--flag-green);
-    background:rgba(63,143,92,0.14);
     border-radius:3px;
     padding:1px 5px;
     font-weight:600;
@@ -305,6 +269,9 @@
   }
   .coord-flag.flag-green{
     background:var(--flag-green);
+  }
+  .coord-flag.flag-blue{
+    background:var(--flag-blue);
   }
 
   .chart-footnote{
@@ -668,9 +635,7 @@
           <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8×8 — all ships</span>
           <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--cross-yellow); background:transparent"></span>Battleship cross candidate</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship identified</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--discovered-orange); background:transparent"></span>Discovered-3 Cruiser region</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser found</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:3px solid; border-image:repeating-linear-gradient(45deg, var(--cross-yellow) 0 3px, var(--discovered-orange) 3px 6px) 3; background:transparent"></span>Both candidate regions</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:3px solid var(--truth-blue); background:transparent"></span>No ship of size &ge;2 possible</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
           <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
@@ -708,6 +673,7 @@
             <button class="btn btn-ghost" id="evalLevelBtn">Evaluation level</button>
             <button class="btn btn-ghost" id="crossBagBtn">Cross-4 bag</button>
             <button class="btn btn-ghost" id="cross3BagBtn">Cross-3 bags</button>
+            <button class="btn btn-ghost" id="cross2BagBtn">Cross-2 bags</button>
             <button class="btn btn-ghost" id="cruiserAliveBtn">Ship alive grids</button>
           </div>
           <div class="refire-toggle-group">
@@ -722,7 +688,10 @@
         </div>
 
         <div class="panel">
-          <h2>Salvo Log <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button></h2>
+          <h2>Salvo Log
+            <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
+            <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
+          </h2>
           <div class="log-list" id="logList">
             <div class="log-empty">No salvos fired yet.</div>
           </div>
@@ -761,11 +730,13 @@
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
   const resetBtn = document.getElementById('resetBtn');
+  const restartSameBoardBtn = document.getElementById('restartSameBoardBtn');
   const fsmStatusBtn = document.getElementById('fsmStatusBtn');
   const revealShipsBtn = document.getElementById('revealShipsBtn');
   const evalLevelBtn = document.getElementById('evalLevelBtn');
   const crossBagBtn = document.getElementById('crossBagBtn');
   const cross3BagBtn = document.getElementById('cross3BagBtn');
+  const cross2BagBtn = document.getElementById('cross2BagBtn');
   const cruiserAliveBtn = document.getElementById('cruiserAliveBtn');
   const refireToggles = [
     [document.getElementById('refireToggle4'), 4],
@@ -838,17 +809,6 @@
   function idxToCoord(idx){
     const r = Math.floor(idx / 10), c = idx % 10;
     return `${COL_LETTERS[c]}${r + 1}`;
-  }
-
-  // Reading order humans expect for a coordinate list: A1..A10, then B1..B10,
-  // etc. — column (letter) first, then row (number) — rather than sorting by
-  // raw flat index, which groups by row first and jumps between letters.
-  function sortByColumnThenRow(indices){
-    return [...indices].sort((a, b) => {
-      const colA = a % 10, rowA = Math.floor(a / 10);
-      const colB = b % 10, rowB = Math.floor(b / 10);
-      return colA - colB || rowA - rowB;
-    });
   }
 
   function coordToIdx(coord){
@@ -936,22 +896,24 @@
     try { identified = JSON.parse(game.battleship_identified_json()); }
     catch { identified = []; }
     identified.forEach(idx => cellEl(idx)?.classList.add('cross-identified'));
-  }
 
-  function refreshCruiserDiscovered(){
-    gridScale.querySelectorAll('.cell.discovered3-candidate').forEach(el => el.classList.remove('discovered3-candidate'));
-    let discovered = [];
-    try { discovered = JSON.parse(game.discovered_3_json()); }
-    catch { discovered = []; }
-    discovered.forEach(idx => cellEl(idx)?.classList.add('discovered3-candidate'));
-  }
-
-  function refreshFoundCruisers(){
-    gridScale.querySelectorAll('.cell.found-cruiser').forEach(el => el.classList.remove('found-cruiser'));
+    // Once sunk, `battleship_identified_json` goes empty (nothing left to
+    // hunt for) along with the whole live candidate/identified state — but
+    // the board should keep showing where the Battleship was. Reuses the
+    // identical "identified" (solid yellow) styling since it's the same
+    // underlying fact, just now permanent.
     let found = [];
-    try { found = JSON.parse(game.found_cruisers_json()); }
+    try { found = JSON.parse(game.found_battleship_json()); }
     catch { found = []; }
-    found.flat().forEach(idx => cellEl(idx)?.classList.add('found-cruiser'));
+    found.forEach(idx => cellEl(idx)?.classList.add('cross-identified'));
+  }
+
+  function refreshFullyEliminatedCells(){
+    gridScale.querySelectorAll('.cell.fully-eliminated').forEach(el => el.classList.remove('fully-eliminated'));
+    let cells = [];
+    try { cells = JSON.parse(game.fully_eliminated_cells_json()); }
+    catch { cells = []; }
+    cells.forEach(idx => cellEl(idx)?.classList.add('fully-eliminated'));
   }
 
   function openModal(title, contentHtml){
@@ -1092,10 +1054,16 @@
 
     const entriesHtml = debug.entries.map((entry, i) => {
       const ruledOutSet = new Set(entry.ruled_out_coords || []);
+      const confirmedSet = new Set(entry.confirmed_coords || []);
       const coordsStr = entry.coords
         .map(idx => {
+          const isConfirmed = confirmedSet.has(idx);
           const isRuledOut = ruledOutSet.has(idx);
-          const flag = `<span class="coord-flag ${isRuledOut ? 'flag-red' : 'flag-green'}" title="${isRuledOut ? 'Eliminated — no longer a possible Battleship hit' : 'Still a possible Battleship hit'}"></span>`;
+          const flagClass = isConfirmed ? 'flag-blue' : (isRuledOut ? 'flag-red' : 'flag-green');
+          const flagTitle = isConfirmed
+            ? 'Confirmed — the only coordinate left in this salvo that could be the Battleship hit'
+            : (isRuledOut ? 'Eliminated — no longer a possible Battleship hit' : 'Still a possible Battleship hit');
+          const flag = `<span class="coord-flag ${flagClass}" title="${flagTitle}"></span>`;
           return `${idxToCoord(idx)}${flag}`;
         })
         .join(', ');
@@ -1109,11 +1077,11 @@
   }
 
   function buildCross3BagHtml(){
-    let debug = { entries: [], discovered: [] };
+    let debug = { entries: [] };
     try { debug = JSON.parse(game.cross3_debug_json()); } catch { /* keep default */ }
 
     if (debug.entries.length === 0){
-      return `<div class="modal-footnote">No Cruiser hit detected yet — a cross-3 bag is built the first time a salvo's result bag contains a 3.</div>`;
+      return `<div class="modal-footnote">No Cruiser hit detected yet — an entry is recorded the first time a salvo's result bag contains a 3.</div>`;
     }
 
     const entriesHtml = debug.entries.map((entry, i) => {
@@ -1125,49 +1093,49 @@
           const label = trueCruiserSet.has(idx)
             ? `<span class="true-cruiser-coord">${idxToCoord(idx)}</span>`
             : idxToCoord(idx);
-          const flag = `<span class="coord-flag ${isRuledOut ? 'flag-red' : 'flag-green'}" title="${isRuledOut ? 'Eliminated — no longer a possible Cruiser hit' : 'Still a possible Cruiser hit'}"></span>`;
+          const flagClass = isRuledOut ? 'flag-red' : 'flag-green';
+          const flagTitle = isRuledOut ? 'Eliminated — no longer a possible Cruiser hit' : 'Still a possible Cruiser hit';
+          const flag = `<span class="coord-flag ${flagClass}" title="${flagTitle}"></span>`;
           return `${label}${flag}`;
         })
         .join(', ');
-      const bagChips = sortByColumnThenRow(entry.bag)
-        .map(idx => `<span class="orange-chip">${idxToCoord(idx)}</span>`)
-        .join('');
-      return `
-        <div style="margin-bottom:14px;">
-          <div><strong>Salvo #${i + 1}</strong>: ${coordsStr} &rarr; result: ${entry.values.join(' ')}</div>
-          <div class="chip-list">${bagChips}</div>
-        </div>`;
+      return `<div><strong>Salvo #${i + 1}</strong>: ${coordsStr} &rarr; result: ${entry.values.join(' ')}</div>`;
     }).join('');
 
-    const truthNote = `<div class="modal-footnote">Coordinates outlined in dark blue are debug ground truth — the cell really does hold a Cruiser, independent of the "3" in the result bag (which is an unordered multiset and never says which of the 3 coordinates it belongs to). The dot after each coordinate is its elimination flag: green means it's still a possible Cruiser hit for this salvo, red means it's been proven impossible — no placement of size 3 passes through it any more.</div>`;
+    const truthNote = `<div class="modal-footnote">Coordinates outlined in dark blue are debug ground truth — the cell really does hold a Cruiser, independent of the "3" in the result bag (which is an unordered multiset and never says which of the 3 coordinates it belongs to). The dot after each coordinate is its elimination flag, fed straight from the FSM: green means it's still a possible Cruiser hit for this salvo, red means it's been proven impossible.</div>`;
 
-    const discoveredHtml = debug.discovered.length > 0
-      ? `
-        <h4 style="margin:16px 0 6px;">Discovered-3 bag (${debug.discovered.length} cells)</h4>
-        <div class="chip-list">${sortByColumnThenRow(debug.discovered).map(idx =>
-          `<span class="orange-chip discovered">${idxToCoord(idx)}</span>`).join('')}</div>
-        <div class="modal-footnote">Two of the cross-3 bags above share zero cells — proof they're hits on the two different Cruisers. Everywhere outside this union is now ruled out for size 3.</div>`
-      : `<div class="modal-footnote">No two cross-3 bags are disjoint yet, so the two Cruisers haven't been told apart — nothing eliminated outside individual bags yet.</div>`;
+    return entriesHtml + truthNote;
+  }
 
-    const foundHtml = (debug.found && debug.found.length > 0)
-      ? `
-        <h4 style="margin:16px 0 6px;">Found Cruisers</h4>
-        ${debug.found.map((combo, i) =>
-          `<div>found ship #${i + 1}: ${combo.map(idx => `<span class="found-cruiser-coord">${idxToCoord(idx)}</span>`).join(', ')}</div>`
-        ).join('')}
-        <div class="modal-footnote">Confirmed — each of these narrowed to the only possible straight-3 line once at least one Cruiser was sunk. Also shaded green on the main chart; every one of these cells and their neighbours is now ruled out for any other ship.</div>`
-      : '';
+  function buildCross2BagHtml(){
+    let debug = { entries: [] };
+    try { debug = JSON.parse(game.cross2_debug_json()); } catch { /* keep default */ }
 
-    const combinationsHtml = (debug.combinations && debug.combinations.length > 0)
-      ? `
-        <h4 style="margin:16px 0 6px;">Still-open combinations</h4>
-        ${debug.combinations.map((combo, i) =>
-          `<div>combination #${i + 1}: ${combo.map(idx => idxToCoord(idx)).join(', ')}</div>`
-        ).join('')}
-        <div class="modal-footnote">At least one Cruiser is sunk, so every one of its 3 real cells must be the (unknown-which-one) hit in some cross-3 salvo, with no two coming from the same salvo. These are every remaining combination of one still-possible (green) coordinate from 3 distinct salvos that forms a valid straight-3 line.</div>`
-      : '';
+    if (debug.entries.length === 0){
+      return `<div class="modal-footnote">No Frigate hit detected yet — an entry is recorded the first time a salvo's result bag contains a 2.</div>`;
+    }
 
-    return entriesHtml + truthNote + discoveredHtml + foundHtml + combinationsHtml;
+    const entriesHtml = debug.entries.map((entry, i) => {
+      const trueFrigateSet = new Set(entry.true_frigate_coords || []);
+      const ruledOutSet = new Set(entry.ruled_out_coords || []);
+      const coordsStr = entry.coords
+        .map(idx => {
+          const isRuledOut = ruledOutSet.has(idx);
+          const label = trueFrigateSet.has(idx)
+            ? `<span class="true-cruiser-coord">${idxToCoord(idx)}</span>`
+            : idxToCoord(idx);
+          const flagClass = isRuledOut ? 'flag-red' : 'flag-green';
+          const flagTitle = isRuledOut ? 'Eliminated — no longer a possible Frigate hit' : 'Still a possible Frigate hit';
+          const flag = `<span class="coord-flag ${flagClass}" title="${flagTitle}"></span>`;
+          return `${label}${flag}`;
+        })
+        .join(', ');
+      return `<div><strong>Salvo #${i + 1}</strong>: ${coordsStr} &rarr; result: ${entry.values.join(' ')}</div>`;
+    }).join('');
+
+    const truthNote = `<div class="modal-footnote">Coordinates outlined in dark blue are debug ground truth — the cell really does hold a Frigate, independent of the "2" in the result bag (which is an unordered multiset and never says which of the 3 coordinates it belongs to). The dot after each coordinate is its elimination flag, fed straight from the FSM: green means a Frigate is still possible there, red means it's been proven impossible.</div>`;
+
+    return entriesHtml + truthNote;
   }
 
   function buildAliveGridTable(grid, title){
@@ -1258,13 +1226,13 @@
     if (logList.querySelector('.log-empty')) logList.innerHTML = '';
     const entry = document.createElement('div');
     entry.className = 'log-entry';
-    const discoveredLine = salvo.battleship_discovered
-      ? `<span class="discovered">◆ Battleship discovered</span>`
-      : '';
+    const discoveredLines = [
+      salvo.battleship_discovered ? `<span class="discovered">◆ Battleship discovered</span>` : '',
+    ].join('');
     const sunkLine = salvo.sunk_names.length
       ? `<span class="sunk">⚓ ${salvo.sunk_names.join(', ')} sunk</span>`
       : '';
-    entry.innerHTML = `<span class="turn">T${String(salvo.turn).padStart(2,'0')}</span><span class="coords">${salvo.coords.join(' · ')}</span> → <span class="result">${salvo.result}</span>${discoveredLine}${sunkLine}`;
+    entry.innerHTML = `<span class="turn">T${String(salvo.turn).padStart(2,'0')}</span><span class="coords">${salvo.coords.join(' · ')}</span> → <span class="result">${salvo.result}</span>${discoveredLines}${sunkLine}`;
     logList.prepend(entry);
   }
 
@@ -1296,8 +1264,7 @@
     appendLogEntry(salvo);
     refreshFleet();
     refreshBattleshipCross();
-    refreshCruiserDiscovered();
-    refreshFoundCruisers();
+    refreshFullyEliminatedCells();
     refreshRefirableCells();
     selected = [];
 
@@ -1344,12 +1311,11 @@
     return hits;
   }
 
-  function resetGame(){
-    game.reset();
-    // game.reset() rebuilds the AI from scratch (refire-allowed and the
-    // freeze-before-Frigates toggle both default to off) — reapply whatever
-    // the checkboxes currently show, so a debug preference survives starting
-    // a new game.
+  function afterGameStateReset(message){
+    // Both game.reset() and game.restart_same_board() rebuild the AI from
+    // scratch (refire-allowed and the freeze-before-Frigates toggle both
+    // default to off) — reapply whatever the checkboxes currently show, so
+    // a debug preference survives either kind of restart.
     refireToggles.forEach(([el, size]) => game.set_refire_allowed(size, el.checked));
     game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
     selected = [];
@@ -1358,17 +1324,31 @@
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
-    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','discovered3-candidate','refirable','found-cruiser'));
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated'));
     turnNo.textContent = game.turn();
     hitCount.textContent = '0';
     renderSelection();
     refreshFleet();
     refreshAdvisory();
     refreshBattleshipCross();
-    refreshCruiserDiscovered();
-    refreshFoundCruisers();
+    refreshFullyEliminatedCells();
     refreshRefirableCells();
-    statusLine.textContent = 'New chart laid out. Select 3 coordinates, or accept the AI\'s advisory.';
+    statusLine.textContent = message;
+  }
+
+  function resetGame(){
+    game.reset();
+    afterGameStateReset('New chart laid out. Select 3 coordinates, or accept the AI\'s advisory.');
+  }
+
+  function restartSameBoard(){
+    // Keeps the exact same ship placement (see Game::restart_same_board in
+    // src/lib.rs) but clears every shot, hit, and AI deduction — for
+    // replaying the identical layout to see whether the AI's reasoning
+    // plays out the same way or diverges, without waiting for a fresh
+    // random board to happen to reproduce the same situation.
+    game.restart_same_board();
+    afterGameStateReset('Same board restarted. Select 3 coordinates, or accept the AI\'s advisory.');
   }
 
   async function boot(){
@@ -1394,8 +1374,7 @@
     refreshFleet();
     refreshAdvisory();
     refreshBattleshipCross();
-    refreshCruiserDiscovered();
-    refreshFoundCruisers();
+    refreshFullyEliminatedCells();
     renderSelection();
 
     fireBtn.addEventListener('click', doFire);
@@ -1405,11 +1384,13 @@
       renderSelection();
     });
     resetBtn.addEventListener('click', resetGame);
+    restartSameBoardBtn.addEventListener('click', restartSameBoard);
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
     revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));
     evalLevelBtn.addEventListener('click', () => openModal('Evaluation Level', buildEvaluationLevelHtml()));
     crossBagBtn.addEventListener('click', () => openModal('Cross-4 Bag', buildCrossBagHtml()));
     cross3BagBtn.addEventListener('click', () => openModal('Cross-3 Bags', buildCross3BagHtml()));
+    cross2BagBtn.addEventListener('click', () => openModal('Cross-2 Bags', buildCross2BagHtml()));
     cruiserAliveBtn.addEventListener('click', () => openModal('Ship Alive Grids', buildShipAliveGridsHtml()));
     refireToggles.forEach(([el, size]) => {
       el.addEventListener('change', () => {

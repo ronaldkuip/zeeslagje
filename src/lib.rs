@@ -116,8 +116,14 @@ fn try_place(
             for &Cell { row: pr, col: pc } in &ship.cells {
                 let dr = (pr as isize - row as isize).unsigned_abs();
                 let dc = (pc as isize - col as isize).unsigned_abs();
-                // orthogonal adjacency forbidden; diagonal is ok
-                if (dr == 0 && dc == 1) || (dr == 1 && dc == 0) {
+                // Exact overlap (dr==0 && dc==0) and orthogonal adjacency
+                // both forbidden; diagonal is ok. Board cells are a single
+                // `Option<usize>` each — 2 submarines landing on the same
+                // cell would silently overwrite one another there, leaving
+                // the loser permanently unhittable (it's still in `ships`
+                // with its own recorded cell, but `board` only ever points
+                // at whichever one placed last) and the game unwinnable.
+                if dr <= 1 && dc <= 1 && !(dr == 1 && dc == 1) {
                     return None;
                 }
             }
@@ -242,6 +248,26 @@ impl Game {
         self.ai = AiPlayer::new();
     }
 
+    /// Restart play from scratch on the SAME board (ship placement
+    /// unchanged) — for replaying an identical layout to see whether the
+    /// AI's deduction plays out the same way or diverges, without waiting
+    /// for a fresh board to happen to reproduce the same situation.
+    /// Clears every hit/fired/log/AI-deduction state, exactly like a new
+    /// game, but leaves `state.board`/`state.ships` (and therefore
+    /// `total_hits`) untouched.
+    pub fn restart_same_board(&mut self) {
+        for ship in &mut self.state.ships {
+            ship.hits = 0;
+            ship.sunk = false;
+        }
+        self.state.fired = vec![vec![false; 10]; 10];
+        self.state.log = Vec::new();
+        self.state.turn = 1;
+        self.state.won = false;
+        self.state.hit_count = 0;
+        self.ai = AiPlayer::new();
+    }
+
     /// Fire a salvo of exactly 3 cells. Coordinates are flat indices: row * 10 + col.
     /// Returns a JSON-serialised SalvoResult, or an error string.
     pub fn fire(&mut self, indices: &[usize]) -> String {
@@ -257,6 +283,18 @@ impl Game {
         // case an already-fired cell is permitted (but never a cell repeated
         // twice within this SAME salvo — that's a different, always-invalid case).
         let refire_ok = self.ai.is_refire_allowed(self.ai.current_target_size());
+        // Genuine board exhaustion: fewer than 3 unfired cells remain anywhere
+        // on the 100-cell board. A 3-cell salvo can't be won that only ever
+        // needs 20 real hits, but every fired cell that turns out to be a
+        // miss still consumes one of the 80 non-ship cells, so a long enough
+        // run of misses can legitimately exhaust the board down to its last
+        // couple of cells before the final ship cell is ever found — at that
+        // point there simply aren't 3 distinct never-fired cells left to
+        // offer, and refiring is the only way to submit a salvo at all. Not
+        // a debug relaxation like `refire_ok` — a structural necessity, so
+        // it's unconditional.
+        let unfired_count: usize = self.state.fired.iter().flatten().filter(|&&f| !f).count();
+        let board_exhausted = unfired_count < 3;
         let mut cells_to_fire: Vec<(usize, usize)> = Vec::new();
         for &idx in indices {
             let r = idx / 10;
@@ -264,12 +302,18 @@ impl Game {
             if r > 9 || c > 9 {
                 return r#"{"error":"index out of range"}"#.to_string();
             }
-            // The AI's own deliberate Cruiser-layout disambiguation refire
-            // (see `AiPlayer::pending_cruiser_disambiguation`) is always let
+            // The Battleship discriminating-cell refire (see
+            // `AiPlayer::battleship_discriminating_test_cell`) is always let
             // through, independent of the general refire-allowed toggle —
-            // it's a specific internal strategy, not the debug relaxation.
-            let is_disambiguation_refire = self.ai.is_pending_cruiser_disambiguation(r, c);
-            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire {
+            // it's a specific internal strategy, not the debug relaxation:
+            // when every coordinate that would distinguish between 2+
+            // surviving candidate windows has already been fired as an
+            // ambiguous decoy in some earlier cross-4 salvo, re-firing one
+            // is the ONLY way the ambiguity ever closes — every other
+            // surviving candidate is common to every window and would just
+            // confirm a hit without discriminating anything.
+            let is_disambiguation_refire = self.ai.is_battleship_discriminating_refire(r, c);
+            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !board_exhausted {
                 return r#"{"error":"cell already fired"}"#.to_string();
             }
             if cells_to_fire.iter().any(|&(pr, pc)| pr == r && pc == c) {
@@ -417,34 +461,22 @@ impl Game {
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// Cells in the "discovered-3" bag: once two 3-bearing salvos' cross-3 bags
-    /// turn out to share zero cells (proof they're hits on the two *different*
-    /// Cruisers), this is the union of that pair — everywhere else on the board
-    /// is ruled out for size 3. Returns a JSON array of flat indices, or an empty
-    /// array until that disjoint pair is found.
-    pub fn discovered_3_json(&self) -> String {
-        let cells = self.ai.discovered_3_cells();
+    /// The Battleship's exact 4-cell layout, permanently, once confirmed
+    /// sunk — flat indices (a single array of 4, or empty if the ship
+    /// hasn't sunk yet, or sank via ordinary fire before
+    /// `battleship_identified` ever narrowed things down to one window).
+    /// Unlike `battleship_identified_json` (a live, hunting-only view that
+    /// goes empty the instant the ship sinks, since there's nothing left to
+    /// hunt for), this persists so the board keeps showing where the
+    /// Battleship was.
+    pub fn found_battleship_json(&self) -> String {
+        let cells = self.ai.found_battleship_cells();
         let indices: Vec<usize> = cells.iter().map(|&(r, c)| r * 10 + c).collect();
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// Cells belonging to a Cruiser confirmed via `cruiser_combination_candidates`
-    /// narrowing to exactly one surviving combination — flat indices, one
-    /// array of 3 per found Cruiser. For the main grid to render these
-    /// coordinates distinctly (e.g. green) from the merely-candidate ones.
-    pub fn found_cruisers_json(&self) -> String {
-        let found: Vec<[usize; 3]> = self
-            .ai
-            .found_cruisers()
-            .iter()
-            .map(|combo| combo.map(|(r, c)| r * 10 + c))
-            .collect();
-        serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string())
-    }
-
-    /// Debug/inspector: every 3-bearing salvo seen so far — its 3 coordinates,
-    /// raw result values, and derived cross-3 bag — plus the discovered-3 bag
-    /// (empty until found). All coordinates are flat indices.
+    /// Debug/inspector: every 3-bearing salvo seen so far — same shape as
+    /// `cross2_debug_json`, one ship size up.
     ///
     /// `values` is an unordered bag (see `fire`, which sorts it before handing
     /// it to the AI) — it never tells you *which* coordinate produced the 3.
@@ -458,16 +490,12 @@ impl Game {
         struct Cross3EntryDebug {
             coords: Vec<usize>,
             values: [usize; 3],
-            bag: Vec<usize>,
             true_cruiser_coords: Vec<usize>,
             ruled_out_coords: Vec<usize>,
         }
         #[derive(Serialize)]
         struct Cross3Debug {
             entries: Vec<Cross3EntryDebug>,
-            discovered: Vec<usize>,
-            combinations: Vec<[usize; 3]>,
-            found: Vec<[usize; 3]>,
         }
 
         let is_cruiser_cell = |r: usize, c: usize| {
@@ -481,7 +509,6 @@ impl Game {
             .map(|e| Cross3EntryDebug {
                 coords: e.coords.iter().map(|&(r, c)| r * 10 + c).collect(),
                 values: e.values,
-                bag: e.bag.iter().map(|&(r, c)| r * 10 + c).collect(),
                 true_cruiser_coords: e
                     .coords
                     .iter()
@@ -498,23 +525,52 @@ impl Game {
             })
             .collect();
 
-        let discovered: Vec<usize> = self.ai.discovered_3_cells().iter().map(|&(r, c)| r * 10 + c).collect();
+        serde_json::to_string(&Cross3Debug { entries }).unwrap_or_else(|_| "{}".to_string())
+    }
 
-        let combinations: Vec<[usize; 3]> = self
+    /// Debug/inspector: every 2-bearing salvo seen so far — same shape as
+    /// `cross3_debug_json`, one ship size down.
+    pub fn cross2_debug_json(&self) -> String {
+        #[derive(Serialize)]
+        struct Cross2EntryDebug {
+            coords: Vec<usize>,
+            values: [usize; 3],
+            true_frigate_coords: Vec<usize>,
+            ruled_out_coords: Vec<usize>,
+        }
+        #[derive(Serialize)]
+        struct Cross2Debug {
+            entries: Vec<Cross2EntryDebug>,
+        }
+
+        let is_frigate_cell = |r: usize, c: usize| {
+            matches!(self.state.board[r][c], Some(id) if self.state.ships[id].size == 2)
+        };
+
+        let entries: Vec<Cross2EntryDebug> = self
             .ai
-            .cruiser_combination_candidates()
+            .cross2_entries()
             .iter()
-            .map(|combo| combo.map(|(r, c)| r * 10 + c))
+            .map(|e| Cross2EntryDebug {
+                coords: e.coords.iter().map(|&(r, c)| r * 10 + c).collect(),
+                values: e.values,
+                true_frigate_coords: e
+                    .coords
+                    .iter()
+                    .filter(|&&(r, c)| is_frigate_cell(r, c))
+                    .map(|&(r, c)| r * 10 + c)
+                    .collect(),
+                ruled_out_coords: e
+                    .coords
+                    .iter()
+                    .zip(e.coord_ruled_out.iter())
+                    .filter(|(_, &ruled_out)| ruled_out)
+                    .map(|(&(r, c), _)| r * 10 + c)
+                    .collect(),
+            })
             .collect();
 
-        let found: Vec<[usize; 3]> = self
-            .ai
-            .found_cruisers()
-            .iter()
-            .map(|combo| combo.map(|(r, c)| r * 10 + c))
-            .collect();
-
-        serde_json::to_string(&Cross3Debug { entries, discovered, combinations, found }).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&Cross2Debug { entries }).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Debug/inspector: every 4-bearing salvo seen so far — its 3 coordinates,
@@ -528,6 +584,7 @@ impl Game {
             coords: Vec<usize>,
             values: [usize; 3],
             ruled_out_coords: Vec<usize>,
+            confirmed_coords: Vec<usize>,
         }
         #[derive(Serialize)]
         struct Cross4Debug {
@@ -546,6 +603,13 @@ impl Game {
                     .iter()
                     .zip(e.coord_ruled_out.iter())
                     .filter(|(_, &ruled_out)| ruled_out)
+                    .map(|(&(r, c), _)| r * 10 + c)
+                    .collect(),
+                confirmed_coords: e
+                    .coords
+                    .iter()
+                    .zip(e.coord_confirmed_battleship_hit.iter())
+                    .filter(|(_, &confirmed)| confirmed)
                     .map(|(&(r, c), _)| r * 10 + c)
                     .collect(),
             })
@@ -570,6 +634,26 @@ impl Game {
         }
         let (horizontal, vertical, combined) = self.ai.alive_grids(size);
         serde_json::to_string(&AliveGrids { horizontal, vertical, combined }).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Every inner cell where all 3 combined "alive" values — Battleship,
+    /// Cruiser, and Frigate (see `alive_grids_json`) — have dropped to zero:
+    /// nothing of size >=2 can occupy it any more, only a Submarine or
+    /// nothing. Flat indices, for the main grid to outline distinctly.
+    pub fn fully_eliminated_cells_json(&self) -> String {
+        let (_, _, combined4) = self.ai.alive_grids(4);
+        let (_, _, combined3) = self.ai.alive_grids(3);
+        let (_, _, combined2) = self.ai.alive_grids(2);
+        let mut cells: Vec<usize> = Vec::new();
+        for r in 0..8 {
+            for c in 0..8 {
+                if combined4[r][c] == 0 && combined3[r][c] == 0 && combined2[r][c] == 0 {
+                    // alive_grids is 0-indexed over the inner 8x8; board rows/cols are r+1/c+1.
+                    cells.push((r + 1) * 10 + (c + 1));
+                }
+            }
+        }
+        serde_json::to_string(&cells).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Returns true if the cell (flat index) has already been fired at.
@@ -674,6 +758,7 @@ impl Game {
 mod tests {
     use super::*;
 
+
     #[test]
     fn board_generation_produces_correct_fleet() {
         let ships: Vec<Ship> = Vec::new();
@@ -704,9 +789,42 @@ mod tests {
         assert!(try_place(&[sub], 5, 6, 1, true).is_none());
     }
 
+    #[test]
+    fn submarine_exact_overlap_blocked() {
+        // Regression: `try_place`'s submarine branch only checked orthogonal
+        // adjacency (dr==0&&dc==1 or dr==1&&dc==0), never dr==0&&dc==0 —
+        // exact overlap. 2 submarines landing on the same cell corrupts
+        // `board`, since a cell only ever stores one `Option<usize>`: the
+        // 2nd placement silently overwrites the 1st there, leaving that
+        // ship permanently un-hittable (it's still in `ships` with its own
+        // recorded cell, but no board cell ever points back to it) and the
+        // game unwinnable — reproduced via self-play games getting stuck
+        // forever at hit_count 19/20.
+        let cells = try_place(&[], 5, 5, 1, true).unwrap();
+        let sub = Ship::new(0, "Submarine", 1, cells);
+        assert!(try_place(&[sub], 5, 5, 1, true).is_none(), "a 2nd submarine must not be placeable on the exact same cell as an existing one");
+    }
+
     // -----------------------------------------------------------------
     // AI tests
     // -----------------------------------------------------------------
+
+    #[test]
+    fn ai_apply_salvo_eliminates_absent_sizes_even_below_bound() {
+        let mut ai = AiPlayer::new();
+        // Bag [3, 1, 0]: bound = 3, so the plain ">bound" rule only clears
+        // size 4 at each cell. But every cell's true value is guaranteed to
+        // be EXACTLY one of {3, 1, 0} — 2 never appears in this bag at all,
+        // so none of these 3 cells can hold a Frigate either, even though
+        // 2 < bound. Mirrors the same reasoning already applied to
+        // Battleship via the "no 4 in bag" branch, generalized to every size.
+        ai.apply_salvo([(2, 2), (2, 5), (2, 8)], [3, 1, 0]);
+
+        let (_, _, combined2) = ai.alive_grids(2);
+        for &(r, c) in &[(2usize, 2usize), (2, 5), (2, 8)] {
+            assert_eq!(combined2[r - 1][c - 1], 0, "Frigate must be eliminated at {:?}: bag has no 2", (r, c));
+        }
+    }
 
     #[test]
     fn ai_picks_three_distinct_unfired_cells_initially() {
@@ -979,12 +1097,184 @@ mod tests {
         // choose_shots should still pick the highest-elimination cells overall,
         // but at most 1 of the 3 may land inside the ambiguous candidate region —
         // firing 2+ candidate cells in the same salvo would waste the chance to
-        // pin down which one was the real hit if a 4 comes back again.
+        // pin down which one was the real hit if a 4 comes back again. Mirrors a
+        // reported live scenario: a deliberate discriminating-cell test on shot
+        // 1 got its isolation destroyed by shots 2/3 also landing on other
+        // candidate cells in the same salvo, making the whole salvo's result
+        // ambiguous again — exactly the case this cap exists to prevent.
         let shots = ai.choose_shots();
         let picks_in_candidate_region = shots.iter().filter(|cell| candidates.contains(cell)).count();
         assert!(
             picks_in_candidate_region <= 1,
             "expected at most 1 shot inside the candidate region, got {picks_in_candidate_region}: {shots:?}"
+        );
+    }
+
+    #[test]
+    fn ai_first_battleship_shot_targets_highest_value_candidate_not_an_arbitrary_sub_window_split() {
+        // Mirrors a reported live scenario exactly: E5,F6,D4 -> 4 0 0, then
+        // B4,G7,G3 -> 0 0 0. Just 1 real cross-4 salvo has landed — the
+        // resulting candidate mask is still a single raw, un-narrowed cross,
+        // which trivially contains dozens of straight-4 sub-windows purely
+        // as an artifact of its shape, not genuine remaining ambiguity about
+        // the real ship. `battleship_discriminating_test_cell` used to treat
+        // those as real windows worth discriminating between regardless,
+        // and could pick a nearly-worthless coordinate (Combined alive
+        // value 1) over one sitting in the busiest part of the cross
+        // (Combined alive value 6-8) purely because it happened to be
+        // absent from a handful of those largely-arbitrary sub-windows.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 4), (5, 5), (3, 3)], [4, 0, 0]); // E5,F6,D4 -> 4 0 0
+        ai.apply_salvo([(3, 1), (6, 6), (2, 6)], [0, 0, 0]); // B4,G7,G3 -> 0 0 0
+        assert!(ai.battleship_identified_cells().is_empty(), "sanity: still ambiguous");
+
+        let candidates: std::collections::HashSet<(usize, usize)> =
+            ai.battleship_candidate_cells().into_iter().collect();
+        let (_, _, combined4) = ai.alive_grids(4);
+        let battleship_score = |(r, c): (usize, usize)| combined4[r - 1][c - 1];
+
+        let shots = ai.choose_shots();
+        let first = shots[0];
+        assert!(candidates.contains(&first), "first shot {first:?} must still land inside the candidate region: {shots:?}");
+        let better_alternative_exists = (1..=8usize).any(|r| {
+            (1..=8usize).any(|c| {
+                let cell = (r, c);
+                cell != first && candidates.contains(&cell) && !ai.is_fired(r, c) && battleship_score(cell) > battleship_score(first)
+            })
+        });
+        assert!(
+            !better_alternative_exists,
+            "first shot {first:?} (Battleship score {}) is not the best available candidate — reported live bug picked (3,2)=C4 (score 1) over (4,3)=D5 (score 6)",
+            battleship_score(first)
+        );
+    }
+
+    #[test]
+    fn ai_battleship_hunt_scores_shots_after_the_first_purely_on_the_cruiser_fsm() {
+        // Same wide, still-ambiguous candidate cross as
+        // `ai_choose_shots_caps_candidate_region_picks_at_one_while_ambiguous`
+        // — shots 2 and 3 are forced away from it either way, but they must
+        // also be CHOSEN by maximizing the Cruiser (size-3) FSM's own
+        // elimination value out there, not some Battleship-flavoured score:
+        // outside the established candidate region, every cell's own size-4
+        // alive value is already 0 (the cross-4 elimination feeds a "miss"
+        // into the size-4 FSM everywhere outside the running candidate set,
+        // every time it narrows) — so scoring against size-4 there could
+        // never do anything but dilute the Cruiser signal.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 4), (1, 1), (8, 8)], [4, 0, 0]);
+        assert!(ai.battleship_identified_cells().is_empty(), "sanity: still ambiguous");
+
+        let candidates: std::collections::HashSet<(usize, usize)> =
+            ai.battleship_candidate_cells().into_iter().collect();
+
+        // Break the symmetry of the Cruiser FSM outside the candidate
+        // region with a couple of ordinary miss salvos, so "which outside
+        // cell scores highest" isn't a trivial full-board tie.
+        ai.apply_salvo([(6, 2), (6, 3), (0, 0)], [0, 0, 0]);
+        ai.apply_salvo([(2, 6), (3, 6), (0, 9)], [0, 0, 0]);
+
+        let shots = ai.choose_shots();
+        let (_, _, combined3) = ai.alive_grids(3);
+        let cruiser_score = |(r, c): (usize, usize)| combined3[r - 1][c - 1];
+
+        for &pick in &shots[1..] {
+            assert!(!candidates.contains(&pick), "shot {pick:?} must land outside the candidate region: {shots:?}");
+            let better_alternative_exists = (1..=8usize).any(|r| {
+                (1..=8usize).any(|c| {
+                    let cell = (r, c);
+                    cell != pick
+                        && !candidates.contains(&cell)
+                        && !ai.is_fired(r, c)
+                        && !shots.contains(&cell)
+                        && cruiser_score(cell) > cruiser_score(pick)
+                })
+            });
+            assert!(
+                !better_alternative_exists,
+                "shot {pick:?} (Cruiser score {}) is not the best available Cruiser-FSM cell outside the candidate region: {shots:?}",
+                cruiser_score(pick)
+            );
+        }
+    }
+
+    #[test]
+    fn ai_suggests_refiring_a_discriminating_cell_even_when_every_candidate_is_already_fired() {
+        // Mirrors a reported live scenario exactly: 4 cross-4 salvos narrow
+        // the Battleship candidates down to 5 adjacent cells in row 4 —
+        // E4,F4,G4,H4,I4=(3,4)..(3,8) — leaving exactly 2 overlapping
+        // straight-4 windows, [E4,F4,G4,H4] and [F4,G4,H4,I4]. E4 and I4
+        // (the 2 outer cells) are the only coordinates that discriminate
+        // between them; F4/G4/H4 are common to both and would just confirm
+        // a hit without settling anything. Critically, EVERY one of the 5
+        // candidates was already fired as part of one of these same 4
+        // salvos — so unless a refire is explicitly permitted for this one
+        // deliberate purpose, the ambiguity can never close.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(3, 7), (4, 8), (5, 1)], [4, 3, 1]); // H4, I5, B6
+        ai.apply_salvo([(3, 4), (4, 7), (3, 8)], [4, 0, 0]); // E4, H5, I4
+        ai.apply_salvo([(3, 5), (6, 3), (2, 7)], [4, 0, 0]); // F4, D7, H3
+        ai.apply_salvo([(3, 6), (5, 2), (7, 4)], [4, 0, 0]); // G4, C6, E8
+
+        let candidates: std::collections::HashSet<(usize, usize)> = ai.battleship_candidate_cells().into_iter().collect();
+        let expected: std::collections::HashSet<(usize, usize)> = [(3, 4), (3, 5), (3, 6), (3, 7), (3, 8)].into_iter().collect();
+        assert_eq!(candidates, expected, "sanity: 5 adjacent candidates, matching the reported scenario");
+        assert!(ai.battleship_identified_cells().is_empty(), "sanity: not yet identified, 2 overlapping windows survive");
+        for &(r, c) in &expected {
+            assert!(ai.is_fired(r, c), "sanity: every candidate cell must already be fired");
+        }
+
+        let shots = ai.choose_shots();
+        assert!(
+            shots[0] == (3, 4) || shots[0] == (3, 8),
+            "expected the first shot to refire the outer (discriminating) cell E4 or I4, got {:?}",
+            shots[0]
+        );
+        assert!(
+            ai.is_battleship_discriminating_refire(shots[0].0, shots[0].1),
+            "the suggested refire must be recognized as a deliberate, always-permitted disambiguation refire"
+        );
+        // Mirrors a reported live regression: shots 2 and 3 must NOT also
+        // land on another candidate cell in this same salvo — if they did,
+        // the whole point of shot 1's deliberate, isolating discriminating
+        // test would be destroyed: a 4 in the result bag would once again
+        // be ambiguous across multiple candidate cells instead of being
+        // unambiguously attributable to shot 1 alone.
+        assert!(
+            !candidates.contains(&shots[1]),
+            "shot 2 must stay outside the candidate region so shot 1's discriminating test stays isolated, got {:?}",
+            shots[1]
+        );
+        assert!(
+            !candidates.contains(&shots[2]),
+            "shot 3 must stay outside the candidate region so shot 1's discriminating test stays isolated, got {:?}",
+            shots[2]
+        );
+    }
+
+    #[test]
+    fn ai_clears_stale_battleship_candidates_once_sunk_via_ordinary_fire() {
+        // Mirrors a reported live scenario: the same ambiguous 5-cell
+        // cluster as above — E4,F4,G4,H4,I4=(3,4)..(3,8), 2 overlapping
+        // straight-4 windows — but this time the Battleship sinks (its 4th
+        // real cell gets hit) BEFORE the cross-4 deduction machinery ever
+        // narrows the ambiguity down to a single window. The candidate
+        // cross must not linger forever once sunk — there's nothing left
+        // to search for regardless of whether the ambiguity was ever
+        // cleanly resolved.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(3, 7), (4, 8), (5, 1)], [4, 3, 1]);
+        ai.apply_salvo([(3, 4), (4, 7), (3, 8)], [4, 0, 0]);
+        ai.apply_salvo([(3, 5), (6, 3), (2, 7)], [4, 0, 0]);
+        ai.apply_salvo([(3, 6), (5, 2), (7, 4)], [4, 0, 0]);
+        assert!(!ai.battleship_candidate_cells().is_empty(), "sanity: still a live, unresolved candidate cross");
+        assert!(ai.battleship_identified_cells().is_empty(), "sanity: genuinely ambiguous, never resolved to 1 window");
+
+        ai.mark_sunk(4);
+
+        assert!(
+            ai.battleship_candidate_cells().is_empty(),
+            "the stale candidate cross must be cleared once the Battleship is confirmed sunk"
         );
     }
 
@@ -1099,6 +1389,93 @@ mod tests {
         let shots = ai.choose_shots();
         assert!(shots.contains(&(4, 4)));
         assert!(shots.contains(&(4, 5)));
+    }
+
+    #[test]
+    fn ai_keeps_a_sunk_battleships_own_cells_alive_in_the_size4_grid() {
+        // Mirrors a reported live scenario: 2 intersecting crosses identify
+        // the exact layout (row 4, cols 3-6), then the ship sinks. The
+        // Ship Alive Grids (size 4) debug view must keep showing the sunk
+        // ship's own 4 cells as alive (matching how a found Cruiser/Frigate
+        // keeps its own cells alive in that size's grid) — not wipe them to
+        // 0, which would make them satisfy "no ship of size >=2 possible"
+        // and render as dead water, as if the just-identified Battleship
+        // had simply vanished the instant it sank.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+        assert_eq!(ai.battleship_identified_cells().len(), 4, "sanity: identified before sinking");
+
+        ai.mark_sunk(4);
+
+        let (_, _, combined4) = ai.alive_grids(4);
+        for &(r, c) in &[(4, 3), (4, 4), (4, 5), (4, 6)] {
+            assert!(
+                combined4[r - 1][c - 1] > 0,
+                "({r},{c}) is the sunk Battleship's own cell and must stay alive in the size-4 grid, not read as \"no ship possible\""
+            );
+        }
+        // Elsewhere on the board, with the (single) Battleship now fully
+        // accounted for, there's genuinely nothing left to search for.
+        assert_eq!(combined4[6][6], 0, "(7,7) was never a candidate and must be eliminated for size 4 now that the Battleship is sunk");
+    }
+
+    #[test]
+    fn ai_permanently_records_the_sunk_battleships_layout_after_the_live_candidate_state_clears() {
+        // Mirrors a reported live scenario: once sunk, `battleship_identified_cells`
+        // goes empty (nothing left to hunt for), which used to mean the board
+        // lost every trace of where the Battleship was — no candidate
+        // outline AND no permanent "found" marker, unlike a found Cruiser/
+        // Frigate's lasting cells. `found_battleship_cells` must capture
+        // the identified layout permanently, the moment it sinks.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+        assert!(ai.found_battleship_cells().is_empty(), "sanity: not sunk yet, nothing permanent recorded");
+
+        ai.mark_sunk(4);
+
+        assert!(ai.battleship_identified_cells().is_empty(), "the live, hunting-only view goes empty once sunk — nothing left to hunt for");
+        let found: std::collections::HashSet<(usize, usize)> = ai.found_battleship_cells().into_iter().collect();
+        let expected: std::collections::HashSet<(usize, usize)> = [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect();
+        assert_eq!(found, expected, "the permanent record must capture the identified layout the moment it sinks");
+    }
+
+    #[test]
+    fn ai_first_battleship_test_shot_prefers_a_discriminating_cell_over_a_merely_common_one() {
+        let mut ai = AiPlayer::new();
+
+        // Real hit-cross centred at (4,4); decoys tucked in the top-left
+        // corner, far from row 4 / col 6-8 so they can't spuriously survive
+        // round 2's intersection.
+        ai.apply_salvo([(4, 4), (1, 1), (2, 2)], [4, 0, 0]);
+        // Real hit-cross centred at (4,6); decoys tucked in the bottom-right
+        // corner. Unlike the previous test, these two crosses' row-4 arms
+        // overlap across a 5-cell span (cols 3-7), not a clean 4 — leaving 2
+        // valid straight-4 windows, [3,4,5,6] and [4,5,6,7], both still live.
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+
+        let ambiguous: std::collections::HashSet<(usize, usize)> =
+            ai.battleship_candidate_cells().into_iter().collect();
+        let expected: std::collections::HashSet<(usize, usize)> =
+            [(4, 3), (4, 4), (4, 5), (4, 6), (4, 7)].into_iter().collect();
+        assert_eq!(ambiguous, expected);
+        assert!(ai.battleship_identified_cells().is_empty());
+
+        // Cols 4, 5 and 6 are common to BOTH surviving windows — a shot there
+        // is a guaranteed hit but proves nothing about which window is real.
+        // Cols 3 and 7 each belong to only one window: hitting one confirms
+        // its window outright, and a miss there is just as informative,
+        // collapsing straight to the other. The AI's first shot this round
+        // should be one of those two discriminating cells, not one of the
+        // 3 merely-common ones.
+        let shots = ai.choose_shots();
+        assert!(
+            shots[0] == (4, 3) || shots[0] == (4, 7),
+            "expected first shot to discriminate between the 2 windows, got {:?} (all shots: {:?})",
+            shots[0],
+            shots
+        );
     }
 
     #[test]
@@ -1357,192 +1734,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_battleship_identification_prunes_existing_cross3_bags_orthogonal_and_diagonal() {
-        let mut ai = AiPlayer::new();
-
-        // Cruiser hit at (2,3): reach-2 cross includes (4,3) via its vertical
-        // arm (rows 1-4 at col 3) — orthogonally adjacent to future ship cell
-        // (5,3). Cruiser hit at (2,1): includes (4,1) via its vertical arm —
-        // DIAGONALLY (only) adjacent to future ship cell (5,2).
-        ai.apply_salvo([(2, 3), (0, 0), (9, 9)], [3, 0, 0]);
-        ai.apply_salvo([(2, 1), (0, 8), (8, 9)], [3, 0, 0]);
-        assert!(ai.cross3_entries()[0].bag.contains(&(4, 3)));
-        assert!(ai.cross3_entries()[1].bag.contains(&(4, 1)));
-
-        // Identify the Battleship at row 5, cols 2-5.
-        ai.apply_salvo([(5, 2), (0, 9), (1, 9)], [4, 0, 0]);
-        ai.apply_salvo([(5, 5), (9, 0), (9, 1)], [4, 0, 0]);
-        assert_eq!(ai.battleship_identified_cells().len(), 4);
-
-        assert!(
-            !ai.cross3_entries()[0].bag.contains(&(4, 3)),
-            "(4,3) [orthogonal neighbour] should have been pruned once the Battleship was identified"
-        );
-        assert!(
-            !ai.cross3_entries()[1].bag.contains(&(4, 1)),
-            "(4,1) [diagonal neighbour] should have been pruned once the Battleship was identified"
-        );
-    }
-
-    #[test]
-    fn ai_cross3_prunes_cell_starved_of_room_even_if_never_individually_fired() {
-        let mut ai = AiPlayer::new();
-
-        // Cruiser hit at (5,5): bag includes (3,5) via its vertical arm
-        // (rows 3-7 at col 5).
-        ai.apply_salvo([(5, 5), (0, 0), (9, 9)], [3, 0, 0]);
-        assert!(ai.cross3_entries()[0].bag.contains(&(3, 5)));
-
-        // Kill every vertical window through row 3 in column 5 (misses at
-        // rows 2 and 4), and every horizontal window through col 5 in row 3
-        // (misses at cols 4 and 6) — without ever firing at (3,5) itself.
-        ai.apply_salvo([(2, 5), (4, 5), (3, 4)], [0, 0, 0]);
-        ai.apply_salvo([(3, 6), (1, 1), (8, 8)], [0, 0, 0]);
-
-        assert!(!ai.is_fired(3, 5), "sanity: (3,5) itself was never fired");
-        assert!(
-            !ai.cross3_entries()[0].bag.contains(&(3, 5)),
-            "(3,5) should be pruned once no alive placement passes through it, even though it was never fired"
-        );
-    }
-
-    #[test]
-    fn ai_cross3_single_salvo_builds_reach2_bag_without_discovering() {
-        let mut ai = AiPlayer::new();
-
-        // Real Cruiser hit at (5,5); decoys are outer-ring, fully inert. Only
-        // one 3-bearing salvo so far — nothing to compare it against yet.
-        ai.apply_salvo([(5, 5), (0, 0), (9, 9)], [3, 0, 0]);
-
-        let entries = ai.cross3_entries();
-        assert_eq!(entries.len(), 1);
-
-        // Reach-2 cross at (5,5): row5 cols 3-7 (5 cells) union col5 rows 3-7
-        // (5 cells), minus 1 shared center = 9 cells.
-        let bag: std::collections::HashSet<(usize, usize)> = entries[0].bag.iter().copied().collect();
-        assert_eq!(bag.len(), 9);
-        assert!(bag.contains(&(5, 5)));
-        assert!(bag.contains(&(5, 3)));
-        assert!(bag.contains(&(5, 7)));
-        assert!(bag.contains(&(3, 5)));
-        assert!(bag.contains(&(7, 5)));
-
-        assert!(ai.discovered_3_cells().is_empty());
-    }
-
-    #[test]
-    fn ai_discovered_3_elimination_eliminates_size3_even_for_a_cell_fired_as_a_decoy() {
-        let mut ai = AiPlayer::new();
-
-        // (5,5) is fired as a decoy alongside a genuine Battleship hit — its
-        // own true result is 0, but since THAT salvo's bound is 4, the normal
-        // per-cell path eliminates nothing for size 3 there either (any of
-        // the 3 cells could ambiguously be the Battleship hit).
-        ai.apply_salvo([(4, 4), (5, 5), (0, 0)], [4, 0, 0]);
-        assert!(ai.is_fired(5, 5));
-
-        // Two Cruiser hits whose reach-2 crosses are disjoint overall — proving
-        // the two different Cruisers — but deliberately built so (5,4) and
-        // (5,6) (row 5's immediate horizontal neighbours of the test cell)
-        // land INSIDE the discovered-3 union via decoys (3,4) and (3,6) (their
-        // column-arms reach down to row 5 without their row-arms ever
-        // touching row 5 itself). Cells inside the union are never
-        // individually processed at all, so they stay at their untouched
-        // default state — meaning row 5's only remaining live window,
-        // cols 4-6, depends *solely* on whether (5,5) itself gets eliminated.
-        // (5,3) and (5,7) — the neighbours of THAT window — are untouched by
-        // any cross here, so they get cleanly dropped regardless of this bug,
-        // killing the other two windows through col 5 ([3,4,5] and [5,6,7])
-        // independently of it.
-        ai.apply_salvo([(2, 2), (3, 4), (3, 6)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 9), (9, 0)], [3, 0, 0]);
-        let discovered: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(!discovered.is_empty(), "sanity: the two Cruisers should have been told apart");
-        assert!(!discovered.contains(&(5, 5)), "sanity: (5,5) is outside the discovered region");
-        assert!(discovered.contains(&(5, 4)), "sanity: (5,4) is inside the discovered region");
-        assert!(discovered.contains(&(5, 6)), "sanity: (5,6) is inside the discovered region");
-
-        let (_, _, combined3) = ai.alive_grids(3);
-        assert_eq!(
-            combined3[4][4], 0,
-            "size-3 alive value at (5,5) should be 0 once outside the discovered region, even though it was fired as a decoy"
-        );
-    }
-
-    #[test]
-    fn ai_cross3_bags_prune_stale_cells_and_can_become_disjoint_afterward() {
-        let mut ai = AiPlayer::new();
-
-        // Two Cruiser hits whose reach-2 crosses share exactly one cell, (3,5)
-        // — both hits' row-3 arms reach col5 ((3,3)'s arm covers cols1-5;
-        // (3,7)'s arm covers cols5-8) — so at this point they are NOT
-        // disjoint, and nothing is discovered yet.
-        ai.apply_salvo([(3, 3), (0, 0), (9, 9)], [3, 0, 0]);
-        ai.apply_salvo([(3, 7), (0, 9), (9, 0)], [3, 0, 0]);
-        assert!(ai.discovered_3_cells().is_empty());
-
-        let entries_before = ai.cross3_entries();
-        assert_eq!(entries_before.len(), 2);
-        assert!(entries_before[0].bag.contains(&(3, 5)), "shared cell missing before pruning");
-        assert!(entries_before[1].bag.contains(&(3, 5)), "shared cell missing before pruning");
-
-        // An ordinary miss at (3,5) — no 3 anywhere in this bag — proves that
-        // exact shared cell can't hold a Cruiser after all. Pruning should
-        // strip it from BOTH stored bags, and the resulting disjointness
-        // should be (re)detected without needing a third Cruiser hit.
-        ai.apply_salvo([(3, 5), (2, 1), (2, 2)], [0, 0, 0]);
-
-        let entries_after = ai.cross3_entries();
-        assert!(!entries_after[0].bag.contains(&(3, 5)), "(3,5) should have been pruned");
-        assert!(!entries_after[1].bag.contains(&(3, 5)), "(3,5) should have been pruned");
-        assert!(!ai.discovered_3_cells().is_empty(), "pruning should have revealed a disjoint pair");
-    }
-
-    #[test]
-    fn ai_cross3_overlapping_bags_do_not_discover() {
-        let mut ai = AiPlayer::new();
-
-        // Two Cruiser hits whose reach-2 crosses overlap on row 4 (cols 4-6 are
-        // shared) — entirely consistent with being the SAME Cruiser, so this
-        // must not be mistaken for proof of two different ships. Decoys are
-        // true corners (row AND col both outer) so they contribute nothing to
-        // either bag.
-        ai.apply_salvo([(4, 4), (0, 0), (9, 9)], [3, 0, 0]);
-        ai.apply_salvo([(4, 6), (0, 9), (9, 0)], [3, 0, 0]);
-
-        assert_eq!(ai.cross3_entries().len(), 2);
-        assert!(ai.discovered_3_cells().is_empty());
-    }
-
-    #[test]
-    fn ai_cross3_disjoint_bags_discover_and_eliminate_elsewhere() {
-        let mut ai = AiPlayer::new();
-
-        // Two Cruiser hits far enough apart that their reach-2 crosses share no
-        // cell at all: cross(2,2) = row2 cols1-4 union col2 rows1-4 (7 cells);
-        // cross(7,7) = row7 cols5-8 union col7 rows5-8 (7 cells). Neither shares
-        // a row, column, or cell with the other, so this is proof they're hits
-        // on the two *different* Cruisers. Decoys are true corners (row AND col
-        // both outer) so they contribute nothing to either bag.
-        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
-
-        let discovered: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert_eq!(discovered.len(), 14); // 7 + 7, no overlap
-        assert!(discovered.contains(&(2, 2)));
-        assert!(discovered.contains(&(7, 7)));
-
-        // A cell well outside both bags, e.g. (5,5), must now be eliminated for
-        // size 3 in both its row and column — even though it was never fired.
-        let (rows3, cols3) = ai.line_states(3);
-        let baseline = AiPlayer::alive_count(3, rows3[0]); // outer ring, always untouched
-        assert!(AiPlayer::alive_count(3, rows3[5]) < baseline, "row 5 size3 not narrowed");
-        assert!(AiPlayer::alive_count(3, cols3[5]) < baseline, "col 5 size3 not narrowed");
-    }
-
-    #[test]
     fn ai_cross3_entry_flags_outer_ring_decoys_ruled_out_immediately() {
         let mut ai = AiPlayer::new();
         ai.apply_salvo([(4, 4), (0, 0), (9, 9)], [3, 0, 0]);
@@ -1558,8 +1749,74 @@ mod tests {
         assert!(!entry.coord_ruled_out[0], "(4,4) still has room and must not be ruled out yet");
     }
 
+
+
+
+
+
+
+
+
+
+
+
     #[test]
-    fn ai_cross4_entries_are_recorded_with_all_coords_starting_green() {
+    fn ai_cross2_entry_flags_outer_ring_decoys_ruled_out_immediately() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 4), (0, 0), (9, 9)], [2, 0, 0]);
+
+        let entries = ai.cross2_entries();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert!(entry.coord_ruled_out[1], "(0,0) is outer ring, must be ruled out immediately");
+        assert!(entry.coord_ruled_out[2], "(9,9) is outer ring, must be ruled out immediately");
+        assert!(!entry.coord_ruled_out[0], "(4,4) still has room and must not be ruled out yet");
+    }
+
+
+
+
+
+
+
+
+
+    #[test]
+    fn ai_cross2_entry_ruled_out_only_needs_size_2_dead_not_every_size() {
+        let mut ai = AiPlayer::new();
+        // Entry 0: a bag with all of 4, 3, AND 2 present (nothing absent, so
+        // the "value not in bag" elimination never fires, and bound == 4
+        // means the plain ">bound" rule eliminates nothing either) — (7,5)
+        // stays fully alive for every size right after this salvo.
+        ai.apply_salvo([(7, 5), (2, 2), (2, 8)], [4, 3, 2]);
+        let (_, _, before2) = ai.alive_grids(2);
+        let (_, _, before3) = ai.alive_grids(3);
+        assert_ne!(before2[7 - 1][5 - 1], 0, "sanity: (7,5) still alive for size 2 before the second salvo");
+        assert_ne!(before3[7 - 1][5 - 1], 0, "sanity: (7,5) still alive for size 3 before the second salvo");
+
+        // A later, unrelated salvo whose bag has no 2 at all (3 is present,
+        // so size 3 stays legitimately open at all 3 of ITS cells) — proves
+        // (7,5) can't be a Frigate specifically, while leaving it a
+        // perfectly live Cruiser candidate.
+        ai.apply_salvo([(7, 5), (3, 3), (3, 4)], [3, 1, 0]);
+
+        let (_, _, combined2) = ai.alive_grids(2);
+        let (_, _, combined3) = ai.alive_grids(3);
+        assert_eq!(combined2[7 - 1][5 - 1], 0, "sanity: (7,5) is now dead for size 2");
+        assert_ne!(combined3[7 - 1][5 - 1], 0, "sanity: (7,5) must still be alive for size 3 (Cruiser still open)");
+
+        // Entry 0's own (7,5) coordinate must be flagged ruled-out as a
+        // Frigate candidate purely because size 2 is dead there — it must
+        // NOT also require size 3/4 to be dead, since those are irrelevant
+        // to whether this cell could be THIS bag's Frigate hit.
+        assert!(
+            ai.cross2_entries()[0].coord_ruled_out[0],
+            "(7,5) must be ruled out as a Frigate candidate once size 2 alone is dead there"
+        );
+    }
+
+    #[test]
+    fn ai_cross4_entries_are_recorded_and_flagged_against_the_combined_alive_value() {
         let mut ai = AiPlayer::new();
         assert!(ai.cross4_entries().is_empty(), "sanity: no 4-bearing salvo yet");
 
@@ -1569,17 +1826,25 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry.coords, [(4, 4), (1, 1), (8, 8)]);
         assert_eq!(entry.values, [4, 0, 0]);
-        // Red-flagging rule isn't defined yet — every coordinate starts (and
-        // for now stays) green, even the outer-ring/far-decoy ones.
+        // Nothing has independently reduced (1,1)/(8,8)'s own combined
+        // size-4 alive value to zero yet, so all 3 start green — see
+        // `ai_cross4_entry_flags_get_ruled_out_once_combined_alive_value_drops_to_zero`
+        // for the case where a coordinate does flip red.
         assert_eq!(entry.coord_ruled_out, [false, false, false]);
 
         // A second 4-bearing salvo appends a second entry rather than
-        // replacing or merging into the first.
+        // replacing or merging into the first. By now, though, (2,2) and
+        // (7,7) are legitimately dead for size 4 — the first salvo's
+        // union-of-crosses elimination (`apply_battleship_cross_elimination`)
+        // already fed everywhere outside its candidate union into the size-4
+        // FSM the same way a real miss would, and (2,2)/(7,7) fall outside
+        // it — so they come back red immediately, while (4,5) (right next to
+        // the first salvo's own hit) does not.
         ai.apply_salvo([(4, 5), (2, 2), (7, 7)], [4, 0, 0]);
         let entries = ai.cross4_entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].coords, [(4, 5), (2, 2), (7, 7)]);
-        assert_eq!(entries[1].coord_ruled_out, [false, false, false]);
+        assert_eq!(entries[1].coord_ruled_out, [false, true, true]);
 
         // A salvo without a 4 in its bag isn't a cross-4 salvo at all — no
         // new entry.
@@ -1606,6 +1871,37 @@ mod tests {
             ai.cross3_entries()[0].coord_ruled_out[0],
             "(3,4) is Chebyshev-adjacent to the Battleship, must now be ruled out as this salvo's real hit"
         );
+    }
+
+
+    #[test]
+    fn ai_confirms_a_cross4_hit_by_elimination_and_prunes_candidates_through_it() {
+        // Mirrors a reported live scenario exactly: G7,F2,G3 -> 4 3 0, then
+        // G2,H4,C6 -> 4 0 0. G7, H4 and C6 are all already known dead for
+        // the Battleship by the time the 2nd salvo lands (each too far from
+        // the running candidate cross), leaving G2 as the ONLY coordinate
+        // left that could possibly have produced the 2nd salvo's "4" — a
+        // certain hit, the same "only remaining candidate" logic already
+        // used for Cruisers/Frigates one size down.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(6, 6), (1, 5), (2, 6)], [4, 3, 0]); // G7,F2,G3 -> 4 3 0
+        ai.apply_salvo([(1, 6), (3, 7), (5, 2)], [4, 0, 0]); // G2,H4,C6 -> 4 0 0
+
+        assert!(ai.cross4_entries()[1].coord_ruled_out[1], "sanity: H4 already dead for the Battleship");
+        assert!(ai.cross4_entries()[1].coord_ruled_out[2], "sanity: C6 already dead for the Battleship");
+        assert!(
+            ai.cross4_entries()[1].coord_confirmed_battleship_hit[0],
+            "G2=(1,6) is the only coordinate left in its own salvo's bag that could explain the '4' — must be confirmed"
+        );
+
+        // The real ship must now be one of the straight-4 windows passing
+        // through the confirmed G2 — every candidate cell must still be
+        // part of at least one such window (none fall outside it here: the
+        // 3 horizontal windows through row 1 and the 1 vertical window
+        // through column 6 already cover the full 9-cell candidate set).
+        let candidates: std::collections::HashSet<(usize, usize)> = ai.battleship_candidate_cells().into_iter().collect();
+        assert!(candidates.contains(&(1, 6)), "the confirmed cell G2 itself must remain a candidate");
+        assert_eq!(candidates.len(), 9, "sanity: matches the reported scenario's 9 surviving candidates");
     }
 
     #[test]
@@ -1653,395 +1949,104 @@ mod tests {
         assert!(!newly.contains(&(4, 4)), "(4,4) still has room and isn't ruled out");
     }
 
-    #[test]
-    fn ai_discovered_3_bag_prunes_cells_later_proven_to_be_battleship() {
-        let mut ai = AiPlayer::new();
 
-        // Cross-3 hit at (6,4): row-arm is row6 cols2-6, col-arm is col4
-        // rows4-8 — the col-arm reaches up into row4, where the Battleship
-        // will later be identified (row4 cols3-6). Row6 is 2 rows away from
-        // row4 (not Chebyshev-adjacent, unlike row3 or row5), so its arm is
-        // genuinely untouched by the Battleship's neighbour sweep. Hit at
-        // (7,7)'s reach-2 cross doesn't touch col4 or row6 either, so it
-        // still proves disjointness the same way as
-        // `ai_cross3_disjoint_bags_discover_and_eliminate_elsewhere`.
-        ai.apply_salvo([(6, 4), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
 
-        let before: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(before.contains(&(4, 4)), "sanity: (4,4) starts in the bag via col4's arm");
-        assert!(before.contains(&(5, 4)), "sanity: (5,4) starts in the bag via col4's arm");
-        assert!(before.contains(&(6, 2)) && before.contains(&(6, 6)), "sanity: row6's arm is present");
 
-        // Identify the Battleship at row4 cols3-6 (same salvo pair proven in
-        // ai_identifies_exact_battleship_layout_after_two_intersecting_crosses).
-        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
-        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
-        assert_eq!(ai.battleship_identified_cells().len(), 4);
 
-        let after: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(!after.contains(&(4, 4)), "(4,4) is now a confirmed Battleship cell — must leave the bag");
-        // (5,4)'s only support was col4's arm, rows4-8; removing row4 splits it
-        // into an empty gap and a surviving {6,7,8} — still a run of 3, so it's
-        // room, not a cascade, that keeps (5,4) out (it's Chebyshev-adjacent to
-        // (4,4), directly eliminated by the Battleship's own neighbour sweep).
-        assert!(!after.contains(&(5, 4)), "(5,4) is Chebyshev-adjacent to the Battleship, must leave the bag");
-        // Row6's arm is 2 rows from row4 — outside Chebyshev adjacency (unlike
-        // row3/row5) — so it's genuinely unrelated to the Battleship.
-        assert!(after.contains(&(6, 2)) && after.contains(&(6, 6)), "row6's arm is unrelated to the Battleship and must survive");
-    }
 
-    #[test]
-    fn ai_discovered_3_bag_prunes_confirmed_miss_cells() {
-        let mut ai = AiPlayer::new();
 
-        // Cross-3 hit at (4,3): row-arm row4 cols1-5, col-arm col3 rows1-5.
-        ai.apply_salvo([(4, 3), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
 
-        let before: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(before.contains(&(4, 1)), "sanity: (4,1) starts in the bag via row4's arm");
 
-        // (4,1) is fired directly and comes back an outright miss (bound=0,
-        // every cell in the salvo guaranteed empty) — unlike being fired as a
-        // decoy in an ambiguous bound=3/4 salvo, there's no "which of the 3"
-        // uncertainty here, so it's provably not part of either Cruiser.
-        ai.apply_salvo([(4, 1), (1, 1), (1, 8)], [0, 0, 0]);
 
-        let after: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(!after.contains(&(4, 1)), "a confirmed-miss cell must leave the discovered-3 bag");
-        // Removing just the end of a 5-long arm still leaves a run of 4 — well
-        // clear of room, so no unwanted cascade here.
-        assert!(after.contains(&(4, 2)), "(4,2) still has plenty of room and must survive");
-    }
 
-    #[test]
-    fn ai_discovered_3_bag_prunes_cells_that_lose_room_after_a_neighbour_is_removed() {
-        let mut ai = AiPlayer::new();
 
-        // Cross-3 hit at (4,4): row-arm row4 cols2-6, col-arm col4 rows2-6.
-        ai.apply_salvo([(4, 4), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
 
-        let before: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(before.contains(&(4, 2)) && before.contains(&(4, 3)) && before.contains(&(4, 4)));
 
-        // (4,3) is a confirmed miss — removed directly. That splits row4's arm
-        // {2,3,4,5,6} into a lone {2} and a surviving {4,5,6}. (4,2) was never
-        // part of any column arm of its own, so once its only horizontal
-        // support is gone it has no room left in *either* direction — it must
-        // be pruned too, even though nothing was ever fired there.
-        ai.apply_salvo([(4, 3), (1, 1), (1, 8)], [0, 0, 0]);
 
-        let after: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(!after.contains(&(4, 3)), "(4,3) is a confirmed miss");
-        assert!(!after.contains(&(4, 2)), "(4,2) lost its only room once (4,3) left the bag, despite never being fired");
-        assert!(
-            after.contains(&(4, 4)) && after.contains(&(4, 5)) && after.contains(&(4, 6)),
-            "cols 4-6 still form a run of 3 and must survive"
-        );
-    }
 
-    #[test]
-    fn ai_discovered_3_bag_prunes_cells_proven_dead_by_a_direct_hit_of_another_size() {
-        let mut ai = AiPlayer::new();
 
-        // Cross-3 hit at (4,4): row-arm row4 cols2-6, col-arm col4 rows2-6.
-        ai.apply_salvo([(4, 4), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(7, 7), (9, 0), (9, 9)], [3, 0, 0]);
 
-        let before: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(before.contains(&(4, 3)));
 
-        // (4,3) turns out to hold a Frigate — a direct, unambiguous bound=2
-        // hit (no "which of the 3" uncertainty, unlike a bound=3/4 salvo),
-        // which eliminates size 3 (and 4) at that EXACT cell via the normal
-        // apply_hit path. This is neither a confirmed miss (bound isn't 0),
-        // nor a Battleship cell, nor does it lack room within the bag mask
-        // before removal (row4's arm is still a full run of 5) — the only
-        // thing that proves it dead is its own combined alive value hitting
-        // zero directly, which none of the other three criteria check for.
-        ai.apply_salvo([(4, 3), (1, 1), (1, 8)], [2, 0, 0]);
 
-        let after: std::collections::HashSet<(usize, usize)> =
-            ai.discovered_3_cells().into_iter().collect();
-        assert!(!after.contains(&(4, 3)), "(4,3) is a confirmed Frigate cell — size 3 is impossible there now");
-        // (4,2)'s only support was row4's arm; removing (4,3) strands it alone.
-        assert!(!after.contains(&(4, 2)), "(4,2) lost its only room once (4,3) left the bag");
-        assert!(
-            after.contains(&(4, 4)) && after.contains(&(4, 5)) && after.contains(&(4, 6)),
-            "cols 4-6 still form a run of 3 and must survive"
-        );
-    }
-
-    #[test]
-    fn ai_cruiser_combination_candidates_needs_at_least_one_sunk_cruiser() {
-        let mut ai = AiPlayer::new();
-        assert!(ai.cruiser_combination_candidates().is_empty(), "sanity: no salvos yet");
-
-        // A real Cruiser at (2,2),(2,3),(2,4), each cell's real hit spread
-        // across its OWN salvo (3 cross-3 entries) — each salvo also carries
-        // one INNER decoy that stays green (never ruled out), so every entry
-        // has 2 candidates instead of a trivial 1, genuinely exercising the
-        // combination search.
-        ai.apply_salvo([(2, 2), (5, 5), (0, 0)], [3, 0, 0]);
-        ai.apply_salvo([(2, 3), (6, 6), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(2, 4), (7, 7), (9, 0)], [3, 0, 0]);
-        assert!(ai.cruiser_combination_candidates().is_empty(), "3 salvos exist, but no Cruiser is sunk yet");
-
-        ai.mark_sunk(3);
-        let combos = ai.cruiser_combination_candidates();
-        // 2 surviving (green) candidates per salvo => up to 8 combinations,
-        // but only one — the real ship's own 3 cells — is a valid straight-3
-        // line; (5,5)/(6,6)/(7,7) are diagonal, not a valid Cruiser shape,
-        // and every other mix is scattered.
-        assert_eq!(combos.len(), 1, "exactly one combination should form a valid straight-3 line: {:?}", combos);
-        assert_eq!(combos[0], [(2, 2), (2, 3), (2, 4)]);
-
-        // A second Cruiser sinking must NOT turn this back off — "at least
-        // one sunk" stays satisfied, and the same combination still holds
-        // (nothing about the entries themselves changed).
-        ai.mark_sunk(3);
-        let combos = ai.cruiser_combination_candidates();
-        assert_eq!(combos.len(), 1);
-        assert_eq!(combos[0], [(2, 2), (2, 3), (2, 4)]);
-    }
-
-    /// Builds a scenario with exactly 2 surviving straight-3 combinations:
-    /// a real Cruiser at (2,2),(2,3),(2,4), each cell's real hit spread
-    /// across its own salvo, but each salvo's decoy is chosen to be the
-    /// PREVIOUS real cell (already fired, reused as a decoy here — fine at
-    /// the raw AiPlayer level, no Game::fire validation involved), so a
-    /// second, "shifted" straight-3 line at (2,1),(2,2),(2,3) also survives.
-    /// Returns the AiPlayer with the Cruiser already marked sunk. The two
-    /// combos share (2,2)/(2,3); (2,4) is unique to the real one, (2,1) is
-    /// unique to the shifted (false) one.
-    fn build_two_combo_ambiguity() -> AiPlayer {
-        let mut ai = AiPlayer::new();
-        ai.apply_salvo([(2, 2), (2, 1), (0, 0)], [3, 0, 0]);
-        ai.apply_salvo([(2, 3), (2, 2), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(2, 4), (2, 3), (9, 0)], [3, 0, 0]);
-        ai.mark_sunk(3);
-        ai
-    }
-
-    #[test]
-    fn ai_cruiser_disambiguation_targets_the_coordinate_unique_to_one_combo() {
-        let ai = build_two_combo_ambiguity();
-
-        let mut combos = ai.cruiser_combination_candidates();
-        combos.sort();
-        assert_eq!(combos, vec![[(2, 1), (2, 2), (2, 3)], [(2, 2), (2, 3), (2, 4)]], "sanity: exactly 2 combos");
-
-        // (2,4) is unique to the real combo; (2,1) is unique to the false
-        // one — either would be a valid disambiguator, but the coordinate
-        // choose_shots fires first must be one of the two, not one of the
-        // shared cells (2,2)/(2,3).
-        let shots = ai.choose_shots();
-        assert!(
-            shots[0] == (2, 4) || shots[0] == (2, 1),
-            "expected the first shot to be the disambiguating coordinate, got {:?}", shots
-        );
-        // The other 2 shots must be safe for size 3 (never mistaken for the
-        // disambiguating hit): either outer ring, or an inner cell already
-        // proven dead for size 3.
-        for &(r, c) in &shots[1..] {
-            let is_inner = (1..=8).contains(&r) && (1..=8).contains(&c);
-            if is_inner {
-                let (_, _, combined3) = ai.alive_grids(3);
-                assert_eq!(combined3[r - 1][c - 1], 0, "filler shot {:?} must be proven dead for size 3", (r, c));
-            }
+    fn fixed_board_game() -> Game {
+        let mut board = vec![vec![None; 10]; 10];
+        for &(r, c) in &[(2, 2), (2, 3), (2, 4)] {
+            board[r][c] = Some(0);
+        }
+        for &(r, c) in &[(7, 5), (7, 6)] {
+            board[r][c] = Some(1);
+        }
+        let ships = vec![
+            Ship::new(0, "Cruiser", 3, vec![Cell { row: 2, col: 2 }, Cell { row: 2, col: 3 }, Cell { row: 2, col: 4 }]),
+            Ship::new(1, "Frigate", 2, vec![Cell { row: 7, col: 5 }, Cell { row: 7, col: 6 }]),
+        ];
+        Game {
+            state: GameState {
+                board,
+                ships,
+                fired: vec![vec![false; 10]; 10],
+                log: Vec::new(),
+                turn: 1,
+                won: false,
+                total_hits: 5,
+                hit_count: 0,
+            },
+            ai: AiPlayer::new(),
         }
     }
 
+
     #[test]
-    fn ai_cruiser_disambiguation_hit_confirms_the_combo_containing_the_target() {
-        let mut ai = build_two_combo_ambiguity();
-        assert!(ai.is_pending_cruiser_disambiguation(2, 4), "sanity: (2,4) is the disambiguation target");
+    fn game_restart_same_board_keeps_ship_placement_but_clears_everything_else() {
+        let mut game = fixed_board_game();
+        game.fire(&[2 * 10 + 2, 0 * 10 + 0, 0 * 10 + 9]);
+        game.fire(&[2 * 10 + 3, 9 * 10 + 0, 9 * 10 + 9]);
+        assert!(game.state.hit_count > 0, "sanity: some hits registered before restart");
+        assert!(!game.ai.cross3_entries().is_empty(), "sanity: AI has accumulated some deduction state");
 
-        // Fire (2,4) again, paired with 2 safe fillers, and this time it
-        // comes back WITH a 3 in the bag — confirming the combo containing
-        // (2,4): the real ship, (2,2)-(2,4).
-        ai.apply_salvo([(2, 4), (0, 1), (0, 2)], [3, 0, 0]);
+        game.restart_same_board();
 
-        assert_eq!(ai.found_cruisers(), &[[(2, 2), (2, 3), (2, 4)]]);
-        assert!(!ai.is_pending_cruiser_disambiguation(2, 4), "the pending target must be cleared once resolved");
+        assert_eq!(game.state.board[2][2], Some(0), "ship placement must survive the restart");
+        assert_eq!(game.state.board[7][5], Some(1), "ship placement must survive the restart");
+        assert_eq!(game.state.hit_count, 0, "hit count must reset");
+        assert_eq!(game.state.turn, 1, "turn must reset");
+        assert!(!game.state.won, "won must reset");
+        assert!(game.state.log.is_empty(), "salvo log must reset");
+        assert!(game.state.fired.iter().all(|row| row.iter().all(|&f| !f)), "every cell must be unfired again");
+        assert!(game.state.ships.iter().all(|s| s.hits == 0 && !s.sunk), "every ship's hit/sunk state must reset");
+        assert!(game.ai.cross3_entries().is_empty(), "AI deduction state must reset");
+
+        // The board plays identically afterward: the same salvo produces
+        // the same result as it did the first time.
+        let replayed: serde_json::Value = serde_json::from_str(&game.fire(&[2 * 10 + 2, 0 * 10 + 0, 0 * 10 + 9])).unwrap();
+        assert_eq!(replayed["result"], "3 0 0");
     }
 
-    #[test]
-    fn ai_cruiser_disambiguation_miss_confirms_the_other_combo() {
-        let mut ai = build_two_combo_ambiguity();
-        assert!(ai.is_pending_cruiser_disambiguation(2, 4), "sanity: (2,4) is the disambiguation target");
 
-        // Fire (2,4) again, paired with 2 safe fillers, and this time it
-        // comes back with NO 3 in the bag — confirming the combo that does
-        // NOT contain (2,4): the shifted, false layout at (2,1)-(2,3).
-        ai.apply_salvo([(2, 4), (0, 1), (0, 2)], [0, 0, 0]);
 
-        assert_eq!(ai.found_cruisers(), &[[(2, 1), (2, 2), (2, 3)]]);
-        assert!(!ai.is_pending_cruiser_disambiguation(2, 4), "the pending target must be cleared once resolved");
-    }
 
     #[test]
-    fn game_fire_allows_disambiguation_refire_even_with_toggle_off() {
-        let mut game = Game::new();
-        assert!(!game.is_refire_allowed(3), "sanity: refire toggle is off by default");
-
-        // Drive the AI directly into the same pending ambiguity as the
-        // AiPlayer-level tests — Game's own board doesn't need to match this
-        // synthetic story, since only the fire() validation path is under
-        // test here, not full coherent gameplay.
-        game.ai.apply_salvo([(2, 2), (2, 1), (0, 0)], [3, 0, 0]);
-        game.ai.apply_salvo([(2, 3), (2, 2), (0, 9)], [3, 0, 0]);
-        game.ai.apply_salvo([(2, 4), (2, 3), (9, 0)], [3, 0, 0]);
-        game.ai.mark_sunk(3);
-        assert!(game.ai.is_pending_cruiser_disambiguation(2, 4));
-
-        // Simulate (2,4) already having been fired through the real game path.
-        game.state.fired[2][4] = true;
-
-        let result = game.fire(&[24, 1, 2]); // (2,4), (0,1), (0,2)
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed.get("error").is_none(), "disambiguation refire should be allowed even with the toggle off: {parsed}");
-    }
-
-    #[test]
-    fn ai_found_cruiser_eliminates_size3_and_size2_at_own_cells_and_neighbours() {
+    fn ai_firing_an_outer_ring_cell_never_drives_the_fsm_for_size_2_3_or_4() {
         let mut ai = AiPlayer::new();
 
-        // Real Cruiser at (4,4),(4,5),(4,6), each cell's hit spread across
-        // its own salvo with outer-ring decoys (so each entry's only green
-        // candidate is the real hit).
-        ai.apply_salvo([(4, 4), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(4, 5), (9, 0), (9, 9)], [3, 0, 0]);
-        ai.apply_salvo([(4, 6), (1, 9), (9, 1)], [3, 0, 0]);
-        ai.mark_sunk(3);
-        assert_eq!(ai.found_cruisers(), &[[(4, 4), (4, 5), (4, 6)]]);
+        // (0, 4): outer-ring row, inner column. Only the column-FSM for column 4
+        // could ever be relevant here, and only if the row were inner too — since
+        // it isn't, NEITHER FSM should move: a size>=2 ship placement needs both
+        // its row and column inner, so this cell can never be part of one.
+        ai.apply_salvo([(0, 4), (0, 5), (0, 6)], [0, 0, 0]);
+        // (5, 0): inner row, outer-ring column — symmetric case.
+        ai.apply_salvo([(5, 0), (6, 0), (7, 0)], [0, 0, 0]);
 
-        // Own cells: no longer a Submarine candidate either (a cell can only
-        // ever hold one ship).
-        assert!(!ai.is_submarine_candidate(4, 4));
-        assert!(!ai.is_submarine_candidate(4, 5));
-        assert!(!ai.is_submarine_candidate(4, 6));
-
-        let (_, _, combined3) = ai.alive_grids(3);
-        let (_, _, combined2) = ai.alive_grids(2);
-        // Orthogonal neighbour directly above the middle cell.
-        assert_eq!(combined3[2][4], 0, "(3,5) is Chebyshev-adjacent to the found Cruiser, size 3 must be eliminated");
-        assert_eq!(combined2[2][4], 0, "(3,5) is Chebyshev-adjacent to the found Cruiser, size 2 must be eliminated");
-        // Diagonal neighbour of the ship's end cell.
-        assert_eq!(combined3[4][6], 0, "(5,7) is diagonally Chebyshev-adjacent to (4,6), size 3 must be eliminated");
-        assert_eq!(combined2[4][6], 0, "(5,7) is diagonally Chebyshev-adjacent to (4,6), size 2 must be eliminated");
+        for &size in &[4usize, 3, 2] {
+            let (rows, cols) = ai.line_states(size);
+            assert_eq!(rows[0], 0, "row_state[0] (outer ring) must stay at its initial state for size {size}");
+            assert_eq!(rows[9], 0, "row_state[9] (outer ring) must stay at its initial state for size {size}");
+            assert_eq!(cols[0], 0, "col_state[0] (outer ring) must stay at its initial state for size {size}");
+            assert_eq!(cols[9], 0, "col_state[9] (outer ring) must stay at its initial state for size {size}");
+        }
     }
 
-    #[test]
-    fn ai_found_cruisers_only_combines_distinct_salvo_entries() {
-        let mut ai = AiPlayer::new();
 
-        // Cruiser A (will be sunk) at (2,2),(2,3),(2,4), across 3 salvos —
-        // decoys are outer-ring corners, so each entry's only surviving
-        // (green) candidate is the real hit itself.
-        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
-        ai.apply_salvo([(2, 3), (9, 0), (9, 9)], [3, 0, 0]);
-        ai.apply_salvo([(2, 4), (1, 9), (9, 1)], [3, 0, 0]);
-
-        // mark_sunk immediately checks and finds the unique combination —
-        // it's promoted straight to `found_cruisers` (see
-        // `check_and_apply_found_cruisers`), which also eliminates size 3/2
-        // at its own cells and every neighbour.
-        ai.mark_sunk(3);
-        assert_eq!(ai.found_cruisers(), &[[(2, 2), (2, 3), (2, 4)]]);
-
-        // A 4th, unrelated cross-3 salvo touches the OTHER (still-afloat)
-        // Cruiser once — not enough to sink it, just adds a 4th entry to the
-        // table, simulating "made 4 successful shots" overall. With 4
-        // entries there are C(4,3) = 4 possible entry-triples to search, but
-        // only the triple made of entries 0,1,2 (Cruiser A's own 3 salvos)
-        // could ever yield a straight-3 line — any triple involving the 4th
-        // entry pulls in (7,7)/(1,1)/(8,8), nowhere near row 2, so it can't
-        // complete one. This must not fabricate a spurious second found
-        // Cruiser.
-        ai.apply_salvo([(7, 7), (1, 1), (8, 8)], [3, 0, 0]);
-        assert_eq!(
-            ai.found_cruisers().len(),
-            1,
-            "the 4th entry must not spuriously combine into a second found Cruiser: {:?}",
-            ai.found_cruisers()
-        );
-
-        // Cruiser A's own cells (and their neighbours) are now settled —
-        // they've been consumed out of the raw candidate search entirely
-        // (their own alive value for size 3 is now zero, so they no longer
-        // show as a "still possible" green coordinate in their entries).
-        assert!(
-            ai.cruiser_combination_candidates().is_empty(),
-            "the found combination should no longer appear as a mere candidate once settled"
-        );
-    }
-
-    #[test]
-    fn ai_cruiser_combination_candidates_needs_3_distinct_entries_not_just_3_coordinates() {
-        let mut ai = AiPlayer::new();
-
-        // Only 2 cross-3 entries exist, but entry 0's decoy at (2,3) happens
-        // to stay green (inner, never ruled out) and sits directly between
-        // entry 0's real hit (2,2) and entry 1's real hit (2,4) — so picking
-        // BOTH of entry 0's candidates plus entry 1's would complete a
-        // straight line. That must NOT be allowed: a valid combination needs
-        // 3 DISTINCT salvo entries, not just 3 coordinates, and there are
-        // only 2 entries here.
-        ai.apply_salvo([(2, 2), (2, 3), (0, 0)], [3, 0, 0]);
-        ai.apply_salvo([(2, 4), (9, 0), (9, 9)], [3, 0, 0]);
-        ai.mark_sunk(3); // synthetic: just exercising the boundary condition
-
-        assert!(
-            ai.cruiser_combination_candidates().is_empty(),
-            "must not fabricate a combination by pulling 2 coordinates from the same entry"
-        );
-    }
-
-    #[test]
-    fn ai_eliminates_everywhere_outside_cross3_salvo_union_once_both_cruisers_sunk() {
-        let mut ai = AiPlayer::new();
-
-        // Simulate sinking each Cruiser outright in a single salvo, firing
-        // exactly at its 3 real cells (values [3,3,3], no decoys needed) —
-        // so each cross-3 entry's raw coordinates are exactly that ship's
-        // true straight-3 footprint.
-        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
-        let (_, _, combined3) = ai.alive_grids(3);
-        assert!(combined3[4][4] > 0, "sanity: (5,5) still alive before both Cruisers are confirmed sunk");
-
-        // First Cruiser sunk — on its own, not enough to trigger the full
-        // elimination (only one of the two is accounted for).
-        ai.mark_sunk(3);
-        let (_, _, combined3) = ai.alive_grids(3);
-        assert!(combined3[4][4] > 0, "sanity: still not eliminated with only 1 of 2 Cruisers sunk");
-
-        // Second Cruiser sunk — now BOTH are accounted for, so every cell
-        // outside the union of the two salvos' raw fired coordinates must be
-        // eliminated for size 3.
-        ai.apply_salvo([(7, 5), (7, 6), (7, 7)], [3, 3, 3]);
-        ai.mark_sunk(3);
-
-        let (_, _, combined3) = ai.alive_grids(3);
-        // The union of both ships' true cells is exactly 2 valid straight-3
-        // runs, each still a legitimate alive window even once everything
-        // else on the board is eliminated — so their middle cells (which
-        // need no OTHER cell's help to form a window) stay nonzero.
-        assert!(combined3[1][2] > 0, "(2,3) is the middle of Cruiser A's real run and must remain alive");
-        assert!(combined3[6][5] > 0, "(7,6) is the middle of Cruiser B's real run and must remain alive");
-        // Anything entirely outside both salvos' coordinates is now
-        // eliminated with total certainty.
-        assert_eq!(combined3[4][4], 0, "(5,5) is outside every cross-3 salvo's coordinates, must now be eliminated");
-    }
 
     #[test]
     fn ai_current_target_size_advances_once_battleship_fully_sunk() {
@@ -2121,5 +2126,74 @@ mod tests {
         assert_ne!(shots[1], shots[2]);
         assert_ne!(shots[0], shots[2]);
     }
-}
 
+    #[test]
+    fn self_play_discovers_every_ship_of_size_at_least_2_by_game_end() {
+        // End-to-end smoke test: let the AI play entire games against
+        // itself (real random boards, `choose_shots` picking every salvo,
+        // fired through the real `Game::fire` — not a hand-constructed
+        // AiPlayer scenario) and check, after EVERY single salvo, that the
+        // AI never claims to have found the Battleship's cells as anything
+        // other than empty or exactly 4. Then, once the game is won (every
+        // cell of every ship hit, submarines included), assert the
+        // Battleship was permanently recorded as found — not just "sunk"
+        // per Fleet Status, but genuinely *located* by the AI's own
+        // reasoning — and that no genuine Cruiser cell was ever wrongly
+        // ruled out impossible in the Cross-3 Bag traffic-light tracking.
+        // Cruiser and Frigate exact-cell discovery (pinpointing which cells
+        // a ship occupies, not just that it sank) are deliberately not
+        // attempted — see `AiPlayer::refresh_cross3_entry_flags`/
+        // `refresh_cross2_entry_flags` — so no "found" assertion exists for
+        // either; only sinking is tracked for them. Repeated across many
+        // random boards, since a single run only exercises one particular
+        // layout/salvo history.
+        const GAMES: usize = 25;
+        const MAX_TURNS: usize = 200; // generous: 100 cells / 3 per salvo ~= 34 turns even in the worst case
+
+        for game_no in 0..GAMES {
+            let mut game = Game::new();
+            let mut turns = 0;
+
+            while !game.state.won {
+                turns += 1;
+                assert!(turns <= MAX_TURNS, "game {game_no} did not finish within {MAX_TURNS} turns — likely stuck re-suggesting the same cell(s)");
+
+                let shots = game.ai.choose_shots();
+                let indices: Vec<usize> = shots.iter().map(|&(r, c)| r * 10 + c).collect();
+                let response = game.fire(&indices);
+                assert!(
+                    !response.contains("\"error\""),
+                    "game {game_no} turn {turns}: choose_shots produced an invalid salvo {shots:?}: {response}"
+                );
+
+                let battleship_found_len = game.ai.found_battleship_cells().len();
+                assert!(
+                    battleship_found_len == 0 || battleship_found_len == 4,
+                    "game {game_no} turn {turns}: found_battleship_cells must be empty or exactly 4, got {battleship_found_len}"
+                );
+            }
+
+            assert_eq!(
+                game.ai.found_battleship_cells().len(),
+                4,
+                "game {game_no}: the Battleship must be fully discovered by the time the game is won"
+            );
+            // No genuine Cruiser cell may ever be wrongly ruled out
+            // impossible in the Cross-3 Bag traffic-light tracking.
+            for ship in game.state.ships.iter().filter(|s| s.size == 3) {
+                for cell in &ship.cells {
+                    let ruled_out = game.ai.cross3_entries().iter().find_map(|e| {
+                        let idx = e.coords.iter().position(|&c| c == (cell.row, cell.col))?;
+                        Some(e.coord_ruled_out[idx])
+                    });
+                    assert_ne!(
+                        ruled_out,
+                        Some(true),
+                        "game {game_no}: real Cruiser cell {:?} was wrongly ruled out impossible",
+                        (cell.row, cell.col)
+                    );
+                }
+            }
+        }
+    }
+}
