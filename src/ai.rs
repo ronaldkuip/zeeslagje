@@ -812,6 +812,30 @@ impl AiPlayer {
         possible
     }
 
+    /// Every cell proven, via the SEPARATE cross-4 bag deduction, to
+    /// definitely hold a Battleship — either currently identified
+    /// (`battleship_identified`) or permanently recorded once sunk
+    /// (`found_battleship_cells`, which stays populated even after the
+    /// live identified-state clears). A cell holds exactly one ship, so
+    /// these can never also be a Cruiser or Frigate cell — but nothing in
+    /// `consistent_with_salvo_history` enforces that on its own (it only
+    /// checks aggregate per-salvo counts of the ONE value it's asked
+    /// about, so a window can wrongly "explain" a salvo's evidence by
+    /// including a confirmed Battleship cell instead of the real Cruiser/
+    /// Frigate cell that salvo actually contained). Used to exclude those
+    /// cells from window generation below, rather than relying on the
+    /// aggregate check to rule them out by coincidence.
+    fn cells_confirmed_battleship(&self) -> [[bool; 10]; 10] {
+        let mut confirmed = [[false; 10]; 10];
+        for (r, c) in self.battleship_identified_cells() {
+            confirmed[r][c] = true;
+        }
+        for (r, c) in self.found_battleship_cells() {
+            confirmed[r][c] = true;
+        }
+        confirmed
+    }
+
     /// Every distinct pair of non-overlapping Cruiser windows currently
     /// consistent with the full salvo history — one entry per hypothesis
     /// "these 2 windows, and nothing else, are the real Cruisers". Shared
@@ -819,7 +843,11 @@ impl AiPlayer {
     /// `cruiser_disambiguation_shots` (which reasons about the individual
     /// hypotheses directly, to find a shot that best tells them apart).
     fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
-        let windows = Self::all_cruiser_windows();
+        let confirmed_battleship = self.cells_confirmed_battleship();
+        let windows: Vec<[(usize, usize); 3]> = Self::all_cruiser_windows()
+            .into_iter()
+            .filter(|w| w.iter().all(|&(r, c)| !confirmed_battleship[r][c]))
+            .collect();
         let mut out = Vec::new();
         for i in 0..windows.len() {
             for j in (i + 1)..windows.len() {
@@ -844,7 +872,8 @@ impl AiPlayer {
     fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let windows = Self::all_frigate_windows();
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
-        let candidates: Vec<[(usize, usize); 2]> = windows.into_iter().filter(|w| w.iter().all(|&(r, c)| possible[r][c])).collect();
+        let confirmed_battleship = self.cells_confirmed_battleship();
+        let candidates: Vec<[(usize, usize); 2]> = windows.into_iter().filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c])).collect();
 
         let mut out = Vec::new();
         let n = candidates.len();

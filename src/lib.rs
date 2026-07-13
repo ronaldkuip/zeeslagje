@@ -2069,6 +2069,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ai_heatmaps_and_disambiguation_exclude_cells_confirmed_as_the_battleship() {
+        // Regression: a cell holds exactly one ship, so once the cross-4
+        // deduction confirms a cell IS the Battleship, no Cruiser/Frigate
+        // window may ever include it — but `consistent_with_salvo_history`
+        // only checks each salvo's AGGREGATE count of one value at a time,
+        // so on its own it can't tell "this cell is really a 4" from "this
+        // cell coincidentally isn't part of the window I'm testing"; a
+        // wrong hypothesis could "explain" a salvo's evidence by
+        // substituting in a confirmed Battleship cell instead of the real
+        // Cruiser/Frigate cell that salvo actually hit.
+        let mut ai = AiPlayer::new();
+
+        // Identify the Battleship at (4,3)-(4,4)-(4,5)-(4,6) via 2
+        // intersecting crosses (mirrors
+        // ai_identifies_exact_battleship_layout_after_two_intersecting_crosses).
+        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+        assert_eq!(
+            ai.battleship_identified_cells().into_iter().collect::<std::collections::HashSet<_>>(),
+            [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect()
+        );
+
+        // (4,4) is confirmed Battleship but still unfired. Firing it for
+        // real alongside a genuine Cruiser hit at (6,6) correctly shows
+        // both a 4 (from (4,4)) and a 3 (from (6,6)) in the same bag — but
+        // the bag is unordered, so on raw aggregate counts alone, a
+        // hypothesis could just as easily explain the "one 3 in this
+        // salvo" by wrongly crediting it to (4,4) instead of (6,6).
+        ai.apply_salvo([(4, 4), (6, 6), (6, 7)], [4, 3, 0]);
+
+        let cruiser_heatmap = ai.cruiser_heatmap();
+        assert_eq!(
+            cruiser_heatmap[4 - 1][4 - 1], 0.0,
+            "(4,4) is confirmed Battleship — must never show Cruiser probability, even though the raw salvo bag alone can't rule it out"
+        );
+
+        if let Some(shots) = ai.cruiser_disambiguation_shots() {
+            assert!(!shots.contains(&(4, 4)), "disambiguation must never target a confirmed Battleship cell: {:?}", shots);
+        }
+    }
+
     /// 4 mutually far-apart, never-overlapping straight-3 runs. With the
     /// rest of the inner board flooded to misses (see
     /// `flood_inner_misses_except`), every one of the C(4,2) = 6
