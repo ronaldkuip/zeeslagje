@@ -243,21 +243,31 @@
 
   .cell .heat-frac{
     position:absolute;
-    top:0; bottom:0;
-    width:50%;
-    display:flex;
-    align-items:center;
-    justify-content:center;
     pointer-events:none;
     color:#fff;
     font-family:'IBM Plex Mono', monospace;
-    font-size:9px;
     font-weight:600;
-    text-shadow:0 1px 2px rgba(0,0,0,0.7);
+    text-shadow:0 1px 2px rgba(0,0,0,0.85);
     line-height:1;
   }
-  .cell .heat-frac-cruiser{ left:0; }
-  .cell .heat-frac-frigate{ right:0; }
+  /* The Frigate fraction is the one worth reading at a glance — Cruisers
+     resolve to solid green within a handful of turns, so this is normally
+     the only number still carrying real information. Full-cell, centred,
+     large enough to read without squinting. */
+  .cell .heat-frac-frigate{
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:13px;
+  }
+  /* The Cruiser fraction is secondary (usually short-lived) — a small
+     corner label so it never collides with the Frigate number above. */
+  .cell .heat-frac-cruiser{
+    top:1px; left:2px;
+    font-size:8px;
+    opacity:0.85;
+  }
 
   .chip-list{
     display:flex;
