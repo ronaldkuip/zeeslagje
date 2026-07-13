@@ -234,6 +234,31 @@
   .cell .heat-cruiser{ left:0; background:var(--coral-bright); }
   .cell .heat-frigate{ right:0; background:#B15FE0; }
 
+  .cell.cruiser-identified{
+    background:var(--flag-green) !important;
+    border-color:var(--flag-green);
+  }
+  .cell.cruiser-identified .heat-half{ display:none; }
+  .cell.cruiser-identified .heat-frac-cruiser{ display:none; }
+
+  .cell .heat-frac{
+    position:absolute;
+    top:0; bottom:0;
+    width:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    pointer-events:none;
+    color:#fff;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:9px;
+    font-weight:600;
+    text-shadow:0 1px 2px rgba(0,0,0,0.7);
+    line-height:1;
+  }
+  .cell .heat-frac-cruiser{ left:0; }
+  .cell .heat-frac-frigate{ right:0; }
+
   .chip-list{
     display:flex;
     flex-wrap:wrap;
@@ -645,8 +670,9 @@
           <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
           <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half)</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half, fraction shown in white)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half, fraction shown in white)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser layout confirmed</span>
         </div>
       </section>
 
@@ -835,6 +861,12 @@
           const frigateHeat = document.createElement('div');
           frigateHeat.className = 'heat-half heat-frigate';
           cell.appendChild(frigateHeat);
+          const cruiserFrac = document.createElement('div');
+          cruiserFrac.className = 'heat-frac heat-frac-cruiser';
+          cell.appendChild(cruiserFrac);
+          const frigateFrac = document.createElement('div');
+          frigateFrac.className = 'heat-frac heat-frac-frigate';
+          cell.appendChild(frigateFrac);
         }
         gridScale.appendChild(cell);
       }
@@ -961,8 +993,15 @@
     const showCruiser = heatmapCruiserToggle.checked;
     const showFrigate = heatmapFrigateToggle.checked;
     let cruiserGrid = null, frigateGrid = null;
-    if (showCruiser){ try { cruiserGrid = JSON.parse(game.cruiser_heatmap_json()); } catch { cruiserGrid = null; } }
-    if (showFrigate){ try { frigateGrid = JSON.parse(game.frigate_heatmap_json()); } catch { frigateGrid = null; } }
+    let cruiserFracGrid = null, frigateFracGrid = null;
+    if (showCruiser){
+      try { cruiserGrid = JSON.parse(game.cruiser_heatmap_json()); } catch { cruiserGrid = null; }
+      try { cruiserFracGrid = JSON.parse(game.cruiser_heatmap_fraction_json()); } catch { cruiserFracGrid = null; }
+    }
+    if (showFrigate){
+      try { frigateGrid = JSON.parse(game.frigate_heatmap_json()); } catch { frigateGrid = null; }
+      try { frigateFracGrid = JSON.parse(game.frigate_heatmap_fraction_json()); } catch { frigateFracGrid = null; }
+    }
 
     for (let i = 0; i < 8; i++){
       for (let j = 0; j < 8; j++){
@@ -973,6 +1012,8 @@
         const fProb = frigateGrid ? frigateGrid[i][j] : 0;
         const cruiserEl = el.querySelector('.heat-cruiser');
         const frigateEl = el.querySelector('.heat-frigate');
+        const cruiserFracEl = el.querySelector('.heat-frac-cruiser');
+        const frigateFracEl = el.querySelector('.heat-frac-frigate');
         if (cruiserEl){
           cruiserEl.style.opacity = cProb > 0 ? String(0.12 + cProb * 0.75) : '0';
           cruiserEl.title = cProb > 0 ? `Cruiser probability: ${(cProb * 100).toFixed(0)}%` : '';
@@ -981,8 +1022,28 @@
           frigateEl.style.opacity = fProb > 0 ? String(0.12 + fProb * 0.75) : '0';
           frigateEl.title = fProb > 0 ? `Frigate probability: ${(fProb * 100).toFixed(0)}%` : '';
         }
+        if (cruiserFracEl){
+          const [num, denom] = cruiserFracGrid ? cruiserFracGrid[i][j] : [0, 0];
+          cruiserFracEl.textContent = denom > 0 ? `${num}/${denom}` : '';
+        }
+        if (frigateFracEl){
+          const [num, denom] = frigateFracGrid ? frigateFracGrid[i][j] : [0, 0];
+          frigateFracEl.textContent = denom > 0 ? `${num}/${denom}` : '';
+        }
       }
     }
+  }
+
+  // Cells where the Cruiser heatmap has narrowed to a single consistent
+  // layout (see `AiPlayer::cruiser_identified_cells`) — treated as ground
+  // truth (empirically validated at scale, see the self-play soundness
+  // test) and painted solid green, replacing the probability tint for
+  // those specific cells.
+  function refreshCruiserIdentified(){
+    gridScale.querySelectorAll('.cell.cruiser-identified').forEach(el => el.classList.remove('cruiser-identified'));
+    let cells = [];
+    try { cells = JSON.parse(game.cruiser_identified_json()); } catch { cells = []; }
+    cells.forEach(idx => cellEl(idx)?.classList.add('cruiser-identified'));
   }
 
   function openModal(title, contentHtml){
@@ -1336,6 +1397,7 @@
     refreshFullyEliminatedCells();
     refreshRefirableCells();
     refreshHeatmaps();
+    refreshCruiserIdentified();
     selected = [];
 
     turnNo.textContent = game.turn();
@@ -1519,7 +1581,7 @@
     autoPlayBtn.textContent = 'Auto-play (30 shots)';
     setAutoPlayState('blue');
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
-    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated'));
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified'));
     turnNo.textContent = game.turn();
     hitCount.textContent = '0';
     renderSelection();
@@ -1529,6 +1591,7 @@
     refreshFullyEliminatedCells();
     refreshRefirableCells();
     refreshHeatmaps();
+    refreshCruiserIdentified();
     statusLine.textContent = message;
   }
 
@@ -1572,6 +1635,7 @@
     refreshBattleshipCross();
     refreshFullyEliminatedCells();
     refreshHeatmaps();
+    refreshCruiserIdentified();
     renderSelection();
 
     fireBtn.addEventListener('click', doFire);

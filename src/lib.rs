@@ -493,6 +493,15 @@ impl Game {
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// The Cruisers' exact 6-cell layout, once the heatmap has narrowed to
+    /// a single consistent hypothesis — see `AiPlayer::cruiser_identified_cells`.
+    /// Empty until then.
+    pub fn cruiser_identified_json(&self) -> String {
+        let cells = self.ai.cruiser_identified_cells();
+        let indices: Vec<usize> = cells.iter().map(|&(r, c)| r * 10 + c).collect();
+        serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Debug/inspector: every 3-bearing salvo seen so far — same shape as
     /// `cross2_debug_json`, one ship size up.
     ///
@@ -666,6 +675,19 @@ impl Game {
     /// `alive_grids_json`.
     pub fn frigate_heatmap_json(&self) -> String {
         serde_json::to_string(&self.ai.frigate_heatmap()).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Same 8x8 grid as `cruiser_heatmap_json`, but each cell is a
+    /// `[count, total]` pair instead of the divided probability — for
+    /// displaying the underlying fraction directly. See
+    /// `AiPlayer::cruiser_heatmap_fraction`.
+    pub fn cruiser_heatmap_fraction_json(&self) -> String {
+        serde_json::to_string(&self.ai.cruiser_heatmap_fraction()).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Same idea as `cruiser_heatmap_fraction_json`, one size down.
+    pub fn frigate_heatmap_fraction_json(&self) -> String {
+        serde_json::to_string(&self.ai.frigate_heatmap_fraction()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Every inner cell where all 3 combined "alive" values — Battleship,
@@ -2032,6 +2054,92 @@ mod tests {
     }
 
     #[test]
+    fn ai_cruiser_identified_cells_returns_the_layout_once_fully_pinned() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+        assert_eq!(
+            ai.cruiser_identified_cells().into_iter().collect::<std::collections::HashSet<_>>(),
+            [(2, 2), (2, 3), (2, 4), (6, 6), (6, 7), (6, 8)].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn ai_cruiser_identified_cells_is_empty_while_still_ambiguous() {
+        let mut ai = AiPlayer::new();
+        // Exactly one of these 3 is a real Cruiser hit, but many different
+        // Cruiser-pair layouts stay consistent with this alone.
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        assert!(ai.cruiser_identified_cells().is_empty());
+    }
+
+    #[test]
+    fn ai_cruiser_layout_elimination_narrows_the_cruiser_and_frigate_fsm() {
+        // Once the Cruisers' exact layout is confirmed via the heatmap,
+        // choose_shots' ordinary hunting FSM should learn from it too: no
+        // Cruiser possible anywhere else on the board, and no Frigate
+        // possible adjacent to either real Cruiser.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+        ai.mark_sunk(3);
+        ai.mark_sunk(3);
+
+        let (rows3, _) = ai.line_states(3);
+        for r in 1..=8 {
+            let alive = AiPlayer::alive_count(3, rows3[r]);
+            if r == 2 || r == 6 {
+                assert!(alive > 0, "row {r} passes through a confirmed Cruiser cell, must still show alive Cruiser placements, got {alive}");
+            } else {
+                assert_eq!(alive, 0, "row {r} has no confirmed Cruiser cell, must show 0 alive Cruiser placements now, got {alive}");
+            }
+        }
+
+        // Per-cell (not whole-row) Frigate check: only cells actually
+        // adjacent to a real Cruiser cell must show 0 — e.g. row 1 also
+        // has cols 6-8, nowhere near either Cruiser, which must stay alive.
+        let (_, _, combined2) = ai.alive_grids(2);
+        for &(r, c) in &[(1, 1), (1, 2), (1, 3), (2, 1), (2, 5), (3, 1), (3, 2), (3, 3)] {
+            assert_eq!(combined2[r - 1][c - 1], 0, "{:?} is adjacent to a confirmed Cruiser cell, must show 0 alive Frigate placements", (r, c));
+        }
+        assert!(combined2[1 - 1][8 - 1] > 0, "sanity: (1,8) is nowhere near either Cruiser, must still show alive Frigate placements");
+    }
+
+    #[test]
+    fn ai_frigate_heatmap_excludes_cells_confirmed_cruiser_or_adjacent() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+
+        let frigate_heatmap = ai.frigate_heatmap();
+        for &(r, c) in &[(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (2, 4), (2, 5), (3, 1), (3, 2), (3, 3)] {
+            assert_eq!(
+                frigate_heatmap[r - 1][c - 1], 0.0,
+                "{:?} is a confirmed Cruiser cell or its neighbour, must show 0 Frigate probability", (r, c)
+            );
+        }
+        let has_nonzero_elsewhere = (1..=8).any(|r| (1..=8).any(|c| frigate_heatmap[r - 1][c - 1] > 0.0));
+        assert!(has_nonzero_elsewhere, "sanity: the rest of the board should still show genuine Frigate ambiguity");
+    }
+
+    #[test]
+    fn ai_heatmap_fraction_methods_match_the_probability_methods() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+
+        let cruiser_heatmap = ai.cruiser_heatmap();
+        let cruiser_fraction = ai.cruiser_heatmap_fraction();
+        for row in 1..=8 {
+            for col in 1..=8 {
+                let (num, denom) = cruiser_fraction[row - 1][col - 1];
+                let expected = if denom == 0 { 0.0 } else { num as f64 / denom as f64 };
+                assert_eq!(expected, cruiser_heatmap[row - 1][col - 1], "fraction/probability mismatch at {:?}", (row, col));
+            }
+        }
+    }
+
+    #[test]
     fn ai_frigate_heatmap_shows_certainty_once_all_3_frigates_are_fully_pinned() {
         let mut ai = AiPlayer::new();
         // Same reasoning as the Cruiser version, one size down: an
@@ -2350,8 +2458,12 @@ mod tests {
     #[test]
     fn ai_choose_shots_falls_through_to_frigate_disambiguation_once_cruisers_are_fully_resolved() {
         let mut ai = AiPlayer::new();
-        // Cruisers fully pinned down (unambiguous) via 2 all-3s salvos...
-        ai.apply_salvo([(1, 1), (1, 2), (1, 3)], [3, 3, 3]);
+        // Cruisers fully pinned down (unambiguous) via 2 all-3s salvos — far
+        // from every `reserved_frigate_cells` window (rows 1, 4, 5), so the
+        // new Cruiser-confirmed-cells-and-neighbours Frigate exclusion (see
+        // `cells_confirmed_cruiser_or_adjacent`) doesn't accidentally
+        // resolve the Frigate ambiguity this test needs to still exist.
+        ai.apply_salvo([(8, 1), (8, 2), (8, 3)], [3, 3, 3]);
         ai.apply_salvo([(8, 6), (8, 7), (8, 8)], [3, 3, 3]);
         // ...but the Frigates are still (boundedly) ambiguous.
         flood_inner_misses_except(&mut ai, &reserved_frigate_cells());

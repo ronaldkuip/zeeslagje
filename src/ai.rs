@@ -182,6 +182,15 @@ pub struct AiPlayer {
     /// cells hold that ship size), and skipping it would understate how
     /// much is actually known.
     salvo_history: Vec<([(usize, usize); 3], [usize; 3])>,
+    /// Whether `apply_cruiser_layout_elimination` has already fed its
+    /// one-time batch of size-3 (elsewhere)/size-2 (adjacency) FSM
+    /// eliminations in, once the Cruisers' exact layout was pinned down
+    /// via the heatmap — unlike `battleship_adjacency_processed`, this
+    /// fires as a single all-at-once event rather than incrementally, so
+    /// a plain flag (not a per-cell grid) is enough to skip the
+    /// (comparatively expensive) `consistent_cruiser_candidates` check on
+    /// every subsequent salvo once it's already done.
+    cruiser_layout_elimination_done: bool,
 }
 
 const INNER_LO: usize = 1;
@@ -211,6 +220,7 @@ impl AiPlayer {
             battleship_adjacency_processed: [[false; 10]; 10],
             cross3_entries: Vec::new(),
             cross2_entries: Vec::new(),
+            cruiser_layout_elimination_done: false,
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
             salvo_history: Vec::new(),
@@ -344,6 +354,12 @@ impl AiPlayer {
             // the exact salvo that sinks a Cruiser would otherwise see a
             // stale (pre-sinking) sunk count during its own apply_salvo call.
             self.refresh_cross3_entry_flags();
+            // Same one-round gap applies to `apply_cruiser_layout_elimination`'s
+            // cheap `size_fully_found(3)` pre-check — without re-running it
+            // here, the exact salvo that sinks the second Cruiser would
+            // see a stale sunk count and skip the elimination for a whole
+            // extra turn.
+            self.apply_cruiser_layout_elimination();
         }
         if size == 2 {
             // Frigate discovery (pinpointing exact cells) is deliberately
@@ -545,6 +561,11 @@ impl AiPlayer {
         self.refresh_cross3_entry_flags();
         self.refresh_cross2_entry_flags();
         self.refresh_cross4_entry_flags();
+
+        // Same idea as the Battleship adjacency fold-in above, one size
+        // down: once the Cruisers' exact layout is confirmed via the
+        // heatmap, feed that into the ordinary hunting FSM too.
+        self.apply_cruiser_layout_elimination();
     }
 
     /// The Battleship forbids orthogonal *and* diagonal adjacency to any other
@@ -603,6 +624,67 @@ impl AiPlayer {
                     }
                     self.battleship_adjacency_processed[nr][nc] = true;
                     self.eliminate_size_at(nr, nc, 3);
+                    self.eliminate_size_at(nr, nc, 2);
+                }
+            }
+        }
+    }
+
+    /// Once the Cruisers' exact layout is confirmed (see
+    /// `cruiser_identified_cells`), feed that knowledge into the ordinary
+    /// hunting FSM — the same idea as `apply_battleship_adjacency_elimination`,
+    /// one size down:
+    /// - Every inner cell that ISN'T one of the 6 real Cruiser cells can
+    ///   never hold a Cruiser either (there are only 2, and we now know
+    ///   exactly where both are) — eliminate size 3 there.
+    /// - Every cell adjacent to a real Cruiser cell (including diagonally)
+    ///   can never hold a Frigate — eliminate size 2 there.
+    ///
+    /// Runs as a single one-time batch (`cruiser_layout_elimination_done`
+    /// guards against repeating it — cheap, since re-deriving
+    /// `cruiser_identified_cells` on every subsequent salvo would
+    /// otherwise redo the full candidate enumeration for no new benefit).
+    fn apply_cruiser_layout_elimination(&mut self) {
+        if self.cruiser_layout_elimination_done {
+            return;
+        }
+        // Cheap pre-check before the comparatively expensive candidate
+        // enumeration: the heatmap can't possibly have narrowed to a
+        // single hypothesis before both Cruisers are actually sunk (there
+        // would still be an entirely unfound one to place anywhere).
+        if !self.size_fully_found(3) {
+            return;
+        }
+        let cells = self.cruiser_identified_cells();
+        if cells.is_empty() {
+            return;
+        }
+        self.cruiser_layout_elimination_done = true;
+
+        let real: std::collections::HashSet<(usize, usize)> = cells.iter().copied().collect();
+        for row in INNER_LO..=INNER_HI {
+            for col in INNER_LO..=INNER_HI {
+                if !real.contains(&(row, col)) {
+                    self.eliminate_size_at(row, col, 3);
+                }
+            }
+        }
+
+        for &(row, col) in &cells {
+            for dr in -1isize..=1 {
+                for dc in -1isize..=1 {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let nr = row as isize + dr;
+                    let nc = col as isize + dc;
+                    if !(INNER_LO as isize..=INNER_HI as isize).contains(&nr) || !(INNER_LO as isize..=INNER_HI as isize).contains(&nc) {
+                        continue;
+                    }
+                    let (nr, nc) = (nr as usize, nc as usize);
+                    if real.contains(&(nr, nc)) {
+                        continue; // part of a Cruiser itself, not a neighbour
+                    }
                     self.eliminate_size_at(nr, nc, 2);
                 }
             }
@@ -849,6 +931,35 @@ impl AiPlayer {
         confirmed
     }
 
+    /// The Cruisers' own confirmed cells, plus every cell adjacent to them
+    /// (including diagonally — no ship may ever be placed adjacent to
+    /// another), once `consistent_cruiser_candidates` has narrowed to a
+    /// single remaining hypothesis. Empirically validated at scale (a
+    /// 1000-game self-play run, ~2M per-cell checks) to never be wrong
+    /// when it reaches that point — see
+    /// `self_play_discovers_every_ship_of_size_at_least_2_by_game_end`'s
+    /// heatmap-soundness assertion — so this is used as ground truth to
+    /// prune the Frigate search, exactly like `cells_confirmed_battleship`
+    /// one size down.
+    fn cells_confirmed_cruiser_or_adjacent(&self) -> [[bool; 10]; 10] {
+        let mut out = [[false; 10]; 10];
+        let candidates = self.consistent_cruiser_candidates();
+        if candidates.len() == 1 {
+            for &(r, c) in &candidates[0] {
+                for dr in -1isize..=1 {
+                    for dc in -1isize..=1 {
+                        let nr = r as isize + dr;
+                        let nc = c as isize + dc;
+                        if (0..10).contains(&nr) && (0..10).contains(&nc) {
+                            out[nr as usize][nc as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Every distinct pair of non-overlapping Cruiser windows currently
     /// consistent with the full salvo history — one entry per hypothesis
     /// "these 2 windows, and nothing else, are the real Cruisers". Shared
@@ -886,7 +997,11 @@ impl AiPlayer {
         let windows = Self::all_frigate_windows();
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
         let confirmed_battleship = self.cells_confirmed_battleship();
-        let candidates: Vec<[(usize, usize); 2]> = windows.into_iter().filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c])).collect();
+        let cruiser_exclusion = self.cells_confirmed_cruiser_or_adjacent();
+        let candidates: Vec<[(usize, usize); 2]> = windows
+            .into_iter()
+            .filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c] && !cruiser_exclusion[r][c]))
+            .collect();
 
         let mut out = Vec::new();
         let n = candidates.len();
@@ -949,6 +1064,40 @@ impl AiPlayer {
     /// `heatmap_from_candidates`.
     pub fn frigate_heatmap(&self) -> Vec<Vec<f64>> {
         self.heatmap_from_candidates(&self.consistent_frigate_candidates())
+    }
+
+    /// Same marginalization as `heatmap_from_candidates`, but returning the
+    /// raw (count, total) pair behind each cell's probability instead of
+    /// the divided float — for displaying the underlying fraction directly
+    /// (e.g. "1/3") rather than a percentage. Same all-zero-pair
+    /// convention before any salvo has been fired.
+    fn heatmap_fraction_from_candidates(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Vec<Vec<(u32, u32)>> {
+        let mut counts = [[0u32; 10]; 10];
+        for cand in candidates {
+            for &(r, c) in cand {
+                counts[r][c] += 1;
+            }
+        }
+        let total = candidates.len() as u32;
+        let mut grid = vec![vec![(0u32, 0u32); 8]; 8];
+        if total > 0 && !self.salvo_history.is_empty() {
+            for row in INNER_LO..=INNER_HI {
+                for col in INNER_LO..=INNER_HI {
+                    grid[row - INNER_LO][col - INNER_LO] = (counts[row][col], total);
+                }
+            }
+        }
+        grid
+    }
+
+    /// See `heatmap_fraction_from_candidates`.
+    pub fn cruiser_heatmap_fraction(&self) -> Vec<Vec<(u32, u32)>> {
+        self.heatmap_fraction_from_candidates(&self.consistent_cruiser_candidates())
+    }
+
+    /// See `heatmap_fraction_from_candidates`.
+    pub fn frigate_heatmap_fraction(&self) -> Vec<Vec<(u32, u32)>> {
+        self.heatmap_fraction_from_candidates(&self.consistent_frigate_candidates())
     }
 
     /// Given the currently consistent candidate hypotheses for a ship
@@ -1584,6 +1733,26 @@ impl AiPlayer {
         match self.found_battleship {
             Some(cells) => cells.to_vec(),
             None => Vec::new(),
+        }
+    }
+
+    /// The Cruisers' exact 6-cell layout (both ships combined), once
+    /// `consistent_cruiser_candidates` has narrowed to a single remaining
+    /// hypothesis — treated as ground truth (see
+    /// `cells_confirmed_cruiser_or_adjacent`'s doc comment for the
+    /// empirical validation behind that). Empty until then. Unlike
+    /// `found_battleship_cells`, no separate permanent snapshot is needed:
+    /// `consistent_cruiser_candidates` is a pure function of
+    /// `salvo_history` alone, and once narrowed to 1 it can only ever stay
+    /// at that same single candidate (more evidence can only shrink the
+    /// consistent set further, never revive an eliminated hypothesis —
+    /// and the true layout, by construction, is never eliminated).
+    pub fn cruiser_identified_cells(&self) -> Vec<(usize, usize)> {
+        let candidates = self.consistent_cruiser_candidates();
+        if candidates.len() == 1 {
+            candidates[0].iter().copied().collect()
+        } else {
+            Vec::new()
         }
     }
 
