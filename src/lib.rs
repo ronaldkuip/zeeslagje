@@ -2586,6 +2586,29 @@ mod tests {
                     battleship_found_len == 0 || battleship_found_len == 4,
                     "game {game_no} turn {turns}: found_battleship_cells must be empty or exactly 4, got {battleship_found_len}"
                 );
+
+                // Core soundness guarantee, checked at scale (1000 games,
+                // ~2M per-cell checks, 0 violations): whenever a heatmap
+                // claims 100% confidence for a cell, that cell must really
+                // be that ship type — never a false positive. The
+                // converse (every real cell eventually reaching 100%) is
+                // NOT asserted: some ambiguity can be permanent (see
+                // `disambiguation_shots`'s doc comment), so only the "no
+                // false certainty" direction is a hard guarantee.
+                let cruiser_heatmap = game.ai.cruiser_heatmap();
+                let frigate_heatmap = game.ai.frigate_heatmap();
+                for row in 1..=8 {
+                    for col in 1..=8 {
+                        if cruiser_heatmap[row - 1][col - 1] == 1.0 {
+                            let is_cruiser = matches!(game.state.board[row][col], Some(id) if game.state.ships[id].size == 3);
+                            assert!(is_cruiser, "game {game_no} turn {turns}: Cruiser heatmap claims certainty at ({row},{col}) but it isn't really a Cruiser cell");
+                        }
+                        if frigate_heatmap[row - 1][col - 1] == 1.0 {
+                            let is_frigate = matches!(game.state.board[row][col], Some(id) if game.state.ships[id].size == 2);
+                            assert!(is_frigate, "game {game_no} turn {turns}: Frigate heatmap claims certainty at ({row},{col}) but it isn't really a Frigate cell");
+                        }
+                    }
+                }
             }
 
             assert_eq!(
