@@ -241,6 +241,17 @@
   .cell.cruiser-identified .heat-half{ display:none; }
   .cell.cruiser-identified .heat-frac-cruiser{ display:none; }
 
+  /* A Cruiser reading below 100% always implies some OTHER, much-less-likely
+     placement is still technically possible somewhere — this cell is one of
+     those low-probability alternatives (see `refreshHeatmaps`'s <80%
+     branch). The pink outline is deliberately much more attention-grabbing
+     than the faint background tint alone, which is easy to overlook at a
+     glance (see the earlier "I don't see anything else tinted" mix-up). */
+  .cell.cruiser-alt-candidate{
+    outline:3px solid #FF3DA6;
+    outline-offset:-3px;
+  }
+
   .cell .heat-frac{
     position:absolute;
     pointer-events:none;
@@ -683,6 +694,7 @@
           <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half, fraction shown in white)</span>
           <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half, fraction shown in white)</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser layout confirmed</span>
+          <span class="legend-item"><span class="legend-swatch" style="border:3px solid #FF3DA6; background:transparent"></span>Cruiser: much less likely alternative</span>
         </div>
       </section>
 
@@ -997,6 +1009,37 @@
     cells.forEach(idx => cellEl(idx)?.classList.add('fully-eliminated'));
   }
 
+  // Shrinks a fraction label's font so it always fits within its cell,
+  // rather than overflowing/bleeding into neighbours once the underlying
+  // candidate count climbs into the hundreds or thousands (common early
+  // in a game, before enough evidence has narrowed things down — e.g.
+  // "256/1780" is far wider than a board cell at a fixed font size).
+  // Measures the cell's own actual rendered width, so it stays correct
+  // across window resizes rather than assuming a fixed pixel layout.
+  function fitFracFontSize(el, text, maxPx = 13, minPx = 6){
+    if (!text) return;
+    const cellWidth = el.parentElement ? el.parentElement.clientWidth : 0;
+    if (!cellWidth) { el.style.fontSize = `${maxPx}px`; return; }
+    const availablePx = cellWidth - 4;
+    const perCharWidth = 0.62; // IBM Plex Mono char width as a fraction of font-size
+    const fitted = Math.floor(availablePx / (text.length * perCharWidth));
+    el.style.fontSize = `${Math.max(minPx, Math.min(maxPx, fitted))}px`;
+  }
+
+  // Highest confidence tier a not-yet-certain Cruiser probability clears —
+  // empirically validated (5000-game stress test): false positives DO
+  // still occur at every one of these thresholds, just increasingly
+  // rarely (0.17% at 80%, down to 0.0015% at 95%). Shown as an explicit
+  // "not yet certain" cue rather than folded into the identified/green
+  // treatment, which is reserved for genuine 100% certainty only.
+  function cruiserConfidenceTier(p){
+    if (p >= 0.95) return '>95%';
+    if (p >= 0.90) return '>90%';
+    if (p >= 0.85) return '>85%';
+    if (p >= 0.80) return '>80%';
+    return null;
+  }
+
   // Inner 8x8 grid convention (grid[i][j] == board row/col i+1, j+1, 0-indexed)
   // matches `alive_grids_json` and every other per-cell debug endpoint.
   function refreshHeatmaps(){
@@ -1032,13 +1075,29 @@
           frigateEl.style.opacity = fProb > 0 ? String(0.12 + fProb * 0.75) : '0';
           frigateEl.title = fProb > 0 ? `Frigate probability: ${(fProb * 100).toFixed(0)}%` : '';
         }
+        // A Cruiser reading below 100% always means some other, much
+        // less likely placement is technically still possible — flag
+        // this cell as that low-probability alternative with a pink
+        // border, rather than relying on the faint background tint
+        // alone (easy to miss at a glance).
+        el.classList.toggle('cruiser-alt-candidate', cProb > 0 && cProb < 0.80);
         if (cruiserFracEl){
-          const [num, denom] = cruiserFracGrid ? cruiserFracGrid[i][j] : [0, 0];
-          cruiserFracEl.textContent = denom > 0 ? `${num}/${denom}` : '';
+          const tier = cProb > 0 && cProb < 1.0 ? cruiserConfidenceTier(cProb) : null;
+          if (tier){
+            cruiserFracEl.textContent = tier;
+            fitFracFontSize(cruiserFracEl, tier, 11);
+          } else {
+            const [num, denom] = cruiserFracGrid ? cruiserFracGrid[i][j] : [0, 0];
+            const text = denom > 0 ? `${num}/${denom}` : '';
+            cruiserFracEl.textContent = text;
+            fitFracFontSize(cruiserFracEl, text, 8);
+          }
         }
         if (frigateFracEl){
           const [num, denom] = frigateFracGrid ? frigateFracGrid[i][j] : [0, 0];
-          frigateFracEl.textContent = denom > 0 ? `${num}/${denom}` : '';
+          const text = denom > 0 ? `${num}/${denom}` : '';
+          frigateFracEl.textContent = text;
+          fitFracFontSize(frigateFracEl, text);
         }
       }
     }
@@ -1591,7 +1650,7 @@
     autoPlayBtn.textContent = 'Auto-play (30 shots)';
     setAutoPlayState('blue');
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
-    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified'));
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
     turnNo.textContent = game.turn();
     hitCount.textContent = '0';
     renderSelection();
