@@ -2117,6 +2117,40 @@ mod tests {
     }
 
     #[test]
+    fn ai_refiring_a_confirmed_battleship_anchor_does_not_corrupt_its_own_fsm() {
+        // Regression: `anchored_isolation_shot` deliberately refires an
+        // already-confirmed Battleship cell as a safe "known 4" anchor,
+        // paired with 2 unrelated cells elsewhere on the board. That 3rd
+        // "4" in the bag used to unconditionally re-trigger
+        // `apply_battleship_cross_elimination` — the ordinary "one of
+        // these 3 cells is a Battleship hit, we don't know which" cross
+        // logic — even though we DO already know which cell it is. That
+        // treated the 2 far-apart, unrelated cells as still-live
+        // Battleship candidates for a brand new cross, and intersecting
+        // that against history wiped out the real, already-confirmed
+        // window, zeroing the size-4 FSM everywhere.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+        assert_eq!(
+            ai.battleship_identified_cells().into_iter().collect::<std::collections::HashSet<_>>(),
+            [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect()
+        );
+        ai.mark_sunk(4);
+
+        let (rows_before, cols_before) = ai.line_states(4);
+        assert!(rows_before[4] > 0, "sanity: row 4 must still show a live size-4 placement before the refire");
+
+        // Re-fire the already-confirmed (4,3) alongside 2 unrelated, far-away
+        // cells — exactly what `anchored_isolation_shot` does.
+        ai.apply_salvo([(4, 3), (7, 7), (8, 2)], [4, 3, 2]);
+
+        let (rows_after, cols_after) = ai.line_states(4);
+        assert_eq!(rows_before, rows_after, "re-firing a confirmed Battleship cell as an anchor must not change the size-4 row FSM");
+        assert_eq!(cols_before, cols_after, "...or the column FSM");
+    }
+
+    #[test]
     fn ai_choose_shots_finds_an_anchored_isolation_cleanup_shot_when_available() {
         // Regression / feature test for the "anchor-and-isolate" cleanup
         // shot: a confirmed Battleship cell (known, certain "4") plus one

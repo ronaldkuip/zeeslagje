@@ -475,9 +475,22 @@ impl AiPlayer {
 
         // A 4 in the bag means one of these 3 cells is a genuine Battleship hit —
         // we just don't know which. Fold in the cross-elimination trick below.
-        if bound == 4 {
+        //
+        // ...unless the Battleship is already fully confirmed (identified via
+        // 2+ intersecting cross-4 salvos, or permanently recorded once sunk):
+        // then this "4" can only be a deliberate re-fire of an already-known
+        // cell (see `anchored_isolation_shot`, which refires a confirmed
+        // Battleship cell as a safe anchor for isolating a Cruiser/Frigate
+        // cell elsewhere on the board). Running the "don't know which of
+        // these 3 cells is the hit" cross logic on that would wrongly treat
+        // the OTHER 2 (likely far-apart, unrelated) cells as still-live
+        // Battleship candidates for a brand new cross, and intersecting that
+        // against history can wipe out the real, already-confirmed window
+        // entirely. There's nothing left to deduce about its location, so
+        // skip it.
+        if bound == 4 && self.battleship_identified().is_none() && self.found_battleship.is_none() {
             self.apply_battleship_cross_elimination(coords, values);
-        } else {
+        } else if bound != 4 {
             // No 4 anywhere in this bag means NONE of these 3 cells can hold the
             // Battleship (if one did, its value would be 4, forcing bound == 4).
             // That's a certain exclusion, independent of any cross-deduction —
