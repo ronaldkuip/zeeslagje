@@ -414,6 +414,19 @@ impl Game {
         self.ai.current_target_size()
     }
 
+    /// Whether the Cruisers are sunk but their exact 2-window layout is
+    /// still ambiguous — i.e. `choose_shots` still has genuine
+    /// disambiguating work to do for them. See
+    /// `AiPlayer::cruiser_disambiguation_pending`.
+    pub fn ai_cruiser_disambiguation_pending(&self) -> bool {
+        self.ai.cruiser_disambiguation_pending()
+    }
+
+    /// Same idea as `ai_cruiser_disambiguation_pending`, one size down.
+    pub fn ai_frigate_disambiguation_pending(&self) -> bool {
+        self.ai.frigate_disambiguation_pending()
+    }
+
     /// Toggle whether the AI's advisory (`ai_suggest`/`choose_shots`) may
     /// recommend an already-fired cell while hunting `size` (2, 3, or 4).
     /// Manual firing via `fire` is unaffected either way.
@@ -2056,22 +2069,117 @@ mod tests {
         }
     }
 
+    /// 4 mutually far-apart, never-overlapping straight-3 runs. With the
+    /// rest of the inner board flooded to misses (see
+    /// `flood_inner_misses_except`), every one of the C(4,2) = 6
+    /// non-overlapping pairs among these stays equally "consistent" (none
+    /// of their cells were ever fired) — a small, bounded amount of
+    /// genuine Cruiser ambiguity, comfortably under
+    /// `disambiguation_shots`'s `MAX_CANDIDATES_TO_ATTEMPT` cap.
+    fn reserved_cruiser_cells() -> Vec<(usize, usize)> {
+        vec![
+            (2, 2), (2, 3), (2, 4),
+            (2, 6), (2, 7), (2, 8),
+            (7, 2), (7, 3), (7, 4),
+            (7, 6), (7, 7), (7, 8),
+        ]
+    }
+
+    /// 5 mutually far-apart 2-cell runs, chosen so 4 of the C(5,3) = 10
+    /// possible triples are non-overlapping — same idea as
+    /// `reserved_cruiser_cells`, one size down.
+    fn reserved_frigate_cells() -> Vec<(usize, usize)> {
+        vec![
+            (4, 2), (4, 3),
+            (4, 6), (4, 7),
+            (5, 2), (5, 3),
+            (5, 6), (5, 7),
+            (1, 4), (1, 5),
+        ]
+    }
+
+    /// 3 mutually far-apart straight-3 runs, reserved for scenarios that
+    /// need BOTH Cruiser and Frigate ambiguity at once. Each 3-cell run
+    /// doubles as 2 valid Frigate sub-windows, so unlike
+    /// `reserved_cruiser_cells` + `reserved_frigate_cells` combined (whose
+    /// Frigate candidate count blows past `MAX_CANDIDATES_TO_ATTEMPT` once
+    /// the Cruiser regions' extra sub-windows are counted in), a single
+    /// smaller shared set keeps both counts bounded: C(3,2) = 3 Cruiser
+    /// pairs, and exactly 8 non-overlapping Frigate triples (one
+    /// sub-window choice per region, since same-region sub-windows are
+    /// mutually adjacent).
+    fn reserved_shared_cells() -> Vec<(usize, usize)> {
+        vec![
+            (2, 2), (2, 3), (2, 4),
+            (5, 2), (5, 3), (5, 4),
+            (8, 2), (8, 3), (8, 4),
+        ]
+    }
+
+    /// Fires miss salvos ([0,0,0]) covering every inner 8x8 cell except
+    /// `keep` and whatever's already fired — simulating a late-game board
+    /// where ordinary hunting has explored almost everywhere, so the only
+    /// remaining ambiguity is the handful of untouched regions in `keep`.
+    /// Pads the final salvo with outer-ring cells (never a Cruiser/Frigate
+    /// candidate either way) if the remainder isn't a multiple of 3.
+    fn flood_inner_misses_except(ai: &mut AiPlayer, keep: &[(usize, usize)]) {
+        let mut to_fire: Vec<(usize, usize)> = Vec::new();
+        for r in 1..=8 {
+            for c in 1..=8 {
+                if keep.contains(&(r, c)) || ai.is_fired(r, c) {
+                    continue;
+                }
+                to_fire.push((r, c));
+            }
+        }
+        let mut outer_padding = (0..10).map(|i| (0usize, i));
+        for chunk in to_fire.chunks(3) {
+            let mut salvo = chunk.to_vec();
+            while salvo.len() < 3 {
+                salvo.push(outer_padding.next().expect("board isn't THAT exhausted"));
+            }
+            ai.apply_salvo([salvo[0], salvo[1], salvo[2]], [0, 0, 0]);
+        }
+    }
+
     #[test]
     fn ai_cruiser_disambiguation_shots_is_none_once_the_layout_is_fully_pinned() {
         let mut ai = AiPlayer::new();
         ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
         ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
         assert_eq!(ai.cruiser_disambiguation_shots(), None, "only one consistent layout remains — nothing left to disambiguate");
+        assert!(!ai.cruiser_disambiguation_pending());
+    }
+
+    #[test]
+    fn ai_disambiguation_pending_flags_track_whether_a_shot_is_actually_available() {
+        // Regression: the frontend's "fleet cleared" popup/auto-play stop
+        // condition used to fire the instant every ship of size >=2 was
+        // literally sunk, even though the AI's own bag-based deduction can
+        // still be genuinely ambiguous about the exact layout at that
+        // point — meaning Frigate disambiguation (which only ever becomes
+        // eligible once Frigates are ALSO sunk, the very same moment the
+        // old stop condition fired) could never actually run. These flags
+        // are what the frontend now waits on instead.
+        let mut ai = AiPlayer::new();
+        assert!(!ai.cruiser_disambiguation_pending(), "nothing fired yet — nothing to disambiguate");
+        assert!(!ai.frigate_disambiguation_pending());
+
+        flood_inner_misses_except(&mut ai, &reserved_shared_cells());
+
+        assert!(ai.cruiser_disambiguation_pending(), "bounded geometric ambiguity among the untouched regions must report as pending");
+        assert!(ai.frigate_disambiguation_pending());
     }
 
     #[test]
     fn ai_cruiser_disambiguation_shots_returns_some_when_ambiguous_and_avoids_fired_cells() {
         let mut ai = AiPlayer::new();
-        // Exactly one of these 3 cells is a real Cruiser hit, but the bag
-        // never says which — many different Cruiser-pair layouts stay
-        // consistent with this alone, so the layout remains genuinely
-        // ambiguous (mirrors the heatmap tests' "fractional" scenario).
-        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        // With the rest of the board flooded to misses, 6 different
+        // Cruiser-pair layouts (any 2 of the 4 reserved regions) remain
+        // equally consistent — genuinely ambiguous, but a small, bounded
+        // amount of ambiguity `disambiguation_shots` will actually attempt
+        // (unlike the near-whole-board case it deliberately defers on).
+        flood_inner_misses_except(&mut ai, &reserved_cruiser_cells());
 
         let heatmap = ai.cruiser_heatmap();
         let has_fractional_cell = (1..=8).any(|r| (1..=8).any(|c| { let p = heatmap[r - 1][c - 1]; p > 0.0 && p < 1.0 }));
@@ -2089,7 +2197,7 @@ mod tests {
     #[test]
     fn ai_choose_shots_prioritizes_cruiser_disambiguation_once_battleship_and_cruisers_are_sunk() {
         let mut ai = AiPlayer::new();
-        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        flood_inner_misses_except(&mut ai, &reserved_cruiser_cells());
         ai.mark_sunk(4);
         ai.mark_sunk(3);
         ai.mark_sunk(3);
@@ -2102,9 +2210,9 @@ mod tests {
     #[test]
     fn ai_choose_shots_prefers_cruiser_disambiguation_over_frigate_disambiguation() {
         let mut ai = AiPlayer::new();
-        // Ambiguous evidence for BOTH classes at once.
-        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
-        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [2, 0, 0]);
+        // Bounded ambiguity for BOTH classes at once (rest of the board
+        // flooded to misses) — see `reserved_shared_cells`.
+        flood_inner_misses_except(&mut ai, &reserved_shared_cells());
         ai.mark_sunk(4);
         ai.mark_sunk(3);
         ai.mark_sunk(3);
@@ -2126,8 +2234,8 @@ mod tests {
         // Cruisers fully pinned down (unambiguous) via 2 all-3s salvos...
         ai.apply_salvo([(1, 1), (1, 2), (1, 3)], [3, 3, 3]);
         ai.apply_salvo([(8, 6), (8, 7), (8, 8)], [3, 3, 3]);
-        // ...but the Frigates are still ambiguous.
-        ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [2, 0, 0]);
+        // ...but the Frigates are still (boundedly) ambiguous.
+        flood_inner_misses_except(&mut ai, &reserved_frigate_cells());
         ai.mark_sunk(4);
         ai.mark_sunk(3);
         ai.mark_sunk(3);

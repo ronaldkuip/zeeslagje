@@ -676,7 +676,7 @@
           </div>
           <div class="status-line" id="statusLine">Select 3 coordinates on the chart, or accept the AI's advisory.</div>
           <div class="fire-row" style="margin-top:10px;">
-            <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire, up to 30 shots, stopping early once the Battleship, Cruisers, and Frigates are all sunk">Auto-play (30 shots)</button>
+            <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire, up to 30 shots, stopping early once the Battleship, Cruisers, and Frigates are all sunk AND their exact layouts are disambiguated">Auto-play (30 shots)</button>
           </div>
           <div class="fire-row" style="margin-top:10px;">
             <label for="batchSizeInput" style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink);">Batch size</label>
@@ -1344,7 +1344,15 @@
     if (!fleetClearedShown && !game.is_won()){
       const ships = JSON.parse(game.ships_json());
       const bigShipsSunk = ships.length > 0 && ships.filter(s => s.size >= 2).every(s => s.sunk);
-      if (bigShipsSunk){
+      // Sunk isn't the same as fully identified — the AI's own bag-based
+      // deduction can still be ambiguous about the Cruisers'/Frigates'
+      // exact layout even after every real cell is hit (see
+      // `cruiser_disambiguation_shots`/`frigate_disambiguation_shots` in
+      // ai.rs). Wait for that to resolve too, so auto-play actually gets
+      // to fire the disambiguating shots instead of declaring victory the
+      // instant the last real cell happens to be hit.
+      const layoutsResolved = !game.ai_cruiser_disambiguation_pending() && !game.ai_frigate_disambiguation_pending();
+      if (bigShipsSunk && layoutsResolved){
         fleetClearedShown = true;
         // No popup here — the auto-play button turning green (see
         // runAutoPlay/setAutoPlayState) is signal enough, for both automated
@@ -1389,13 +1397,13 @@
 
   // Repeatedly uses the AI advisory and fires, exactly as a user clicking
   // "Use these 3" then "Fire salvo" would, up to a fixed shot cap — stopping
-  // early the moment the Battleship, both Cruisers, and all 3 Frigates are
-  // sunk (see the `fleetClearedShown` check in `doFire`, which also turns
-  // the button green live, whether that milestone is reached via this loop
-  // or ordinary manual play). No popup either way — the button colour alone
-  // reports the outcome. Turns red (with an explanatory popup, since colour
-  // alone doesn't say why) if the cap is reached first without clearing the
-  // fleet.
+  // early once the Battleship, both Cruisers, and all 3 Frigates are both
+  // sunk AND disambiguated (see the `fleetClearedShown` check in `doFire`,
+  // which also turns the button green live, whether that milestone is
+  // reached via this loop or ordinary manual play). No popup either way —
+  // the button colour alone reports the outcome. Turns red (with an
+  // explanatory popup, since colour alone doesn't say why) if the cap is
+  // reached first without clearing the fleet.
   async function runAutoPlay(){
     if (autoPlayRunning || won) return;
     autoPlayRunning = true;
@@ -1440,7 +1448,7 @@
       logGameEnd('auto-play timeout', game.turn());
       openModal(
         'Things are not well',
-        `<p>${shotsTaken} shots fired and the Battleship, Cruisers, and Frigates still aren't all sunk.</p>`
+        `<p>${shotsTaken} shots fired and the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.</p>`
       );
     }
   }

@@ -931,12 +931,34 @@ impl AiPlayer {
     /// search, not guaranteed globally optimal, but always sound: any
     /// salvo returned is guaranteed to strictly narrow the candidate set
     /// on the worst-case outcome, never to leave it unchanged.
+    ///
+    /// Also gives up (returns `None`) when the candidate set is still huge
+    /// — right after a class is sunk, most of the board can still be
+    /// completely untested, so literally any untouched region could host
+    /// an entirely phantom alternate window, and "consistent" candidate
+    /// pairs/triples can number in the thousands. Chasing that down to a
+    /// unique answer via dedicated disambiguation shots alone could take
+    /// dozens of turns, monopolizing every salvo and completely starving
+    /// Frigate/Submarine hunting in the meantime. Ordinary hunting shots
+    /// narrow this same candidate set for free as a side effect (every
+    /// shot updates `salvo_history`, regardless of what it was aimed at) —
+    /// so it's better to defer and let that happen first, then step in
+    /// with dedicated effort once the residual ambiguity has already
+    /// shrunk to something a handful of shots can realistically resolve.
     fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Option<[(usize, usize); 3]> {
-        if candidates.len() <= 1 {
+        const MAX_CANDIDATES_TO_ATTEMPT: usize = 80;
+        if candidates.len() <= 1 || candidates.len() > MAX_CANDIDATES_TO_ATTEMPT {
             return None;
         }
 
-        let mut counts: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+        // BTreeMap (not HashMap): iteration order feeds directly into
+        // `informative`'s ordering below, which in turn decides tie-breaks
+        // whenever multiple cells score equally — a HashMap's iteration
+        // order isn't guaranteed stable across separate instances, which
+        // made 2 calls against the identical AiPlayer state able to return
+        // different salvos for a tied scenario. The advisory must be
+        // deterministic for a given board state.
+        let mut counts: std::collections::BTreeMap<(usize, usize), usize> = std::collections::BTreeMap::new();
         for cand in candidates {
             for &cell in cand {
                 *counts.entry(cell).or_insert(0) += 1;
@@ -949,6 +971,20 @@ impl AiPlayer {
             .map(|(&cell, _)| cell)
             .collect();
 
+        if informative.is_empty() {
+            // Every cell the remaining candidates disagree on is already
+            // fired — e.g. 2 hypotheses differing only in which cell of an
+            // already-completed salvo held the real hit (its bag's
+            // aggregate count matches either way; see the module-level
+            // reasoning on `consistent_with_salvo_history`). Re-firing an
+            // already-known cell teaches nothing, so this is a genuine,
+            // permanent limit of the unordered-bag observation model, not
+            // a puzzle any future shot could ever crack — report it as
+            // resolved-as-far-as-possible instead of looping forever on a
+            // directionless filler salvo.
+            return None;
+        }
+
         const MAX_POOL: usize = 14;
         if informative.len() > MAX_POOL {
             informative.sort_by_key(|cell| {
@@ -960,12 +996,21 @@ impl AiPlayer {
 
         let mut pool = informative;
         if pool.len() < 3 {
-            // Rare: not enough distinct informative cells left to fill a
-            // full salvo. Pad with arbitrary unfired inner cells so a shot
-            // can still be formed — these carry no discriminating power of
-            // their own, they just fill out the salvo.
-            'pad: for r in INNER_LO..=INNER_HI {
-                for c in INNER_LO..=INNER_HI {
+            // Not uncommon by the time a class is fully sunk: the inner 8x8
+            // is often already almost entirely fired (ordinary hunting
+            // covers it heavily), leaving only 1-2 genuinely informative
+            // cells. Pad with ANY other unfired cell on the whole board —
+            // outer ring included — so a shot can still be formed; these
+            // carry no discriminating power of their own for this ship
+            // size, they just fill out the mandatory 3-cell salvo. Bailing
+            // out here instead (as an earlier version did, restricting the
+            // padding search to the inner 8x8 only) meant genuine,
+            // resolvable ambiguity got silently reported as "nothing left
+            // to disambiguate" the moment the inner board ran low on
+            // untouched cells — even with real informative cells still
+            // sitting right there unfired.
+            'pad: for r in 0..10 {
+                for c in 0..10 {
                     if pool.len() >= 3 {
                         break 'pad;
                     }
@@ -1006,14 +1051,43 @@ impl AiPlayer {
 
     /// Best next salvo to disambiguate the Cruisers' exact layout, once
     /// both are sunk but more than one placement remains consistent with
-    /// the evidence so far. See `disambiguation_shots`.
+    /// the evidence so far. See `disambiguation_shots`. `None` before any
+    /// salvo has been fired at all — same "nothing to condition on yet"
+    /// reasoning as `cruiser_heatmap`'s all-zero grid: with zero evidence,
+    /// literally every non-overlapping window pair is equally
+    /// "consistent", so there's nothing genuine to disambiguate yet, only
+    /// an arbitrary first guess (and `choose_shots` never reaches this
+    /// before both Cruisers are sunk in practice anyway, which itself
+    /// requires a non-empty history).
     pub fn cruiser_disambiguation_shots(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
         self.disambiguation_shots(&self.consistent_cruiser_candidates())
     }
 
     /// Same idea as `cruiser_disambiguation_shots`, one size down.
     pub fn frigate_disambiguation_shots(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
         self.disambiguation_shots(&self.consistent_frigate_candidates())
+    }
+
+    /// Whether `choose_shots` currently has a genuine Cruiser-disambiguating
+    /// salvo to offer — i.e. whether the Cruisers' exact layout is still
+    /// ambiguous. Exposed so callers (the "fleet cleared" popup/auto-play
+    /// stop condition in the UI) can wait for disambiguation to actually
+    /// finish, rather than declaring victory the instant both Cruisers are
+    /// literally sunk — which, per `consistent_cruiser_candidates`, doesn't
+    /// by itself guarantee their exact cells are uniquely determined.
+    pub fn cruiser_disambiguation_pending(&self) -> bool {
+        self.cruiser_disambiguation_shots().is_some()
+    }
+
+    /// Same idea as `cruiser_disambiguation_pending`, one size down.
+    pub fn frigate_disambiguation_pending(&self) -> bool {
+        self.frigate_disambiguation_shots().is_some()
     }
 
     /// Re-check, for every cross-3 entry, whether each of its 3 ORIGINAL fired
