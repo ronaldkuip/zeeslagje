@@ -1078,6 +1078,73 @@ impl AiPlayer {
         best.map(|(salvo, _)| salvo)
     }
 
+    /// "Anchor-and-isolate" cleanup shot, tried before the general minimax
+    /// `disambiguation_shots` search: if the Cruiser/Frigate heatmaps show
+    /// one cell that's already provably possible ONLY as a Cruiser (its
+    /// Frigate probability is exactly 0) and a different cell that's
+    /// provably possible ONLY as a Frigate (Cruiser probability exactly
+    /// 0), firing both together alongside any cell whose true value is
+    /// already known with total certainty (currently: a confirmed
+    /// Battleship cell) lets the resulting bag be decoded by elimination
+    /// instead of probability. The known cell's contribution is always
+    /// identifiable (a 4 is the board's only possible "4", and can never
+    /// come from anywhere else in this salvo, since confirmed Battleship
+    /// cells are excluded from every Cruiser/Frigate window by
+    /// construction — see `cells_confirmed_battleship`). Since neither of
+    /// the other 2 cells could ever produce the OTHER ship's value,
+    /// whichever count actually shows up in the bag must have come from
+    /// the one cell that could possibly produce it — fully resolving BOTH
+    /// cells from a single salvo, rather than merely narrowing the worst
+    /// case the way `disambiguation_shots` does. `None` if no confirmed
+    /// Battleship cell exists yet, or no such cross-exclusive pair exists.
+    fn anchored_isolation_shot(&self) -> Option<[(usize, usize); 3]> {
+        let confirmed_battleship = self.cells_confirmed_battleship();
+        let mut anchor = None;
+        'find_anchor: for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=INNER_HI {
+                if confirmed_battleship[r][c] {
+                    anchor = Some((r, c));
+                    break 'find_anchor;
+                }
+            }
+        }
+        let anchor = anchor?;
+
+        let cruiser_grid = self.cruiser_heatmap();
+        let frigate_grid = self.frigate_heatmap();
+
+        let mut cruiser_only = None;
+        let mut frigate_only = None;
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=INNER_HI {
+                if (r, c) == anchor {
+                    continue;
+                }
+                let cp = cruiser_grid[r - INNER_LO][c - INNER_LO];
+                let fp = frigate_grid[r - INNER_LO][c - INNER_LO];
+                // Strictly between 0 and 1, not just nonzero: a cell
+                // already at 1.0 is already fully resolved, so "isolating"
+                // it again would waste the salvo re-confirming something
+                // already certain — and, worse, since firing the exact
+                // same cells always reproduces the exact same bag, picking
+                // an already-resolved cell here forever would never
+                // change anything, looping indefinitely instead of making
+                // progress.
+                if cruiser_only.is_none() && cp > 0.0 && cp < 1.0 && fp == 0.0 {
+                    cruiser_only = Some((r, c));
+                }
+                if frigate_only.is_none() && fp > 0.0 && fp < 1.0 && cp == 0.0 {
+                    frigate_only = Some((r, c));
+                }
+            }
+        }
+
+        match (cruiser_only, frigate_only) {
+            (Some(a), Some(b)) => Some([anchor, a, b]),
+            _ => None,
+        }
+    }
+
     /// Best next salvo to disambiguate the Cruisers' exact layout, once
     /// both are sunk but more than one placement remains consistent with
     /// the evidence so far. See `disambiguation_shots`. `None` before any
@@ -1470,6 +1537,19 @@ impl AiPlayer {
     /// general refire-allowed toggle is off.
     pub fn is_battleship_discriminating_refire(&self, row: usize, col: usize) -> bool {
         self.fired[row][col] && self.battleship_discriminating_test_cell() == Some((row, col))
+    }
+
+    /// Same idea as `is_battleship_discriminating_refire`, for
+    /// `anchored_isolation_shot`: the anchor cell is a confirmed Battleship
+    /// cell, almost always already fired by the time Cruiser/Frigate
+    /// disambiguation runs (the class can't be "fully sunk" otherwise) —
+    /// and the cross-exclusive Cruiser/Frigate cell it's paired with is
+    /// frequently already fired too (that's exactly what made its
+    /// probability resolvable in the first place). Without this, `Game::
+    /// fire` would reject the whole deliberate salvo as an ordinary
+    /// refire.
+    pub fn is_anchored_isolation_refire(&self, row: usize, col: usize) -> bool {
+        self.fired[row][col] && self.anchored_isolation_shot().is_some_and(|shots| shots.contains(&(row, col)))
     }
 
     /// The Battleship's exact 4-cell layout, once `battleship_identified` has
@@ -1943,6 +2023,15 @@ impl AiPlayer {
         // separate, higher-priority activity that only ever fires once
         // there's nothing bigger left to actually hunt.
         if self.size_fully_found(4) && self.size_fully_found(3) {
+            // Try the cheap, fully-conclusive cleanup shot first — see
+            // `anchored_isolation_shot`. It can resolve a Cruiser cell and
+            // a Frigate cell in a single salvo whenever the heatmaps
+            // already show that exact cross-exclusive pattern, which is
+            // strictly better than the general minimax search's
+            // worst-case narrowing.
+            if let Some(shots) = self.anchored_isolation_shot() {
+                return shots;
+            }
             if let Some(shots) = self.cruiser_disambiguation_shots() {
                 return shots;
             }

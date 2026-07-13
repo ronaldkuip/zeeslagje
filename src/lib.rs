@@ -313,7 +313,12 @@ impl Game {
             // surviving candidate is common to every window and would just
             // confirm a hit without discriminating anything.
             let is_disambiguation_refire = self.ai.is_battleship_discriminating_refire(r, c);
-            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !board_exhausted {
+            // Same reasoning, for `AiPlayer::anchored_isolation_shot`: its
+            // known-Battleship anchor is almost always already fired (the
+            // class can't be sunk otherwise), and its cross-exclusive
+            // Cruiser/Frigate partner cell is frequently already fired too.
+            let is_anchored_isolation_refire = self.ai.is_anchored_isolation_refire(r, c);
+            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !is_anchored_isolation_refire && !board_exhausted {
                 return r#"{"error":"cell already fired"}"#.to_string();
             }
             if cells_to_fire.iter().any(|&(pr, pc)| pr == r && pc == c) {
@@ -2109,6 +2114,44 @@ mod tests {
         if let Some(shots) = ai.cruiser_disambiguation_shots() {
             assert!(!shots.contains(&(4, 4)), "disambiguation must never target a confirmed Battleship cell: {:?}", shots);
         }
+    }
+
+    #[test]
+    fn ai_choose_shots_finds_an_anchored_isolation_cleanup_shot_when_available() {
+        // Regression / feature test for the "anchor-and-isolate" cleanup
+        // shot: a confirmed Battleship cell (known, certain "4") plus one
+        // cell that's proven possible ONLY as a Cruiser and another proven
+        // possible ONLY as a Frigate, fired together, resolves both by
+        // elimination — strictly better than the general minimax search's
+        // worst-case narrowing.
+        let mut ai = AiPlayer::new();
+
+        // Confirm the Battleship at (4,3)-(4,4)-(4,5)-(4,6).
+        ai.apply_salvo([(4, 3), (1, 1), (2, 2)], [4, 0, 0]);
+        ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
+
+        // Exactly one of these 3 is a real Cruiser hit; the lack of any
+        // "2" in this bag also proves none of them can be a Frigate.
+        ai.apply_salvo([(3, 2), (3, 3), (3, 4)], [3, 0, 0]);
+        // Exactly one of these 3 is a real Frigate hit; the lack of any
+        // "3" proves none of them can be a Cruiser.
+        ai.apply_salvo([(6, 2), (6, 3), (6, 4)], [2, 0, 0]);
+
+        let confirmed_battleship: std::collections::HashSet<(usize, usize)> = [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect();
+        let cruiser_only: std::collections::HashSet<(usize, usize)> = [(3, 2), (3, 3), (3, 4)].into_iter().collect();
+        let frigate_only: std::collections::HashSet<(usize, usize)> = [(6, 2), (6, 3), (6, 4)].into_iter().collect();
+
+        ai.mark_sunk(4);
+        ai.mark_sunk(3);
+        ai.mark_sunk(3);
+
+        let shots = ai.choose_shots();
+        let anchor_count = shots.iter().filter(|c| confirmed_battleship.contains(c)).count();
+        let cruiser_count = shots.iter().filter(|c| cruiser_only.contains(c)).count();
+        let frigate_count = shots.iter().filter(|c| frigate_only.contains(c)).count();
+        assert_eq!(anchor_count, 1, "exactly one shot must be the known Battleship anchor: {:?}", shots);
+        assert_eq!(cruiser_count, 1, "exactly one shot must be a proven cruiser-only candidate: {:?}", shots);
+        assert_eq!(frigate_count, 1, "exactly one shot must be a proven frigate-only candidate: {:?}", shots);
     }
 
     /// 4 mutually far-apart, never-overlapping straight-3 runs. With the
