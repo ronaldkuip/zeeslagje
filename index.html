@@ -239,7 +239,6 @@
     border-color:var(--flag-green);
   }
   .cell.cruiser-identified .heat-half{ display:none; }
-  .cell.cruiser-identified .heat-frac-cruiser{ display:none; }
 
   /* A Cruiser reading below 100% always implies some OTHER, much-less-likely
      placement is still technically possible somewhere — this cell is one of
@@ -261,23 +260,16 @@
     text-shadow:0 1px 2px rgba(0,0,0,0.85);
     line-height:1;
   }
-  /* The Frigate fraction is the one worth reading at a glance — Cruisers
-     resolve to solid green within a handful of turns, so this is normally
-     the only number still carrying real information. Full-cell, centred,
-     large enough to read without squinting. */
+  /* The only number shown anywhere on the board — Cruiser cells rely
+     purely on the colour tint, green "identified" paint, and pink
+     alternative-candidate border, with no numeric label. Full-cell,
+     centred, large enough to read without squinting. */
   .cell .heat-frac-frigate{
     inset:0;
     display:flex;
     align-items:center;
     justify-content:center;
     font-size:13px;
-  }
-  /* The Cruiser fraction is secondary (usually short-lived) — a small
-     corner label so it never collides with the Frigate number above. */
-  .cell .heat-frac-cruiser{
-    top:1px; left:2px;
-    font-size:8px;
-    opacity:0.85;
   }
 
   .chip-list{
@@ -490,6 +482,21 @@
     color:var(--paper-muted);
     font-style:italic;
   }
+
+  .saved-board-entry{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    border-left:2px solid var(--brass);
+    padding:5px 0 5px 10px;
+  }
+  .saved-board-entry .saved-board-summary{color:var(--ink);}
+  .saved-board-entry .saved-board-summary .resolved{color:var(--flag-green); font-weight:600;}
+  .saved-board-entry .saved-board-summary .unresolved{color:var(--coral);}
+  .saved-board-entry button{flex-shrink:0;}
 
   .status-line{
     font-family:'IBM Plex Mono', monospace;
@@ -739,6 +746,15 @@
         </div>
 
         <div class="panel">
+          <h2>Saved Boards
+            <button class="btn btn-ghost" id="saveBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Save the current board layout and resolution status for later study">Save this board</button>
+          </h2>
+          <div class="log-list" id="savedBoardsList" style="max-height:220px;">
+            <div class="log-empty">No boards saved yet.</div>
+          </div>
+        </div>
+
+        <div class="panel">
           <h2>Debug Tools</h2>
           <div class="fire-row">
             <button class="btn btn-ghost" id="fsmStatusBtn">FSM status</button>
@@ -810,6 +826,8 @@
   const logList = document.getElementById('logList');
   const resetBtn = document.getElementById('resetBtn');
   const restartSameBoardBtn = document.getElementById('restartSameBoardBtn');
+  const saveBoardBtn = document.getElementById('saveBoardBtn');
+  const savedBoardsList = document.getElementById('savedBoardsList');
   const fsmStatusBtn = document.getElementById('fsmStatusBtn');
   const revealShipsBtn = document.getElementById('revealShipsBtn');
   const evalLevelBtn = document.getElementById('evalLevelBtn');
@@ -883,9 +901,6 @@
           const frigateHeat = document.createElement('div');
           frigateHeat.className = 'heat-half heat-frigate';
           cell.appendChild(frigateHeat);
-          const cruiserFrac = document.createElement('div');
-          cruiserFrac.className = 'heat-frac heat-frac-cruiser';
-          cell.appendChild(cruiserFrac);
           const frigateFrac = document.createElement('div');
           frigateFrac.className = 'heat-frac heat-frac-frigate';
           cell.appendChild(frigateFrac);
@@ -1026,30 +1041,14 @@
     el.style.fontSize = `${Math.max(minPx, Math.min(maxPx, fitted))}px`;
   }
 
-  // Highest confidence tier a not-yet-certain Cruiser probability clears —
-  // empirically validated (5000-game stress test): false positives DO
-  // still occur at every one of these thresholds, just increasingly
-  // rarely (0.17% at 80%, down to 0.0015% at 95%). Shown as an explicit
-  // "not yet certain" cue rather than folded into the identified/green
-  // treatment, which is reserved for genuine 100% certainty only.
-  function cruiserConfidenceTier(p){
-    if (p >= 0.95) return '>95%';
-    if (p >= 0.90) return '>90%';
-    if (p >= 0.85) return '>85%';
-    if (p >= 0.80) return '>80%';
-    return null;
-  }
-
   // Inner 8x8 grid convention (grid[i][j] == board row/col i+1, j+1, 0-indexed)
   // matches `alive_grids_json` and every other per-cell debug endpoint.
   function refreshHeatmaps(){
     const showCruiser = heatmapCruiserToggle.checked;
     const showFrigate = heatmapFrigateToggle.checked;
-    let cruiserGrid = null, frigateGrid = null;
-    let cruiserFracGrid = null, frigateFracGrid = null;
+    let cruiserGrid = null, frigateGrid = null, frigateFracGrid = null;
     if (showCruiser){
       try { cruiserGrid = JSON.parse(game.cruiser_heatmap_json()); } catch { cruiserGrid = null; }
-      try { cruiserFracGrid = JSON.parse(game.cruiser_heatmap_fraction_json()); } catch { cruiserFracGrid = null; }
     }
     if (showFrigate){
       try { frigateGrid = JSON.parse(game.frigate_heatmap_json()); } catch { frigateGrid = null; }
@@ -1065,7 +1064,6 @@
         const fProb = frigateGrid ? frigateGrid[i][j] : 0;
         const cruiserEl = el.querySelector('.heat-cruiser');
         const frigateEl = el.querySelector('.heat-frigate');
-        const cruiserFracEl = el.querySelector('.heat-frac-cruiser');
         const frigateFracEl = el.querySelector('.heat-frac-frigate');
         if (cruiserEl){
           cruiserEl.style.opacity = cProb > 0 ? String(0.12 + cProb * 0.75) : '0';
@@ -1079,23 +1077,14 @@
         // less likely placement is technically still possible — flag
         // this cell as that low-probability alternative with a pink
         // border, rather than relying on the faint background tint
-        // alone (easy to miss at a glance).
+        // alone (easy to miss at a glance). No numeric label — the
+        // colour tint, green "identified" paint, and this border are the
+        // only Cruiser cues; the Frigate fraction is the only number
+        // shown anywhere on the board.
         el.classList.toggle('cruiser-alt-candidate', cProb > 0 && cProb < 0.80);
-        if (cruiserFracEl){
-          const tier = cProb > 0 && cProb < 1.0 ? cruiserConfidenceTier(cProb) : null;
-          if (tier){
-            cruiserFracEl.textContent = tier;
-            fitFracFontSize(cruiserFracEl, tier, 11);
-          } else {
-            const [num, denom] = cruiserFracGrid ? cruiserFracGrid[i][j] : [0, 0];
-            const text = denom > 0 ? `${num}/${denom}` : '';
-            cruiserFracEl.textContent = text;
-            fitFracFontSize(cruiserFracEl, text, 8);
-          }
-        }
         if (frigateFracEl){
           const [num, denom] = frigateFracGrid ? frigateFracGrid[i][j] : [0, 0];
-          const text = denom > 0 ? `${num}/${denom}` : '';
+          const text = denom > 0 && num > 0 ? `${num}/${denom}` : '';
           frigateFracEl.textContent = text;
           fitFracFontSize(frigateFracEl, text);
         }
@@ -1502,6 +1491,109 @@
     refreshAdvisory();
   }
 
+  // Largest probability anywhere in a Cruiser/Frigate odds grid (as a
+  // whole percentage), for a one-line summary in the saved-boards list.
+  // `grid` may be null/undefined (a resolved board has no odds at all).
+  function maxOddsPercent(grid){
+    if (!grid) return 0;
+    let max = 0;
+    for (const row of grid) for (const p of row) if (p > max) max = p;
+    return Math.round(max * 100);
+  }
+
+  // Saves the CURRENT board's ship layout plus its resolution status (see
+  // AiPlayer::cruiser_identified_cells/frigate_identified_cells) via the
+  // dev server's /save_board endpoint (see serve.py) — a plain browser
+  // can't write to disk directly. Silently reports failure if that
+  // endpoint isn't available (e.g. serving via plain `python -m
+  // http.server`).
+  async function saveCurrentBoard(){
+    let board, resolution;
+    try {
+      board = JSON.parse(game.board_layout_json());
+      resolution = JSON.parse(game.resolution_status_json());
+    } catch {
+      statusLine.textContent = 'Could not read the current board — nothing saved.';
+      return;
+    }
+    const payload = {
+      board,
+      resolved: resolution.resolved,
+      odds: resolution.resolved ? null : { cruiser: resolution.cruiser_odds, frigate: resolution.frigate_odds },
+    };
+    try {
+      const resp = await fetch('/save_board', { method: 'POST', body: JSON.stringify(payload) });
+      if (!resp.ok) throw new Error('save failed');
+      const { id } = await resp.json();
+      statusLine.textContent = `Board saved as #${id}.`;
+      await refreshSavedBoardsList();
+    } catch {
+      statusLine.textContent = 'Could not save the board — is the dev server (serve.py) running?';
+    }
+  }
+
+  // Fetches the full saved-boards list from the dev server and renders
+  // it. Leaves the list untouched (rather than clearing it) if the
+  // server isn't reachable, so a plain static server doesn't wipe out
+  // whatever was already shown.
+  async function refreshSavedBoardsList(){
+    let boards;
+    try {
+      const resp = await fetch('/saved_boards');
+      if (!resp.ok) return;
+      boards = await resp.json();
+    } catch {
+      return;
+    }
+
+    const ids = Object.keys(boards).map(Number).sort((a, b) => a - b);
+    if (ids.length === 0){
+      savedBoardsList.innerHTML = '<div class="log-empty">No boards saved yet.</div>';
+      return;
+    }
+    savedBoardsList.innerHTML = '';
+    ids.forEach(id => {
+      const entry = boards[String(id)];
+      const row = document.createElement('div');
+      row.className = 'saved-board-entry';
+
+      const summary = document.createElement('span');
+      summary.className = 'saved-board-summary';
+      if (entry.resolved){
+        summary.innerHTML = `#${id} <span class="resolved">resolved</span>`;
+      } else {
+        const cruiserMax = maxOddsPercent(entry.odds && entry.odds.cruiser);
+        const frigateMax = maxOddsPercent(entry.odds && entry.odds.frigate);
+        summary.innerHTML = `#${id} <span class="unresolved">unresolved</span> (Cruiser &le;${cruiserMax}%, Frigate &le;${frigateMax}%)`;
+      }
+
+      const loadBtn = document.createElement('button');
+      loadBtn.className = 'btn btn-ghost';
+      loadBtn.style.textTransform = 'none';
+      loadBtn.style.letterSpacing = 'normal';
+      loadBtn.textContent = 'Load';
+      loadBtn.addEventListener('click', () => loadSavedBoard(entry));
+
+      row.appendChild(summary);
+      row.appendChild(loadBtn);
+      savedBoardsList.appendChild(row);
+    });
+  }
+
+  // Reconstructs a fresh game on a previously-saved board layout (see
+  // Game::load_board_layout_json) — same idea as "Replay board", but for
+  // an externally saved layout rather than the current one.
+  function loadSavedBoard(entry){
+    const response = game.load_board_layout_json(JSON.stringify(entry.board));
+    let parsed;
+    try { parsed = JSON.parse(response); } catch { parsed = { error: 'unparseable response' }; }
+    if (parsed.error){
+      statusLine.textContent = `Could not load saved board: ${parsed.error}`;
+      return;
+    }
+    afterGameStateReset('Saved board loaded. Select 3 coordinates, or accept the AI\'s advisory.');
+  }
+
   // Best-effort: appends one line to simpleresult.txt via the local dev
   // server's /log endpoint (see serve.py) — a plain browser can't write to
   // the filesystem directly. Silently does nothing if that endpoint isn't
@@ -1590,6 +1682,25 @@
   // `autoPlayBtn` keeps reporting the MOST RECENT game's outcome live
   // throughout, same as it does outside a batch; `autoPlayBatchBtn`'s own
   // label just tracks overall batch progress.
+  // Whether the Cruiser heatmap still has a low-probability alternative
+  // cell anywhere on the board — i.e. whether the pink "alternative
+  // candidate" border (see `refreshHeatmaps`) would still be showing.
+  // Queries the backend directly rather than the DOM, so it works
+  // regardless of whether the Cruiser heatmap toggle happens to be
+  // checked at the moment (a display preference shouldn't affect
+  // whether the batch notices genuine remaining ambiguity).
+  function hasResidualCruiserAmbiguity(){
+    let grid;
+    try { grid = JSON.parse(game.cruiser_heatmap_json()); } catch { return false; }
+    for (let i = 0; i < 8; i++){
+      for (let j = 0; j < 8; j++){
+        const p = grid[i][j];
+        if (p > 0 && p < 0.80) return true;
+      }
+    }
+    return false;
+  }
+
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
@@ -1606,19 +1717,32 @@
     restartSameBoardBtn.disabled = true;
     const originalLabel = autoPlayBatchBtn.textContent;
 
-    for (let i = 1; i <= n; i++){
+    let stoppedForStudy = false;
+    let i = 1;
+    for (; i <= n; i++){
       autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
       resetGame();
       autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
       await runAutoPlay();
       batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
+
+      // Stop the whole batch (not just this game) the moment a finished
+      // game still has a low-probability Cruiser alternative — leaves
+      // this exact board on screen instead of immediately overwriting it
+      // with the next random game, so it can be studied manually (or
+      // rerun via "Replay board").
+      if (hasResidualCruiserAmbiguity()){
+        stoppedForStudy = true;
+        statusLine.textContent = `Autorun batch stopped at game ${i}/${n}: a Cruiser alternative (pink border) is still showing after this game finished. Study this board, or use "Replay board" to rerun the same layout.`;
+        break;
+      }
     }
 
     batchRunning = false;
     autoPlayBatchBtn.textContent = originalLabel;
     autoPlayBatchBtn.disabled = false;
     batchSizeInput.disabled = false;
-    batchSizeInput.value = n; // restore the original count, ready to run again
+    batchSizeInput.value = stoppedForStudy ? n - i : n; // restore the original count only if the batch ran to completion
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
   }
@@ -1717,6 +1841,8 @@
     autoPlayBatchBtn.addEventListener('click', runAutoPlayBatch);
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
+    saveBoardBtn.addEventListener('click', saveCurrentBoard);
+    refreshSavedBoardsList();
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
     revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));
     evalLevelBtn.addEventListener('click', () => openModal('Evaluation Level', buildEvaluationLevelHtml()));

@@ -54,6 +54,35 @@ impl Ship {
     }
 }
 
+/// Just the ship placement — no fired/hit/turn state — so a board can be
+/// saved and later reloaded to start a fresh game on the exact same
+/// layout. See `Game::board_layout_json`/`Game::load_board_layout_json`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BoardLayout {
+    pub board: Vec<Vec<Option<usize>>>,
+    pub ships: Vec<Ship>,
+}
+
+/// Whether the AI's own deduction has pinned down every ship class it's
+/// capable of identifying (Battleship, Cruiser, Frigate — Submarines
+/// aren't tracked this way) with full certainty, independent of whether
+/// the game itself has been fully won. See `Game::resolution_status_json`.
+/// A game can be won while this is still false (some residual ambiguity
+/// can be permanent — see `AiPlayer::disambiguation_shots`), and this can
+/// become true before the game is won (nothing forces firing at every
+/// last submarine cell first).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolutionStatus {
+    pub resolved: bool,
+    pub battleship_identified: bool,
+    pub cruiser_identified: bool,
+    pub frigate_identified: bool,
+    /// Only populated when NOT fully resolved — the per-cell probability
+    /// grids explaining exactly what's still uncertain and by how much.
+    pub cruiser_odds: Option<Vec<Vec<f64>>>,
+    pub frigate_odds: Option<Vec<Vec<f64>>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SalvoResult {
     pub coords: Vec<String>,     // e.g. ["A3", "C7", "J10"]
@@ -266,6 +295,64 @@ impl Game {
         self.state.won = false;
         self.state.hit_count = 0;
         self.ai = AiPlayer::new();
+    }
+
+    /// The current board's ship placement only (no fired/hit/turn state) —
+    /// for saving a board to replay later. See `load_board_layout_json`.
+    pub fn board_layout_json(&self) -> String {
+        let layout = BoardLayout { board: self.state.board.clone(), ships: self.state.ships.clone() };
+        serde_json::to_string(&layout).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Start a fresh game on a previously-saved board layout (see
+    /// `board_layout_json`) instead of a randomly generated one — same
+    /// idea as `restart_same_board`, but for an externally supplied
+    /// layout. Any hits/sunk flags in the JSON are ignored; the loaded
+    /// game always starts completely fresh. Returns a JSON error object
+    /// if the layout doesn't parse.
+    pub fn load_board_layout_json(&mut self, json: &str) -> String {
+        let layout: BoardLayout = match serde_json::from_str(json) {
+            Ok(l) => l,
+            Err(e) => return format!("{{\"error\":\"invalid board layout: {e}\"}}"),
+        };
+        let total_hits: usize = layout.ships.iter().map(|s| s.size).sum();
+        let mut ships = layout.ships;
+        for ship in &mut ships {
+            ship.hits = 0;
+            ship.sunk = false;
+        }
+        self.state = GameState {
+            board: layout.board,
+            ships,
+            fired: vec![vec![false; 10]; 10],
+            log: Vec::new(),
+            turn: 1,
+            won: false,
+            total_hits,
+            hit_count: 0,
+        };
+        self.ai = AiPlayer::new();
+        r#"{"ok":true}"#.to_string()
+    }
+
+    /// Whether the AI's own deduction currently has every identifiable
+    /// ship class (Battleship, Cruiser, Frigate) pinned down with full
+    /// certainty, plus the Cruiser/Frigate probability grids when it
+    /// doesn't. See `ResolutionStatus`.
+    pub fn resolution_status_json(&self) -> String {
+        let battleship_identified = !self.ai.battleship_identified_cells().is_empty() || !self.ai.found_battleship_cells().is_empty();
+        let cruiser_identified = !self.ai.cruiser_identified_cells().is_empty();
+        let frigate_identified = !self.ai.frigate_identified_cells().is_empty();
+        let resolved = battleship_identified && cruiser_identified && frigate_identified;
+        let status = ResolutionStatus {
+            resolved,
+            battleship_identified,
+            cruiser_identified,
+            frigate_identified,
+            cruiser_odds: if resolved { None } else { Some(self.ai.cruiser_heatmap()) },
+            frigate_odds: if resolved { None } else { Some(self.ai.frigate_heatmap()) },
+        };
+        serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Fire a salvo of exactly 3 cells. Coordinates are flat indices: row * 10 + col.
@@ -2547,6 +2634,78 @@ mod tests {
         // the same result as it did the first time.
         let replayed: serde_json::Value = serde_json::from_str(&game.fire(&[2 * 10 + 2, 0 * 10 + 0, 0 * 10 + 9])).unwrap();
         assert_eq!(replayed["result"], "3 0 0");
+    }
+
+    #[test]
+    fn game_board_layout_round_trips_into_an_identical_fresh_board() {
+        let mut game = fixed_board_game();
+        // Accumulate play state that a save/load round-trip must NOT carry over.
+        game.fire(&[2 * 10 + 2, 0 * 10 + 0, 0 * 10 + 9]);
+        assert!(game.state.hit_count > 0, "sanity: some hits registered before saving");
+
+        let layout_json = game.board_layout_json();
+
+        let mut loaded = Game::new(); // starts from an unrelated random board
+        let response = loaded.load_board_layout_json(&layout_json);
+        assert!(!response.contains("\"error\""), "load must succeed: {response}");
+
+        assert_eq!(loaded.state.board[2][2], Some(0), "ship placement must match the saved layout");
+        assert_eq!(loaded.state.board[7][5], Some(1), "ship placement must match the saved layout");
+        assert_eq!(loaded.state.hit_count, 0, "loaded game must start with no hits");
+        assert_eq!(loaded.state.turn, 1, "loaded game must start at turn 1");
+        assert!(!loaded.state.won, "loaded game must not be won");
+        assert!(loaded.state.fired.iter().all(|row| row.iter().all(|&f| !f)), "loaded game must have nothing fired");
+        assert!(loaded.state.ships.iter().all(|s| s.hits == 0 && !s.sunk), "loaded game's ships must be fresh, regardless of the saved layout's own hit state");
+
+        // The board plays identically: the same salvo produces the same result.
+        let fired: serde_json::Value = serde_json::from_str(&loaded.fire(&[2 * 10 + 2, 2 * 10 + 3, 2 * 10 + 4])).unwrap();
+        assert_eq!(fired["result"], "3 3 3");
+    }
+
+    #[test]
+    fn game_load_board_layout_json_rejects_invalid_json() {
+        let mut game = Game::new();
+        let response = game.load_board_layout_json("not valid json");
+        assert!(response.contains("\"error\""), "must report an error for invalid JSON: {response}");
+    }
+
+    #[test]
+    fn game_resolution_status_json_reports_unresolved_early_with_odds() {
+        let game = Game::new();
+        let status: serde_json::Value = serde_json::from_str(&game.resolution_status_json()).unwrap();
+        assert_eq!(status["resolved"], false);
+        assert_eq!(status["battleship_identified"], false);
+        assert_eq!(status["cruiser_identified"], false);
+        assert_eq!(status["frigate_identified"], false);
+        assert!(!status["cruiser_odds"].is_null(), "not resolved — odds must be present (an all-zero grid, since no evidence yet): {status}");
+        assert!(!status["frigate_odds"].is_null());
+    }
+
+    #[test]
+    fn game_resolution_status_json_reports_resolved_once_everything_identified() {
+        let mut game = Game::new();
+        // Battleship: 2 intersecting crosses at row 4, cols 3-6.
+        game.ai.apply_salvo([(4, 3), (1, 1), (1, 8)], [4, 0, 0]);
+        game.ai.apply_salvo([(4, 6), (8, 1), (8, 8)], [4, 0, 0]);
+        // Both Cruisers: 2 well-separated all-3s salvos.
+        game.ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        game.ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
+        // All 3 Frigates: 3 well-separated all-2s salvos, deliberately kept
+        // away from the Cruiser/Battleship cells above (and each other) —
+        // no ship may be adjacent to another, so a Frigate window next to
+        // a confirmed Cruiser cell would correctly never be considered a
+        // valid candidate at all.
+        game.ai.apply_salvo([(8, 2), (8, 3), (0, 3)], [2, 2, 0]);
+        game.ai.apply_salvo([(8, 6), (8, 7), (0, 4)], [2, 2, 0]);
+        game.ai.apply_salvo([(1, 6), (1, 7), (0, 5)], [2, 2, 0]);
+
+        let status: serde_json::Value = serde_json::from_str(&game.resolution_status_json()).unwrap();
+        assert_eq!(status["resolved"], true, "status: {status}");
+        assert_eq!(status["battleship_identified"], true);
+        assert_eq!(status["cruiser_identified"], true);
+        assert_eq!(status["frigate_identified"], true);
+        assert!(status["cruiser_odds"].is_null(), "fully resolved — odds must be omitted");
+        assert!(status["frigate_odds"].is_null());
     }
 
 

@@ -1756,6 +1756,19 @@ impl AiPlayer {
         }
     }
 
+    /// Same idea as `cruiser_identified_cells`, one size down: the
+    /// Frigates' exact 6-cell layout (all 3 ships combined), once
+    /// `consistent_frigate_candidates` has narrowed to a single remaining
+    /// hypothesis. Empty until then.
+    pub fn frigate_identified_cells(&self) -> Vec<(usize, usize)> {
+        let candidates = self.consistent_frigate_candidates();
+        if candidates.len() == 1 {
+            candidates[0].iter().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Length of the maximal run of contiguous `true` cells in `mask`, along `row`,
     /// that includes `col` (inner 8x8 only).
     fn max_contiguous_run_horizontal(mask: &[[bool; 10]; 10], row: usize, col: usize) -> usize {
