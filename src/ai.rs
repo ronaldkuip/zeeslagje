@@ -1,4 +1,5 @@
 use crate::fsm_tables::*;
+use std::cell::RefCell;
 
 // ---------------------------------------------------------------------------
 // AI player: tracks elimination state per row and per column, for each
@@ -191,6 +192,19 @@ pub struct AiPlayer {
     /// (comparatively expensive) `consistent_cruiser_candidates` check on
     /// every subsequent salvo once it's already done.
     cruiser_layout_elimination_done: bool,
+    /// Memoized `consistent_cruiser_candidates`/`consistent_frigate_candidates`,
+    /// keyed by `salvo_history.len()` — every JSON accessor the frontend
+    /// polls (`resolution_status_json`, `cruiser_heatmap_json`,
+    /// `cruiser_heatmap_fraction_json`, `cruiser_identified_json`, their
+    /// Frigate counterparts, ...) independently calls these, and the
+    /// cross-reasoning path (`jointly_consistent_hypothesis_pairs`) calls
+    /// them again on top of that. Recomputing the full O(n^2)/O(n^3) window
+    /// enumeration from scratch on every one of those calls made a single
+    /// early-game move take well over a minute; caching by salvo count
+    /// (the only thing these lists depend on) means each is computed once
+    /// per real game state and reused everywhere else.
+    cruiser_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
+    frigate_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
 }
 
 const INNER_LO: usize = 1;
@@ -224,6 +238,8 @@ impl AiPlayer {
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
             salvo_history: Vec::new(),
+            cruiser_candidates_cache: RefCell::new(None),
+            frigate_candidates_cache: RefCell::new(None),
         }
     }
 
@@ -966,7 +982,25 @@ impl AiPlayer {
     /// by `cruiser_heatmap` (which marginalizes over this list) and
     /// `cruiser_disambiguation_shots` (which reasons about the individual
     /// hypotheses directly, to find a shot that best tells them apart).
+    ///
+    /// Memoized in `cruiser_candidates_cache`, keyed by `salvo_history.len()`
+    /// — this list depends on nothing else, and is expensive enough
+    /// (`consistent_frigate_candidates` one size down even more so) that
+    /// recomputing it on every one of the several independent JSON
+    /// accessors that call it per game state is wasteful.
     fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        let key = self.salvo_history.len();
+        if let Some((cached_key, cached)) = self.cruiser_candidates_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return cached.clone();
+            }
+        }
+        let computed = self.consistent_cruiser_candidates_uncached();
+        *self.cruiser_candidates_cache.borrow_mut() = Some((key, computed.clone()));
+        computed
+    }
+
+    fn consistent_cruiser_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let confirmed_battleship = self.cells_confirmed_battleship();
         let windows: Vec<[(usize, usize); 3]> = Self::all_cruiser_windows()
             .into_iter()
@@ -992,8 +1026,23 @@ impl AiPlayer {
     /// see `consistent_cruiser_candidates`. Unfiltered triple enumeration
     /// over all 112 windows would be ~227,920 combinations —
     /// `cells_possibly_size` narrows the candidate pool first (usually
-    /// drastically) before the O(n^3) search.
+    /// drastically) before the O(n^3) search. Before any salvo, though,
+    /// there's nothing yet to narrow with — memoized in
+    /// `frigate_candidates_cache` for the same reason as
+    /// `consistent_cruiser_candidates`.
     fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        let key = self.salvo_history.len();
+        if let Some((cached_key, cached)) = self.frigate_candidates_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return cached.clone();
+            }
+        }
+        let computed = self.consistent_frigate_candidates_uncached();
+        *self.frigate_candidates_cache.borrow_mut() = Some((key, computed.clone()));
+        computed
+    }
+
+    fn consistent_frigate_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let windows = Self::all_frigate_windows();
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
         let confirmed_battleship = self.cells_confirmed_battleship();
@@ -1019,6 +1068,129 @@ impl AiPlayer {
                         out.push(union);
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// Whether two ship-placement hypotheses (each a full cell-set for one
+    /// ship type) can coexist on the same board under the no-adjacent-ships
+    /// rule — same Chebyshev-distance-1 check as `windows_overlap_or_adjacent`,
+    /// generalized to arbitrary-sized sets so a Cruiser hypothesis can be
+    /// checked against a Frigate hypothesis.
+    fn hypotheses_compatible(a: &std::collections::HashSet<(usize, usize)>, b: &std::collections::HashSet<(usize, usize)>) -> bool {
+        a.iter().all(|&(ar, ac)| {
+            b.iter().all(|&(br, bc)| {
+                let dr = (ar as isize - br as isize).unsigned_abs();
+                let dc = (ac as isize - bc as isize).unsigned_abs();
+                dr > 1 || dc > 1
+            })
+        })
+    }
+
+    /// Every (Cruiser hypothesis, Frigate hypothesis) pair from
+    /// `consistent_cruiser_candidates`/`consistent_frigate_candidates` that
+    /// is mutually consistent under `hypotheses_compatible`. Each of those
+    /// two lists is already internally consistent (no window overlaps or
+    /// touches another window of the SAME type), but neither ever checks
+    /// itself against the OTHER type — so a Cruiser hypothesis and a
+    /// Frigate hypothesis that each independently survive can still collide
+    /// with each other. This is the cross-ship-type analysis a human can do
+    /// by eye once the per-type heatmaps stop finding anything further on
+    /// their own: pairing the two candidate lists against each other can
+    /// eliminate hypotheses neither heatmap rules out alone (e.g. a Frigate
+    /// arm that happens to touch every remaining Cruiser line, even though
+    /// no single Cruiser line has yet won out on its own).
+    ///
+    /// Early game, before any salvo has narrowed things down, each of
+    /// `consistent_cruiser_candidates`/`consistent_frigate_candidates` can
+    /// itself run into the thousands of hypotheses (see the comment on
+    /// `consistent_frigate_candidates`), making their cross product far too
+    /// large to check pairwise. Cross-reasoning only ever matters once both
+    /// lists are already small from salvo evidence narrowing them down, so
+    /// bailing out early above this budget costs nothing real — same as the
+    /// callers' existing "pairs.is_empty() -> fall back to the un-cross-
+    /// checked list" handling.
+    fn jointly_consistent_hypothesis_pairs(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
+        const CROSS_REASONING_PAIR_BUDGET: usize = 100_000;
+        let cruiser = self.consistent_cruiser_candidates();
+        let frigate = self.consistent_frigate_candidates();
+        if cruiser.len().saturating_mul(frigate.len()) > CROSS_REASONING_PAIR_BUDGET {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for c in &cruiser {
+            for f in &frigate {
+                if Self::hypotheses_compatible(c, f) {
+                    out.push((c.clone(), f.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// `consistent_cruiser_candidates`, narrowed further by cross-checking
+    /// every hypothesis against every Frigate hypothesis (see
+    /// `jointly_consistent_hypothesis_pairs`) — a Cruiser hypothesis with no
+    /// remaining compatible Frigate partner is dropped. Each surviving
+    /// hypothesis appears once per compatible Frigate partner, so
+    /// marginalizing this (via `heatmap_from_candidates`) weighs it by how
+    /// many Frigate arrangements it's still consistent with, rather than
+    /// just by raw presence — the correct marginal under a joint-uniform
+    /// prior over (Cruiser hypothesis, Frigate hypothesis) pairs.
+    ///
+    /// Falls back to the un-cross-checked list once it's down to 0 or 1
+    /// entries already (nothing left to narrow), or if cross-checking would
+    /// eliminate every hypothesis outright — the true layout is always
+    /// jointly consistent with itself, so that would mean a bug elsewhere,
+    /// not genuine new information, and showing the un-refined heatmap is
+    /// the safer fallback over showing a false blank slate.
+    fn cross_reasoned_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        let cruiser = self.consistent_cruiser_candidates();
+        if cruiser.len() <= 1 {
+            return cruiser;
+        }
+        let pairs = self.jointly_consistent_hypothesis_pairs();
+        if pairs.is_empty() {
+            return cruiser;
+        }
+        pairs.into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// Same idea as `cross_reasoned_cruiser_candidates`, one size down.
+    fn cross_reasoned_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        let frigate = self.consistent_frigate_candidates();
+        if frigate.len() <= 1 {
+            return frigate;
+        }
+        let pairs = self.jointly_consistent_hypothesis_pairs();
+        if pairs.is_empty() {
+            return frigate;
+        }
+        pairs.into_iter().map(|(_, f)| f).collect()
+    }
+
+    /// Deduplicates a list of hypotheses by full cell-set equality — after
+    /// cross-reasoning, a hypothesis appears once per compatible partner in
+    /// the other ship type's candidate list (see
+    /// `cross_reasoned_cruiser_candidates`), so "exactly one hypothesis
+    /// remains" means exactly one DISTINCT cell-set, not exactly one list
+    /// entry.
+    ///
+    /// `hyps` can be the un-cross-reasoned fallback list too (see the
+    /// callers), which on an early/fresh board runs into the tens or
+    /// hundreds of thousands of entries — an O(n^2) `Vec::contains` scan
+    /// there is exactly the wrong complexity at exactly the size where it
+    /// matters most. Dedup via a sorted canonical key through a `HashSet`
+    /// instead, for O(n log k) (k = hypothesis cell count, always small).
+    fn distinct_hypotheses(hyps: &[std::collections::HashSet<(usize, usize)>]) -> Vec<&std::collections::HashSet<(usize, usize)>> {
+        let mut seen: std::collections::HashSet<Vec<(usize, usize)>> = std::collections::HashSet::new();
+        let mut out: Vec<&std::collections::HashSet<(usize, usize)>> = Vec::new();
+        for h in hyps {
+            let mut key: Vec<(usize, usize)> = h.iter().copied().collect();
+            key.sort_unstable();
+            if seen.insert(key) {
+                out.push(h);
             }
         }
         out
@@ -1098,6 +1270,34 @@ impl AiPlayer {
     /// See `heatmap_fraction_from_candidates`.
     pub fn frigate_heatmap_fraction(&self) -> Vec<Vec<(u32, u32)>> {
         self.heatmap_fraction_from_candidates(&self.consistent_frigate_candidates())
+    }
+
+    /// Same idea as `cruiser_heatmap`, but marginalized over
+    /// `cross_reasoned_cruiser_candidates` instead of the raw
+    /// `consistent_cruiser_candidates` — i.e. after also cross-checking
+    /// every remaining hypothesis against every remaining Frigate
+    /// hypothesis for mutual adjacency. Strictly at least as informative as
+    /// `cruiser_heatmap` (can only narrow probabilities further, never
+    /// widen them); this is the one the UI shows.
+    pub fn cruiser_heatmap_refined(&self) -> Vec<Vec<f64>> {
+        self.heatmap_from_candidates(&self.cross_reasoned_cruiser_candidates())
+    }
+
+    /// Same idea as `cruiser_heatmap_refined`, one size down.
+    pub fn frigate_heatmap_refined(&self) -> Vec<Vec<f64>> {
+        self.heatmap_from_candidates(&self.cross_reasoned_frigate_candidates())
+    }
+
+    /// See `cruiser_heatmap_refined` — same idea, returning the raw
+    /// (count, total) pair instead of the divided float. See
+    /// `heatmap_fraction_from_candidates`.
+    pub fn cruiser_heatmap_fraction_refined(&self) -> Vec<Vec<(u32, u32)>> {
+        self.heatmap_fraction_from_candidates(&self.cross_reasoned_cruiser_candidates())
+    }
+
+    /// See `cruiser_heatmap_fraction_refined`, one size down.
+    pub fn frigate_heatmap_fraction_refined(&self) -> Vec<Vec<(u32, u32)>> {
+        self.heatmap_fraction_from_candidates(&self.cross_reasoned_frigate_candidates())
     }
 
     /// Given the currently consistent candidate hypotheses for a ship
@@ -1764,6 +1964,37 @@ impl AiPlayer {
         let candidates = self.consistent_frigate_candidates();
         if candidates.len() == 1 {
             candidates[0].iter().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Same idea as `cruiser_identified_cells`, but checked against
+    /// `cross_reasoned_cruiser_candidates` instead of the raw
+    /// `consistent_cruiser_candidates` — resolves cases where the Cruiser
+    /// heatmap alone still shows more than one hypothesis, but every
+    /// hypothesis except one collides with every remaining Frigate
+    /// hypothesis (see `jointly_consistent_hypothesis_pairs`). Since a
+    /// hypothesis can appear more than once in the cross-reasoned list (one
+    /// entry per compatible partner), "exactly one remains" means exactly
+    /// one DISTINCT cell-set, not exactly one list entry — see
+    /// `distinct_hypotheses`.
+    pub fn cruiser_identified_cells_refined(&self) -> Vec<(usize, usize)> {
+        let candidates = self.cross_reasoned_cruiser_candidates();
+        let distinct = Self::distinct_hypotheses(&candidates);
+        if distinct.len() == 1 {
+            distinct[0].iter().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Same idea as `cruiser_identified_cells_refined`, one size down.
+    pub fn frigate_identified_cells_refined(&self) -> Vec<(usize, usize)> {
+        let candidates = self.cross_reasoned_frigate_candidates();
+        let distinct = Self::distinct_hypotheses(&candidates);
+        if distinct.len() == 1 {
+            distinct[0].iter().copied().collect()
         } else {
             Vec::new()
         }

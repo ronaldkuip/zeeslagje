@@ -338,19 +338,23 @@ impl Game {
     /// Whether the AI's own deduction currently has every identifiable
     /// ship class (Battleship, Cruiser, Frigate) pinned down with full
     /// certainty, plus the Cruiser/Frigate probability grids when it
-    /// doesn't. See `ResolutionStatus`.
+    /// doesn't. Cruiser/Frigate certainty is checked after cross-reasoning
+    /// each one's remaining hypotheses against the other's for mutual
+    /// adjacency (see `AiPlayer::cruiser_identified_cells_refined`) — this
+    /// can resolve a board neither heatmap resolves on its own. See
+    /// `ResolutionStatus`.
     pub fn resolution_status_json(&self) -> String {
         let battleship_identified = !self.ai.battleship_identified_cells().is_empty() || !self.ai.found_battleship_cells().is_empty();
-        let cruiser_identified = !self.ai.cruiser_identified_cells().is_empty();
-        let frigate_identified = !self.ai.frigate_identified_cells().is_empty();
+        let cruiser_identified = !self.ai.cruiser_identified_cells_refined().is_empty();
+        let frigate_identified = !self.ai.frigate_identified_cells_refined().is_empty();
         let resolved = battleship_identified && cruiser_identified && frigate_identified;
         let status = ResolutionStatus {
             resolved,
             battleship_identified,
             cruiser_identified,
             frigate_identified,
-            cruiser_odds: if resolved { None } else { Some(self.ai.cruiser_heatmap()) },
-            frigate_odds: if resolved { None } else { Some(self.ai.frigate_heatmap()) },
+            cruiser_odds: if resolved { None } else { Some(self.ai.cruiser_heatmap_refined()) },
+            frigate_odds: if resolved { None } else { Some(self.ai.frigate_heatmap_refined()) },
         };
         serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
     }
@@ -581,10 +585,11 @@ impl Game {
     }
 
     /// The Cruisers' exact 6-cell layout, once the heatmap has narrowed to
-    /// a single consistent hypothesis — see `AiPlayer::cruiser_identified_cells`.
+    /// a single consistent hypothesis after also cross-checking against the
+    /// Frigate candidates — see `AiPlayer::cruiser_identified_cells_refined`.
     /// Empty until then.
     pub fn cruiser_identified_json(&self) -> String {
-        let cells = self.ai.cruiser_identified_cells();
+        let cells = self.ai.cruiser_identified_cells_refined();
         let indices: Vec<usize> = cells.iter().map(|&(r, c)| r * 10 + c).collect();
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
@@ -751,30 +756,33 @@ impl Game {
     }
 
     /// Per-cell probability (0.0-1.0) that a Cruiser occupies it, given
-    /// every salvo fired so far — see `AiPlayer::cruiser_heatmap`. Same 8x8
-    /// grid convention as `alive_grids_json`.
+    /// every salvo fired so far, and after also cross-checking each
+    /// remaining Cruiser hypothesis against every remaining Frigate
+    /// hypothesis for mutual adjacency — see
+    /// `AiPlayer::cruiser_heatmap_refined`. Same 8x8 grid convention as
+    /// `alive_grids_json`.
     pub fn cruiser_heatmap_json(&self) -> String {
-        serde_json::to_string(&self.ai.cruiser_heatmap()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.ai.cruiser_heatmap_refined()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Per-cell probability (0.0-1.0) that a Frigate occupies it — see
-    /// `AiPlayer::frigate_heatmap`. Same 8x8 grid convention as
+    /// `AiPlayer::frigate_heatmap_refined`. Same 8x8 grid convention as
     /// `alive_grids_json`.
     pub fn frigate_heatmap_json(&self) -> String {
-        serde_json::to_string(&self.ai.frigate_heatmap()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.ai.frigate_heatmap_refined()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Same 8x8 grid as `cruiser_heatmap_json`, but each cell is a
     /// `[count, total]` pair instead of the divided probability — for
     /// displaying the underlying fraction directly. See
-    /// `AiPlayer::cruiser_heatmap_fraction`.
+    /// `AiPlayer::cruiser_heatmap_fraction_refined`.
     pub fn cruiser_heatmap_fraction_json(&self) -> String {
-        serde_json::to_string(&self.ai.cruiser_heatmap_fraction()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.ai.cruiser_heatmap_fraction_refined()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Same idea as `cruiser_heatmap_fraction_json`, one size down.
     pub fn frigate_heatmap_fraction_json(&self) -> String {
-        serde_json::to_string(&self.ai.frigate_heatmap_fraction()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.ai.frigate_heatmap_fraction_refined()).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Every inner cell where all 3 combined "alive" values — Battleship,
@@ -2708,7 +2716,71 @@ mod tests {
         assert!(status["frigate_odds"].is_null());
     }
 
+    #[test]
+    fn ai_cross_reasoning_resolves_a_cruiser_ambiguity_the_cruiser_heatmap_cannot_resolve_alone() {
+        // One Cruiser fully confirmed; the second is ambiguous between 2
+        // well-separated windows (Option A, Option B) as far as the Cruiser
+        // heatmap alone is concerned. But all 3 Frigates are ALSO already
+        // fully confirmed, and one of them sits directly against Option A —
+        // information the Cruiser heatmap never looks at, since it only
+        // ever cross-checks Cruiser windows against other Cruiser windows
+        // (see `AiPlayer::consistent_cruiser_candidates`). Cross-reasoning
+        // against the Frigate candidates (see `cross_reasoned_cruiser_
+        // candidates`) should rule Option A out and resolve the Cruiser
+        // completely, exactly like the manual reasoning this feature is
+        // named for.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed
+        ai.apply_salvo([(6, 3), (6, 4), (0, 0)], [2, 2, 0]); // Frigate: confirmed, touches Option A
+        ai.apply_salvo([(8, 1), (8, 2), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        ai.apply_salvo([(8, 7), (8, 8), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8)]);
 
+        assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the Cruiser heatmap alone must still be ambiguous");
+        let heatmap = ai.cruiser_heatmap();
+        assert!((0.0..1.0).contains(&heatmap[4][1]), "sanity: Option A ((5,2), row index 4, col index 1) must be a live but uncertain Cruiser candidate: {heatmap:?}");
+        assert!((0.0..1.0).contains(&heatmap[4][5]), "sanity: Option B ((5,6), row index 4, col index 5) must be a live but uncertain Cruiser candidate: {heatmap:?}");
+
+        let refined_cells: std::collections::HashSet<(usize, usize)> = ai.cruiser_identified_cells_refined().into_iter().collect();
+        assert_eq!(
+            refined_cells,
+            [(2, 2), (2, 3), (2, 4), (5, 6), (5, 7), (5, 8)].into_iter().collect(),
+            "cross-reasoning must resolve the Cruiser to Option B, since Option A collides with a confirmed Frigate"
+        );
+
+        let refined_heatmap = ai.cruiser_heatmap_refined();
+        assert_eq!(refined_heatmap[4][1], 0.0, "Option A must drop to 0 once cross-reasoned against the confirmed Frigate touching it");
+        assert_eq!(refined_heatmap[4][5], 1.0, "Option B must rise to certainty, being the only Cruiser hypothesis left standing");
+    }
+
+    #[test]
+    fn ai_cross_reasoning_narrows_a_frigate_ambiguity_using_a_still_ambiguous_cruiser() {
+        // Mirror direction of `ai_cross_reasoning_resolves_a_cruiser_
+        // ambiguity_the_cruiser_heatmap_cannot_resolve_alone`: here the
+        // Cruiser itself is STILL ambiguous (Option CA vs Option CB, same
+        // as that test), but one Cruiser window — the already-confirmed
+        // Cruiser 1 — is common to EVERY remaining Cruiser hypothesis. A
+        // Frigate option that collides with Cruiser 1 therefore collides
+        // with every Cruiser hypothesis there is, even though the Cruiser
+        // itself never narrows to one answer — cross-reasoning should
+        // still drop that Frigate option to 0, exactly as if the Cruiser
+        // were fully identified.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed, common to every hypothesis
+        ai.apply_salvo([(8, 1), (8, 2), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        ai.apply_salvo([(8, 7), (8, 8), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8), (3, 2), (3, 3), (1, 6), (1, 7)]);
+
+        assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the Cruiser must still be ambiguous (Option CA vs Option CB)");
+        assert!(ai.frigate_identified_cells().is_empty(), "sanity: the Frigate heatmap alone must still be ambiguous too");
+        let heatmap = ai.frigate_heatmap();
+        assert!(heatmap[2][1] > 0.0, "sanity: Option FA ((3,2), touching Cruiser 1) must be a live Frigate candidate before cross-reasoning: {heatmap:?}");
+        assert!(heatmap[0][5] > 0.0, "sanity: Option FB ((1,6), touching nothing) must be a live Frigate candidate before cross-reasoning: {heatmap:?}");
+
+        let refined_heatmap = ai.frigate_heatmap_refined();
+        assert_eq!(refined_heatmap[2][1], 0.0, "Option FA must drop to 0: it collides with Cruiser 1, which is common to every remaining Cruiser hypothesis, ambiguous or not");
+        assert!(refined_heatmap[0][5] > 0.0, "Option FB touches neither Cruiser hypothesis, so it must remain a live candidate");
+    }
 
 
     #[test]

@@ -738,6 +738,10 @@
             <input type="number" id="batchSizeInput" class="batch-input" min="1" max="100000" step="1" value="1">
             <button class="btn btn-teal" id="autoPlayBatchBtn" title="Start a fresh game and auto-play it, repeated batch-size times in a row">Autorun batch</button>
           </div>
+          <div class="fire-row" style="margin-top:10px;">
+            <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
+            <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -777,10 +781,7 @@
         </div>
 
         <div class="panel">
-          <h2>Salvo Log
-            <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
-            <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
-          </h2>
+          <h2>Salvo Log</h2>
           <div class="log-list" id="logList">
             <div class="log-empty">No salvos fired yet.</div>
           </div>
