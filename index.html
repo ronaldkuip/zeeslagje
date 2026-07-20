@@ -499,6 +499,47 @@
   .saved-board-entry button{flex-shrink:0;}
   .saved-board-entry input[type="checkbox"]{flex-shrink:0;}
 
+  .batch-histogram{
+    display:flex;
+    align-items:flex-end;
+    gap:3px;
+    height:110px;
+    margin-top:10px;
+    padding:8px 6px 4px;
+    background:rgba(18,32,49,0.05);
+    border-radius:4px;
+  }
+  .batch-histogram:empty{display:none;}
+  .histogram-bar{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:flex-end;
+    flex:1;
+    height:100%;
+    min-width:0;
+    font-family:'IBM Plex Mono', monospace;
+  }
+  .histogram-count{
+    font-size:9px;
+    color:var(--ink);
+    opacity:0.75;
+    margin-bottom:2px;
+    white-space:nowrap;
+  }
+  .histogram-fill{
+    width:100%;
+    background:var(--brass-bright);
+    border-radius:2px 2px 0 0;
+    min-height:2px;
+  }
+  .histogram-label{
+    font-size:9px;
+    color:var(--ink);
+    opacity:0.6;
+    margin-top:4px;
+  }
+
   .status-line{
     font-family:'IBM Plex Mono', monospace;
     font-size:12px;
@@ -736,10 +777,11 @@
           </div>
           <div class="fire-row" style="margin-top:10px;">
             <label for="batchSizeInput" style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink);">Batch size</label>
-            <input type="number" id="batchSizeInput" class="batch-input" min="1" max="100000" step="1" value="1">
+            <input type="number" id="batchSizeInput" class="batch-input" min="1" max="500000" step="1" value="1">
             <button class="btn btn-teal" id="autoPlayBatchBtn" title="Start a fresh game and auto-play it, repeated batch-size times in a row">Autorun batch</button>
           </div>
           <div class="modal-footnote" id="batchStatsLine" style="margin-top:6px;"></div>
+          <div class="batch-histogram" id="batchHistogram"></div>
           <div class="fire-row" style="margin-top:10px;">
             <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
             <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
@@ -847,6 +889,7 @@
   const batchSizeInput = document.getElementById('batchSizeInput');
   const autoPlayBatchBtn = document.getElementById('autoPlayBatchBtn');
   const batchStatsLine = document.getElementById('batchStatsLine');
+  const batchHistogramEl = document.getElementById('batchHistogram');
   const statusLine = document.getElementById('statusLine');
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
@@ -1637,7 +1680,7 @@
     if (game.is_won()){
       won = true;
       if (!batchRunning){
-        logGameEnd('full-win', salvo.turn); // a fetch() per game — 100000 of these would itself be real overhead in a big batch
+        logGameEnd('full-win', salvo.turn); // a fetch() per game — 500000 of these would itself be real overhead in a big batch
       }
       statusLine.textContent = isFullyResolved()
         ? 'Fleet destroyed. Start a new game to sail again.'
@@ -1888,7 +1931,7 @@
       // inside doFire — skip a second, redundant line for the same moment.
       // Both this and the timeout branch below skip logGameEnd/openModal
       // entirely during a batch run: a fetch() and a modal popup per game
-      // would be real overhead (and pure noise) across up to 100000 games.
+      // would be real overhead (and pure noise) across up to 500000 games.
       if (!won && !batchRunning){
         logGameEnd('auto-play cleared', game.turn());
       }
@@ -1939,6 +1982,16 @@
   let batchResolvedSalvoCounts = [];
   let batchUnresolvedIds = [];
 
+  // Games-resolved-in-exactly-N-salvos histogram, N = 1..30 (index 0
+  // unused). 30 matches MAX_HUNT_SALVOS — disambiguation itself is
+  // uncapped, so a resolved game needing more than 30 total salvos is a
+  // genuine outlier; clamped into the 30 bucket rather than growing this
+  // unbounded. Reset alongside the other batch stats at the start of each
+  // run, only ever rendered once at the end (see renderBatchHistogram) —
+  // not live during the run, same reasoning as the rest of Autorun
+  // Batch's visual gating.
+  let batchSalvoHistogram = new Array(31).fill(0);
+
   function updateBatchStatsLine(){
     const parts = [];
     if (batchResolvedSalvoCounts.length > 0){
@@ -1955,18 +2008,46 @@
     batchStatsLine.textContent = parts.join(' — ');
   }
 
+  const BATCH_HISTOGRAM_BAR_MAX_PX = 60;
+
+  // Renders batchSalvoHistogram as a bar per salvo-count, trimmed down to
+  // the [first non-zero, last non-zero] range — e.g. all-zero 1..9 and
+  // 28..30 drop out entirely, leaving just 10..27, rather than 30 mostly-
+  // empty bars.
+  function renderBatchHistogram(){
+    let lo = -1, hi = -1;
+    for (let i = 1; i <= 30; i++){
+      if (batchSalvoHistogram[i] > 0){
+        if (lo === -1) lo = i;
+        hi = i;
+      }
+    }
+    batchHistogramEl.innerHTML = '';
+    if (lo === -1) return; // no resolved games this run — nothing to show
+    const maxCount = Math.max(...batchSalvoHistogram.slice(lo, hi + 1));
+    for (let i = lo; i <= hi; i++){
+      const count = batchSalvoHistogram[i];
+      const fillPx = count > 0 ? Math.max(Math.round((count / maxCount) * BATCH_HISTOGRAM_BAR_MAX_PX), 2) : 0;
+      const bar = document.createElement('div');
+      bar.className = 'histogram-bar';
+      bar.title = `${count} game${count === 1 ? '' : 's'} resolved in ${i} salvo${i === 1 ? '' : 's'}`;
+      bar.innerHTML = `<div class="histogram-count">${count}</div><div class="histogram-fill" style="height:${fillPx}px"></div><div class="histogram-label">${i}</div>`;
+      batchHistogramEl.appendChild(bar);
+    }
+  }
+
   // Runs `batchSizeInput` independent games back-to-back, same as clicking
   // "New game" then "Auto-play" by hand that many times. Resolved games
   // are forgotten immediately — this is meant to run large (the input
-  // allows up to 100000) hunting for the rare board an unresolved
+  // allows up to 500000) hunting for the rare board an unresolved
   // disambiguation is genuinely unreachable on, so never stops early:
   // whenever a game finishes unresolved, it's saved for later study and
   // the batch moves straight on to the next game, all the way to n.
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
-    if (!Number.isInteger(n) || n < 1 || n > 100000){
-      statusLine.textContent = 'Batch size must be a whole number between 1 and 100000.';
+    if (!Number.isInteger(n) || n < 1 || n > 500000){
+      statusLine.textContent = 'Batch size must be a whole number between 1 and 500000.';
       return;
     }
 
@@ -1979,7 +2060,9 @@
     const originalLabel = autoPlayBatchBtn.textContent;
     batchResolvedSalvoCounts = [];
     batchUnresolvedIds = [];
+    batchSalvoHistogram = new Array(31).fill(0);
     updateBatchStatsLine();
+    batchHistogramEl.innerHTML = '';
 
     for (let i = 1; i <= n; i++){
       autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
@@ -1991,6 +2074,7 @@
       const resolved = isFullyResolved();
       if (resolved && result){
         batchResolvedSalvoCounts.push(result.salvosTaken);
+        batchSalvoHistogram[Math.min(result.salvosTaken, 30)]++;
       } else if (!resolved){
         // Not every ship layout — Battleship, both Cruisers, and all 3
         // Frigates — was genuinely established and correct. Save it (skip
@@ -2041,6 +2125,7 @@
     refreshCruiserIdentified();
     renderSelection();
     refreshAdvisory();
+    renderBatchHistogram();
 
     autoPlayBatchBtn.textContent = originalLabel;
     autoPlayBatchBtn.disabled = false;
