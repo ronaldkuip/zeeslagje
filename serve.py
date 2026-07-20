@@ -6,11 +6,15 @@ static server can't write to disk on the browser's behalf, so index.html
 posts here to record when a game ends (date, time, turns played).
 
 Also handles saving/loading boards for later study:
-  POST /save_board   body: {"board": <BoardLayout>, "resolved": bool, "odds": {...}|null}
+  POST /save_board    body: {"board": <BoardLayout>, "resolved": bool, "odds": {...}|null}
                       assigns the next free integer id, stores it in
                       saved_boards.json, responds {"id": N}.
   GET  /saved_boards  returns the full contents of saved_boards.json
                       (or {} if it doesn't exist yet).
+  POST /delete_boards body: {"ids": [1, 2, 3]}
+                      removes those ids from saved_boards.json (missing
+                      ids are silently ignored), responds
+                      {"deleted": [...ids actually removed...]}.
 
 Usage: python3 serve.py [port]   (defaults to 8080)
 """
@@ -77,6 +81,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 json.dump(boards, f)
 
             body = json.dumps({"id": next_id}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/delete_boards":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw)
+                ids = [str(int(i)) for i in payload["ids"]]
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error":"invalid JSON body"}')
+                return
+
+            boards = load_saved_boards()
+            deleted = [int(i) for i in ids if i in boards]
+            for i in ids:
+                boards.pop(i, None)
+            with SAVED_BOARDS_FILE.open("w", encoding="utf-8") as f:
+                json.dump(boards, f)
+
+            body = json.dumps({"deleted": deleted}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

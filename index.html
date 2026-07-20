@@ -493,10 +493,11 @@
     border-left:2px solid var(--brass);
     padding:5px 0 5px 10px;
   }
-  .saved-board-entry .saved-board-summary{color:var(--ink);}
+  .saved-board-entry .saved-board-summary{color:var(--ink); flex:1;}
   .saved-board-entry .saved-board-summary .resolved{color:var(--flag-green); font-weight:600;}
   .saved-board-entry .saved-board-summary .unresolved{color:var(--coral);}
   .saved-board-entry button{flex-shrink:0;}
+  .saved-board-entry input[type="checkbox"]{flex-shrink:0;}
 
   .status-line{
     font-family:'IBM Plex Mono', monospace;
@@ -731,13 +732,14 @@
           </div>
           <div class="status-line" id="statusLine">Select 3 coordinates on the chart, or accept the AI's advisory.</div>
           <div class="fire-row" style="margin-top:10px;">
-            <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire, up to 30 shots, stopping early once the Battleship, Cruisers, and Frigates are all sunk AND their exact layouts are disambiguated">Auto-play (30 shots)</button>
+            <button class="btn btn-blue" id="autoPlayBtn" title="Repeatedly use the AI advisory and fire — up to 30 salvos (each 3 coordinates) while still hunting, uncapped afterward until the Battleship, Cruisers, and Frigates are all sunk AND their exact layouts are disambiguated (that phase is provably bounded, so it isn't capped)">Auto-play (30+ salvos)</button>
           </div>
           <div class="fire-row" style="margin-top:10px;">
             <label for="batchSizeInput" style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink);">Batch size</label>
             <input type="number" id="batchSizeInput" class="batch-input" min="1" max="100000" step="1" value="1">
             <button class="btn btn-teal" id="autoPlayBatchBtn" title="Start a fresh game and auto-play it, repeated batch-size times in a row">Autorun batch</button>
           </div>
+          <div class="modal-footnote" id="batchStatsLine" style="margin-top:6px;"></div>
           <div class="fire-row" style="margin-top:10px;">
             <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
             <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
@@ -753,6 +755,10 @@
           <h2>Saved Boards
             <button class="btn btn-ghost" id="saveBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Save the current board layout and resolution status for later study">Save this board</button>
           </h2>
+          <div class="fire-row" style="margin-bottom:8px;">
+            <label class="refire-toggle"><input type="checkbox" id="selectAllBoardsToggle"> Select/deselect all</label>
+            <button class="btn btn-ghost" id="deleteSelectedBoardsBtn" style="text-transform:none; letter-spacing:normal;" title="Delete the checked saved boards">Delete selected</button>
+          </div>
           <div class="log-list" id="savedBoardsList" style="max-height:220px;">
             <div class="log-empty">No boards saved yet.</div>
           </div>
@@ -813,6 +819,19 @@
   let suggested = [];     // array of flat indices from ai_suggest
   let won = false;
   let fleetClearedShown = false; // true once the "all size >=2 ships sunk" popup has fired this game
+
+  // `won` (every real ship cell hit at least once) can flip true BEFORE
+  // the Cruiser/Frigate exact layout is disambiguated — a disambiguation
+  // salvo's filler cell can incidentally be the very last unfound real
+  // cell. Gating all further play on raw `won` would strand a resolvable
+  // ambiguity right at the finish line: the refire/last-resort salvo
+  // needed to finish it would itself become unreachable. isFullyResolved()
+  // (a `function`, hoisted, safe to reference here despite being defined
+  // later in the file) is the same check Game::fire uses on the Rust side
+  // for the identical reason — see its doc comment.
+  function gameTrulyDone(){
+    return won && isFullyResolved();
+  }
   let autoPlayRunning = false;
   let batchRunning = false;
 
@@ -827,6 +846,7 @@
   const autoPlayBtn = document.getElementById('autoPlayBtn');
   const batchSizeInput = document.getElementById('batchSizeInput');
   const autoPlayBatchBtn = document.getElementById('autoPlayBatchBtn');
+  const batchStatsLine = document.getElementById('batchStatsLine');
   const statusLine = document.getElementById('statusLine');
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
@@ -834,6 +854,8 @@
   const restartSameBoardBtn = document.getElementById('restartSameBoardBtn');
   const saveBoardBtn = document.getElementById('saveBoardBtn');
   const savedBoardsList = document.getElementById('savedBoardsList');
+  const selectAllBoardsToggle = document.getElementById('selectAllBoardsToggle');
+  const deleteSelectedBoardsBtn = document.getElementById('deleteSelectedBoardsBtn');
   const fsmStatusBtn = document.getElementById('fsmStatusBtn');
   const revealShipsBtn = document.getElementById('revealShipsBtn');
   const evalLevelBtn = document.getElementById('evalLevelBtn');
@@ -934,7 +956,7 @@
   }
 
   function onCellClick(idx){
-    if (won) return;
+    if (gameTrulyDone()) return;
 
     // No frontend gate on refiring an already-fired cell — Game::fire is
     // the sole authority on whether a given refire is actually permitted
@@ -978,8 +1000,8 @@
       selectionSlots.appendChild(slot);
     }
 
-    fireBtn.disabled = won || selected.length !== 3;
-    if (!won){
+    fireBtn.disabled = gameTrulyDone() || selected.length !== 3;
+    if (!gameTrulyDone()){
       statusLine.textContent = selected.length === 3
         ? 'Ready — review your 3 coordinates and fire.'
         : `Select ${3 - selected.length} more coordinate${3 - selected.length === 1 ? '' : 's'}.`;
@@ -999,7 +1021,7 @@
   }
 
   function refreshAdvisory(){
-    if (won) { advisoryReadout.innerHTML = ''; useAdvisoryBtn.disabled = true; return; }
+    if (gameTrulyDone()) { advisoryReadout.innerHTML = ''; useAdvisoryBtn.disabled = true; return; }
     // Prioritize resolving a pending Cruiser/Frigate disambiguation over
     // ai_suggest()'s ordinary result — choose_shots() only tries its own
     // no-refire disambiguation attempt, and silently falls through to
@@ -1537,7 +1559,7 @@
   }
 
   function doFire(){
-    if (won || selected.length !== 3) return;
+    if (gameTrulyDone() || selected.length !== 3) return;
     const idxArr = new Uint32Array(selected);
     const raw = game.fire(idxArr);
     let salvo;
@@ -1595,7 +1617,9 @@
     if (game.is_won()){
       won = true;
       logGameEnd('full-win', salvo.turn);
-      statusLine.textContent = 'Fleet destroyed. Start a new game to sail again.';
+      statusLine.textContent = isFullyResolved()
+        ? 'Fleet destroyed. Start a new game to sail again.'
+        : 'Fleet destroyed, but the exact Cruiser/Frigate layout is still ambiguous — keep firing (Auto-play or "Use these 3") to finish disambiguating.';
     }
 
     renderSelection();
@@ -1617,8 +1641,12 @@
   // dev server's /save_board endpoint (see serve.py) — a plain browser
   // can't write to disk directly. Silently reports failure if that
   // endpoint isn't available (e.g. serving via plain `python -m
-  // http.server`).
-  async function saveCurrentBoard(){
+  // http.server`). `refreshList=false` skips re-fetching and re-rendering
+  // the whole Saved Boards panel — a large Autorun Batch calls this once
+  // per game, and re-rendering an ever-growing list every single time is
+  // wasted work when the batch will call refreshSavedBoardsList() itself
+  // once at the end anyway.
+  async function saveCurrentBoard(refreshList = true){
     let board, resolution;
     try {
       board = JSON.parse(game.board_layout_json());
@@ -1637,7 +1665,9 @@
       if (!resp.ok) throw new Error('save failed');
       const { id } = await resp.json();
       statusLine.textContent = `Board saved as #${id}.`;
-      await refreshSavedBoardsList();
+      if (refreshList){
+        await refreshSavedBoardsList();
+      }
     } catch {
       statusLine.textContent = 'Could not save the board — is the dev server (serve.py) running?';
     }
@@ -1663,10 +1693,16 @@
       return;
     }
     savedBoardsList.innerHTML = '';
+    selectAllBoardsToggle.checked = false;
     ids.forEach(id => {
       const entry = boards[String(id)];
       const row = document.createElement('div');
       row.className = 'saved-board-entry';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'saved-board-checkbox';
+      checkbox.dataset.id = String(id);
 
       const summary = document.createElement('span');
       summary.className = 'saved-board-summary';
@@ -1685,10 +1721,36 @@
       loadBtn.textContent = 'Load';
       loadBtn.addEventListener('click', () => loadSavedBoard(entry));
 
+      row.appendChild(checkbox);
       row.appendChild(summary);
       row.appendChild(loadBtn);
       savedBoardsList.appendChild(row);
     });
+  }
+
+  // Deletes every currently-checked saved board via the dev server's
+  // /delete_boards endpoint (see serve.py) — same "no server available"
+  // fallback message as saveCurrentBoard.
+  async function deleteSelectedBoards(){
+    const ids = Array.from(savedBoardsList.querySelectorAll('.saved-board-checkbox:checked'))
+      .map(el => Number(el.dataset.id));
+    if (ids.length === 0){
+      statusLine.textContent = 'No saved boards selected to delete.';
+      return;
+    }
+    if (!confirm(`Delete ${ids.length} saved board${ids.length === 1 ? '' : 's'}? This cannot be undone.`)){
+      return;
+    }
+    try {
+      const resp = await fetch('/delete_boards', { method: 'POST', body: JSON.stringify({ ids }) });
+      if (!resp.ok) throw new Error('delete failed');
+      const { deleted } = await resp.json();
+      statusLine.textContent = `Deleted ${deleted.length} saved board${deleted.length === 1 ? '' : 's'}.`;
+    } catch {
+      statusLine.textContent = 'Could not delete the selected boards — is the dev server (serve.py) running?';
+      return;
+    }
+    await refreshSavedBoardsList();
   }
 
   // Reconstructs a fresh game on a previously-saved board layout (see
@@ -1730,16 +1792,17 @@
   }
 
   // Repeatedly uses the AI advisory and fires, exactly as a user clicking
-  // "Use these 3" then "Fire salvo" would, up to a fixed shot cap — stopping
-  // early once the Battleship, both Cruisers, and all 3 Frigates are both
-  // sunk AND disambiguated (see the `fleetClearedShown` check in `doFire`,
-  // which also turns the button green live, whether that milestone is
-  // reached via this loop or ordinary manual play). No popup either way —
-  // the button colour alone reports the outcome. Turns red (with an
-  // explanatory popup, since colour alone doesn't say why) if the cap is
-  // reached first without clearing the fleet.
+  // "Use these 3" then "Fire salvo" would, up to a fixed salvo cap (each
+  // salvo is 3 coordinates fired together, not 3 individual shots) —
+  // stopping early once the Battleship, both Cruisers, and all 3 Frigates
+  // are both sunk AND disambiguated (see the `fleetClearedShown` check in
+  // `doFire`, which also turns the button green live, whether that
+  // milestone is reached via this loop or ordinary manual play). No popup
+  // either way — the button colour alone reports the outcome. Turns red
+  // (with an explanatory popup, since colour alone doesn't say why) if the
+  // cap is reached first without clearing the fleet.
   async function runAutoPlay(){
-    if (autoPlayRunning || won) return;
+    if (autoPlayRunning || gameTrulyDone()) return undefined;
     autoPlayRunning = true;
     autoPlayBtn.disabled = true;
     resetBtn.disabled = true;
@@ -1747,32 +1810,52 @@
     const originalLabel = autoPlayBtn.textContent;
     autoPlayBtn.textContent = 'Auto-playing…';
 
-    const MAX_SHOTS = 30;
-    let shotsTaken = 0;
-    let cleared = won || fleetClearedShown;
+    // Only the HUNTING phase (still tracking down where the Battleship/
+    // Cruisers/Frigates even are) is capped — an unlucky random board can
+    // occasionally need a lot of hunting salvos before everything's even
+    // sunk. Once ai_target_size() drops to 1 (everything size >=2 is
+    // sunk), disambiguation is provably bounded — each round either
+    // resolves it outright or reports nothing further is possible (see
+    // disambiguation_shots' termination), so it's let run uncapped rather
+    // than risk the hunting phase's bad luck eating into the salvos
+    // disambiguation needs, stopping the game short of a genuinely
+    // reachable resolution. fireBtn.disabled (nothing left to try, via any
+    // tier) remains the real backstop against ever looping forever.
+    const MAX_HUNT_SALVOS = 30;
+    let salvosTaken = 0;
+    let cleared = gameTrulyDone() || fleetClearedShown;
 
-    while (!cleared && shotsTaken < MAX_SHOTS){
+    while (!cleared){
+      if (game.ai_target_size() > 1 && salvosTaken >= MAX_HUNT_SALVOS){
+        break;
+      }
       // refreshAdvisory() (called by useAdvisoryBtn's own click handler)
       // already prioritizes a pending Cruiser/Frigate disambiguation —
       // lock-in then refire-based suggestion — over ai_suggest()'s
       // ordinary result, so Auto-play gets that for free here.
       useAdvisoryBtn.click();
       if (fireBtn.disabled){
-        // No valid 3-cell salvo available via any known strategy — stop
-        // rather than spin forever on a no-op.
+        // No valid 3-coordinate salvo available via any known strategy —
+        // stop rather than spin forever on a no-op.
         break;
       }
       fireBtn.click();
-      shotsTaken++;
-      cleared = won || fleetClearedShown;
-      await sleep(300);
+      salvosTaken++;
+      cleared = gameTrulyDone() || fleetClearedShown;
+      // The 300ms pace is purely so a human can watch one game play out —
+      // pure overhead during a large Autorun Batch (10000 games * ~15-20
+      // salvos each * 300ms is hours of nothing but sleeping). batchRunning
+      // is already the global flag that distinguishes the 2 cases.
+      if (!batchRunning){
+        await sleep(300);
+      }
     }
 
     autoPlayRunning = false;
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
     autoPlayBtn.textContent = originalLabel;
-    autoPlayBtn.disabled = won;
+    autoPlayBtn.disabled = gameTrulyDone();
 
     if (cleared){
       setAutoPlayState('green');
@@ -1786,9 +1869,11 @@
       logGameEnd('auto-play timeout', game.turn());
       openModal(
         'Things are not well',
-        `<p>${shotsTaken} shots fired and the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.</p>`
+        `<p>${salvosTaken} salvos fired and the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.</p>`
       );
     }
+
+    return { salvosTaken, cleared };
   }
 
   // Starts a fresh game and runs `runAutoPlay` on it, repeated `batchSizeInput`
@@ -1812,6 +1897,24 @@
     return !!status.resolved;
   }
 
+  // Salvos-taken (each 3 coordinates fired together) for every RESOLVED
+  // game in the current batch run (reset at the start of each new
+  // "Autorun batch" click) — unresolved games are deliberately excluded,
+  // since their salvo count reflects hitting the hunting-phase cap rather
+  // than genuinely finishing.
+  let batchResolvedSalvoCounts = [];
+
+  function updateBatchStatsLine(){
+    if (batchResolvedSalvoCounts.length === 0){
+      batchStatsLine.textContent = '';
+      return;
+    }
+    const min = Math.min(...batchResolvedSalvoCounts);
+    const max = Math.max(...batchResolvedSalvoCounts);
+    const avg = (batchResolvedSalvoCounts.reduce((a, b) => a + b, 0) / batchResolvedSalvoCounts.length).toFixed(1);
+    batchStatsLine.textContent = `Resolved games — min salvos: ${min}, average: ${avg}, max: ${max} (n=${batchResolvedSalvoCounts.length})`;
+  }
+
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
@@ -1827,6 +1930,8 @@
     resetBtn.disabled = true;
     restartSameBoardBtn.disabled = true;
     const originalLabel = autoPlayBatchBtn.textContent;
+    batchResolvedSalvoCounts = [];
+    updateBatchStatsLine();
 
     let stoppedForStudy = false;
     let i = 1;
@@ -1834,8 +1939,20 @@
       autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
       resetGame();
       autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
-      await runAutoPlay();
+      const result = await runAutoPlay();
       batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
+
+      // Save every game's board, resolved or not — not just the final one
+      // left on screen when the batch stops for study. Skip the Saved
+      // Boards panel refresh here (see saveCurrentBoard's doc comment) —
+      // done once, after the loop, instead.
+      await saveCurrentBoard(false);
+
+      const resolved = isFullyResolved();
+      if (resolved && result){
+        batchResolvedSalvoCounts.push(result.salvosTaken);
+        updateBatchStatsLine();
+      }
 
       // Stop the whole batch (not just this game) unless EVERY ship
       // layout — Battleship, both Cruisers, and all 3 Frigates — is
@@ -1843,7 +1960,7 @@
       // exact board on screen instead of immediately overwriting it with
       // the next random game, so it can be studied manually (or rerun via
       // "Replay board").
-      if (!isFullyResolved()){
+      if (!resolved){
         stoppedForStudy = true;
         statusLine.textContent = `Autorun batch stopped at game ${i}/${n}: not every ship layout was established after this game finished. Study this board, or use "Replay board" to rerun the same layout.`;
         break;
@@ -1857,6 +1974,7 @@
     batchSizeInput.value = stoppedForStudy ? n - i : n; // restore the original count only if the batch ran to completion
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
+    await refreshSavedBoardsList();
   }
 
   function countHits(){
@@ -1883,7 +2001,7 @@
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
     autoPlayBtn.disabled = false;
-    autoPlayBtn.textContent = 'Auto-play (30 shots)';
+    autoPlayBtn.textContent = 'Auto-play (30+ salvos)';
     setAutoPlayState('blue');
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
     gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
@@ -1954,6 +2072,10 @@
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
     saveBoardBtn.addEventListener('click', saveCurrentBoard);
+    selectAllBoardsToggle.addEventListener('change', () => {
+      savedBoardsList.querySelectorAll('.saved-board-checkbox').forEach(el => { el.checked = selectAllBoardsToggle.checked; });
+    });
+    deleteSelectedBoardsBtn.addEventListener('click', deleteSelectedBoards);
     refreshSavedBoardsList();
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
     revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));

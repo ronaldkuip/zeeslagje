@@ -359,10 +359,31 @@ impl Game {
         serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Same 3-part check as `resolution_status_json`'s `resolved` field,
+    /// without the JSON/odds overhead — used by `fire` to decide whether
+    /// "won" should actually stop further firing (see its doc comment).
+    fn is_fully_resolved(&self) -> bool {
+        let battleship_identified = !self.ai.battleship_identified_cells().is_empty() || !self.ai.found_battleship_cells().is_empty();
+        let cruiser_identified = !self.ai.cruiser_identified_cells_refined().is_empty();
+        let frigate_identified = !self.ai.frigate_identified_cells_refined().is_empty();
+        battleship_identified && cruiser_identified && frigate_identified
+    }
+
     /// Fire a salvo of exactly 3 cells. Coordinates are flat indices: row * 10 + col.
     /// Returns a JSON-serialised SalvoResult, or an error string.
+    ///
+    /// `won` (every real ship cell hit at least once) is deliberately NOT
+    /// enough on its own to stop firing — a disambiguation salvo's filler
+    /// cell can incidentally BE the very last unfound real cell, so `won`
+    /// can flip true mid-disambiguation, before the Cruiser/Frigate exact
+    /// layout is actually pinned down. Locking out all further firing at
+    /// that instant would permanently strand a resolvable ambiguity: the
+    /// refire/last-resort salvo needed to finish it would itself now be
+    /// rejected as "game already won", with no way to ever submit it. Only
+    /// once the layout is ALSO fully resolved (see `is_fully_resolved`) is
+    /// there genuinely nothing further to learn.
     pub fn fire(&mut self, indices: &[usize]) -> String {
-        if self.state.won {
+        if self.state.won && self.is_fully_resolved() {
             return r#"{"error":"game already won"}"#.to_string();
         }
         if indices.len() != 3 {
@@ -3171,6 +3192,126 @@ mod tests {
         assert_ne!(shots[0], shots[1]);
         assert_ne!(shots[1], shots[2]);
         assert_ne!(shots[0], shots[2]);
+    }
+
+    #[test]
+    fn frigate_disambiguation_shots_picks_one_end_per_cluster_for_3_simultaneous_independent_ambiguities() {
+        // 3 independent "pivot + 2 ends" Frigate ambiguities at once, no
+        // cross-cluster overlap — matches a live board (#11) with all 3
+        // Frigates simultaneously ambiguous this way. 2*2*2 = 8 total
+        // combined hypotheses. The best any single 3-cell salvo can ever
+        // do against 3 independent binary unknowns is narrow the worst
+        // case to 3 remaining hypotheses (picking one end cell per
+        // cluster: counts of 0/1/2/3 hits split the 8 hypotheses into
+        // buckets of size 1/3/3/1) — testing both ends of the SAME
+        // cluster together wastes a slot (that pair always sums to
+        // exactly 1, redundant), so this asserts the search actually
+        // reaches for one-per-cluster rather than that strictly worse
+        // alternative.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 3), (0, 0), (0, 1)], [2, 0, 0]);
+        ai.apply_salvo([(4, 6), (0, 2), (0, 3)], [2, 0, 0]);
+        ai.apply_salvo([(6, 3), (0, 4), (0, 5)], [2, 0, 0]);
+
+        flood_inner_misses_except(
+            &mut ai,
+            &[
+                (2, 2), (2, 3), (2, 4),
+                (4, 5), (4, 6), (4, 7),
+                (6, 2), (6, 3), (6, 4),
+            ],
+        );
+
+        assert!(ai.frigate_identified_cells().is_empty(), "sanity: still ambiguous");
+        let shots = ai.frigate_disambiguation_shots().expect("a disambiguating shot must exist");
+
+        let cluster_a_ends = [(2, 2), (2, 4)];
+        let cluster_b_ends = [(4, 5), (4, 7)];
+        let cluster_c_ends = [(6, 2), (6, 4)];
+        let hits_a = shots.iter().filter(|c| cluster_a_ends.contains(c)).count();
+        let hits_b = shots.iter().filter(|c| cluster_b_ends.contains(c)).count();
+        let hits_c = shots.iter().filter(|c| cluster_c_ends.contains(c)).count();
+        assert_eq!((hits_a, hits_b, hits_c), (1, 1, 1), "must pick exactly one end cell from each of the 3 clusters, not both ends of any single one: {:?}", shots);
+    }
+
+    #[test]
+    fn fire_still_allows_a_disambiguating_salvo_after_won_flips_true_before_the_layout_is_resolved() {
+        // A disambiguation salvo's filler cell can incidentally BE the
+        // very last unfound real cell — `won` (every real cell hit at
+        // least once) can flip true mid-disambiguation, before the
+        // Cruiser/Frigate exact layout is pinned down. Reproduces exactly
+        // that: every real cell gets hit except one end of an ambiguous
+        // Frigate cluster, which is deliberately fired ALONGSIDE its
+        // still-live alternative (an uninformative pair, same shape as the
+        // padding-fix tests above) as the winning shot — hit_count reaches
+        // total_hits (won=true) while the AI's own deduction still can't
+        // tell which of the 2 cells was the real one.
+        let layout_json = r#"{"board": [
+            [6,null,null,null,null,null,null,null,null,7],
+            [null,0,0,0,0,null,null,null,null,null],
+            [null,null,null,null,null,null,null,null,null,null],
+            [null,1,1,1,null,null,4,4,null,null],
+            [null,null,null,null,null,null,null,null,null,null],
+            [null,2,2,2,null,null,5,5,null,null],
+            [null,null,null,null,null,null,null,null,null,null],
+            [null,3,3,null,null,null,null,null,null,null],
+            [null,null,null,null,null,null,null,null,null,null],
+            [8,null,null,null,null,null,null,null,null,9]],
+            "ships": [
+            {"id": 0, "name": "Battleship", "size": 4, "cells": [{"row":1,"col":1},{"row":1,"col":2},{"row":1,"col":3},{"row":1,"col":4}], "hits": 0, "sunk": false},
+            {"id": 1, "name": "Cruiser", "size": 3, "cells": [{"row":3,"col":1},{"row":3,"col":2},{"row":3,"col":3}], "hits": 0, "sunk": false},
+            {"id": 2, "name": "Cruiser", "size": 3, "cells": [{"row":5,"col":1},{"row":5,"col":2},{"row":5,"col":3}], "hits": 0, "sunk": false},
+            {"id": 3, "name": "Frigate", "size": 2, "cells": [{"row":7,"col":1},{"row":7,"col":2}], "hits": 0, "sunk": false},
+            {"id": 4, "name": "Frigate", "size": 2, "cells": [{"row":3,"col":6},{"row":3,"col":7}], "hits": 0, "sunk": false},
+            {"id": 5, "name": "Frigate", "size": 2, "cells": [{"row":5,"col":6},{"row":5,"col":7}], "hits": 0, "sunk": false},
+            {"id": 6, "name": "Submarine", "size": 1, "cells": [{"row":0,"col":0}], "hits": 0, "sunk": false},
+            {"id": 7, "name": "Submarine", "size": 1, "cells": [{"row":0,"col":9}], "hits": 0, "sunk": false},
+            {"id": 8, "name": "Submarine", "size": 1, "cells": [{"row":9,"col":0}], "hits": 0, "sunk": false},
+            {"id": 9, "name": "Submarine", "size": 1, "cells": [{"row":9,"col":9}], "hits": 0, "sunk": false}
+            ]}"#;
+
+        let mut game = Game::new();
+        let load_result = game.load_board_layout_json(layout_json);
+        assert!(!load_result.contains("error"), "board layout failed to load: {load_result}");
+
+        let idx = |r: usize, c: usize| r * 10 + c;
+        let fire_ok = |game: &mut Game, cells: [(usize, usize); 3]| {
+            let indices = [idx(cells[0].0, cells[0].1), idx(cells[1].0, cells[1].1), idx(cells[2].0, cells[2].1)];
+            let response = game.fire(&indices);
+            assert!(!response.contains("\"error\""), "expected this salvo to succeed, got: {response}");
+        };
+
+        fire_ok(&mut game, [(1, 1), (1, 2), (1, 3)]);
+        fire_ok(&mut game, [(1, 4), (8, 8), (8, 7)]); // Battleship's last cell + 2 outer fillers
+        fire_ok(&mut game, [(3, 1), (3, 2), (3, 3)]); // Cruiser 1
+        fire_ok(&mut game, [(5, 1), (5, 2), (5, 3)]); // Cruiser 2
+        fire_ok(&mut game, [(7, 1), (7, 2), (8, 6)]); // Frigate 3 (resolved)
+        fire_ok(&mut game, [(3, 6), (3, 7), (8, 5)]); // Frigate 4 (resolved)
+        fire_ok(&mut game, [(0, 0), (0, 9), (9, 0)]); // 3 of 4 Submarines
+        fire_ok(&mut game, [(5, 7), (8, 4), (8, 3)]); // ambiguous Frigate's pivot cell, cleanly isolated
+
+        // Every real cell is now hit except (5,6) — the ambiguous Frigate's
+        // OTHER cell — and the 4th Submarine at (9,9). Fire both together:
+        // (9,9) is real (the winning cell that pushes hit_count to
+        // total_hits), and (5,6)+(5,8) form the same uninformative pair as
+        // the padding-fix tests — exactly one of them is always the hit,
+        // so the bag can never reveal which, keeping the Frigate ambiguous
+        // even as the game becomes "won".
+        fire_ok(&mut game, [(9, 9), (5, 6), (5, 8)]);
+
+        assert!(game.state.won, "sanity: hit_count must have reached total_hits by now");
+        assert!(!game.is_fully_resolved(), "sanity: the Frigate ambiguity must still be unresolved");
+
+        // The actual bug: Game::fire used to reject EVERYTHING once won,
+        // stranding this resolvable ambiguity permanently. It must still
+        // accept a legitimate disambiguating salvo now.
+        let refire_suggestion: Vec<usize> = serde_json::from_str(&game.ai_suggest_disambiguation_refire()).unwrap_or_default();
+        assert_eq!(refire_suggestion.len(), 3, "a refire-based disambiguating salvo must still be available");
+        let response = game.fire(&refire_suggestion);
+        assert!(
+            !response.contains("\"error\":\"game already won\""),
+            "firing a legitimate disambiguation salvo must not be rejected just because won is already true: {response}"
+        );
     }
 
     #[test]
