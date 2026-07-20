@@ -984,6 +984,15 @@
   }
 
   function renderSelection(){
+    // fireBtn.disabled is load-bearing control flow for runAutoPlay's loop
+    // ("if (fireBtn.disabled) break") — always computed, even during a
+    // batch run where the rest of this function's DOM rendering is
+    // skipped for speed (see doFire/afterGameStateReset's batchRunning
+    // gating, and the one full re-render of just the final game at the
+    // end of runAutoPlayBatch).
+    fireBtn.disabled = gameTrulyDone() || selected.length !== 3;
+    if (batchRunning) return;
+
     gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('selected'));
     selected.forEach(idx => cellEl(idx)?.classList.add('selected'));
 
@@ -1000,7 +1009,6 @@
       selectionSlots.appendChild(slot);
     }
 
-    fireBtn.disabled = gameTrulyDone() || selected.length !== 3;
     if (!gameTrulyDone()){
       statusLine.textContent = selected.length === 3
         ? 'Ready — review your 3 coordinates and fire.'
@@ -1021,7 +1029,11 @@
   }
 
   function refreshAdvisory(){
-    if (gameTrulyDone()) { advisoryReadout.innerHTML = ''; useAdvisoryBtn.disabled = true; return; }
+    if (gameTrulyDone()) {
+      useAdvisoryBtn.disabled = true;
+      if (!batchRunning){ advisoryReadout.innerHTML = ''; }
+      return;
+    }
     // Prioritize resolving a pending Cruiser/Frigate disambiguation over
     // ai_suggest()'s ordinary result — choose_shots() only tries its own
     // no-refire disambiguation attempt, and silently falls through to
@@ -1048,7 +1060,7 @@
     let parsed = [];
     if (game.ai_target_size() <= 1){
       const locked = game.update_fsm_and_resolve();
-      if (locked){
+      if (locked && !batchRunning){
         refreshHeatmaps();
         refreshCruiserIdentified();
       }
@@ -1070,7 +1082,9 @@
       raw = game.ai_suggest();
     }
     suggested = JSON.parse(raw);
-    renderSuggested();
+    if (!batchRunning){
+      renderSuggested();
+    }
   }
 
   // Manual "heatmap fully evolved" workflow, step 1: lock in the Cruisers'
@@ -1571,18 +1585,24 @@
       return;
     }
 
-    markFired(salvo.coords);
-    appendLogEntry(salvo);
-    refreshFleet();
-    refreshBattleshipCross();
-    refreshFullyEliminatedCells();
-    refreshRefirableCells();
-    refreshHeatmaps();
-    refreshCruiserIdentified();
+    // All of this is pure visual rendering, safe to skip during a batch
+    // run (see runAutoPlayBatch's own full re-render of just the final
+    // game once the whole batch finishes) — none of it feeds back into
+    // fireBtn.disabled, `suggested`, or any other control-flow state
+    // runAutoPlay's loop or the disambiguation logic actually reads.
+    if (!batchRunning){
+      markFired(salvo.coords);
+      appendLogEntry(salvo);
+      refreshFleet();
+      refreshBattleshipCross();
+      refreshFullyEliminatedCells();
+      refreshRefirableCells();
+      refreshHeatmaps();
+      refreshCruiserIdentified();
+      turnNo.textContent = game.turn();
+      hitCount.textContent = countHits();
+    }
     selected = [];
-
-    turnNo.textContent = game.turn();
-    hitCount.textContent = countHits();
 
     if (!fleetClearedShown && !game.is_won()){
       const ships = JSON.parse(game.ships_json());
@@ -1616,7 +1636,9 @@
 
     if (game.is_won()){
       won = true;
-      logGameEnd('full-win', salvo.turn);
+      if (!batchRunning){
+        logGameEnd('full-win', salvo.turn); // a fetch() per game — 100000 of these would itself be real overhead in a big batch
+      }
       statusLine.textContent = isFullyResolved()
         ? 'Fleet destroyed. Start a new game to sail again.'
         : 'Fleet destroyed, but the exact Cruiser/Frigate layout is still ambiguous — keep firing (Auto-play or "Use these 3") to finish disambiguating.';
@@ -1646,6 +1668,7 @@
   // per game, and re-rendering an ever-growing list every single time is
   // wasted work when the batch will call refreshSavedBoardsList() itself
   // once at the end anyway.
+  // Returns the new saved id, or undefined on failure.
   async function saveCurrentBoard(refreshList = true){
     let board, resolution;
     try {
@@ -1653,7 +1676,7 @@
       resolution = JSON.parse(game.resolution_status_json());
     } catch {
       statusLine.textContent = 'Could not read the current board — nothing saved.';
-      return;
+      return undefined;
     }
     const payload = {
       board,
@@ -1668,8 +1691,10 @@
       if (refreshList){
         await refreshSavedBoardsList();
       }
+      return id;
     } catch {
       statusLine.textContent = 'Could not save the board — is the dev server (serve.py) running?';
+      return undefined;
     }
   }
 
@@ -1861,16 +1886,21 @@
       setAutoPlayState('green');
       // `won` (a true full win) is logged separately, right when it happens,
       // inside doFire — skip a second, redundant line for the same moment.
-      if (!won){
+      // Both this and the timeout branch below skip logGameEnd/openModal
+      // entirely during a batch run: a fetch() and a modal popup per game
+      // would be real overhead (and pure noise) across up to 100000 games.
+      if (!won && !batchRunning){
         logGameEnd('auto-play cleared', game.turn());
       }
     } else {
       setAutoPlayState('red');
-      logGameEnd('auto-play timeout', game.turn());
-      openModal(
-        'Things are not well',
-        `<p>${salvosTaken} salvos fired and the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.</p>`
-      );
+      if (!batchRunning){
+        logGameEnd('auto-play timeout', game.turn());
+        openModal(
+          'Things are not well',
+          `<p>${salvosTaken} salvos fired and the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.</p>`
+        );
+      }
     }
 
     return { salvosTaken, cleared };
@@ -1901,20 +1931,37 @@
   // game in the current batch run (reset at the start of each new
   // "Autorun batch" click) — unresolved games are deliberately excluded,
   // since their salvo count reflects hitting the hunting-phase cap rather
-  // than genuinely finishing.
+  // than genuinely finishing. Resolved games are otherwise forgotten
+  // entirely (not saved) — only their salvo count is kept, for the stats
+  // line below. Unresolved games ARE saved (that's the whole point of a
+  // large batch: harvesting the rare ones that don't resolve), tracked
+  // here just as their saved ids for the summary line.
   let batchResolvedSalvoCounts = [];
+  let batchUnresolvedIds = [];
 
   function updateBatchStatsLine(){
-    if (batchResolvedSalvoCounts.length === 0){
-      batchStatsLine.textContent = '';
-      return;
+    const parts = [];
+    if (batchResolvedSalvoCounts.length > 0){
+      const min = Math.min(...batchResolvedSalvoCounts);
+      const max = Math.max(...batchResolvedSalvoCounts);
+      const avg = (batchResolvedSalvoCounts.reduce((a, b) => a + b, 0) / batchResolvedSalvoCounts.length).toFixed(1);
+      parts.push(`Resolved — min salvos: ${min}, average: ${avg}, max: ${max} (n=${batchResolvedSalvoCounts.length})`);
     }
-    const min = Math.min(...batchResolvedSalvoCounts);
-    const max = Math.max(...batchResolvedSalvoCounts);
-    const avg = (batchResolvedSalvoCounts.reduce((a, b) => a + b, 0) / batchResolvedSalvoCounts.length).toFixed(1);
-    batchStatsLine.textContent = `Resolved games — min salvos: ${min}, average: ${avg}, max: ${max} (n=${batchResolvedSalvoCounts.length})`;
+    if (batchUnresolvedIds.length > 0){
+      const shown = batchUnresolvedIds.slice(0, 20).map(id => `#${id}`).join(', ');
+      const more = batchUnresolvedIds.length > 20 ? ` (+${batchUnresolvedIds.length - 20} more)` : '';
+      parts.push(`Unresolved harvested: ${batchUnresolvedIds.length} saved as ${shown}${more}`);
+    }
+    batchStatsLine.textContent = parts.join(' — ');
   }
 
+  // Runs `batchSizeInput` independent games back-to-back, same as clicking
+  // "New game" then "Auto-play" by hand that many times. Resolved games
+  // are forgotten immediately — this is meant to run large (the input
+  // allows up to 100000) hunting for the rare board an unresolved
+  // disambiguation is genuinely unreachable on, so never stops early:
+  // whenever a game finishes unresolved, it's saved for later study and
+  // the batch moves straight on to the next game, all the way to n.
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
@@ -1931,49 +1978,77 @@
     restartSameBoardBtn.disabled = true;
     const originalLabel = autoPlayBatchBtn.textContent;
     batchResolvedSalvoCounts = [];
+    batchUnresolvedIds = [];
     updateBatchStatsLine();
 
-    let stoppedForStudy = false;
-    let i = 1;
-    for (; i <= n; i++){
+    for (let i = 1; i <= n; i++){
       autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
       resetGame();
       autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
       const result = await runAutoPlay();
       batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
 
-      // Save every game's board, resolved or not — not just the final one
-      // left on screen when the batch stops for study. Skip the Saved
-      // Boards panel refresh here (see saveCurrentBoard's doc comment) —
-      // done once, after the loop, instead.
-      await saveCurrentBoard(false);
-
       const resolved = isFullyResolved();
       if (resolved && result){
         batchResolvedSalvoCounts.push(result.salvosTaken);
-        updateBatchStatsLine();
+      } else if (!resolved){
+        // Not every ship layout — Battleship, both Cruisers, and all 3
+        // Frigates — was genuinely established and correct. Save it (skip
+        // the Saved Boards panel refresh here — see saveCurrentBoard's doc
+        // comment — done once, after the whole batch, instead) and keep
+        // going rather than stopping the batch.
+        const id = await saveCurrentBoard(false);
+        if (id !== undefined){
+          batchUnresolvedIds.push(id);
+        }
       }
+      updateBatchStatsLine();
 
-      // Stop the whole batch (not just this game) unless EVERY ship
-      // layout — Battleship, both Cruisers, and all 3 Frigates — is
-      // genuinely established and correct, not just sunk. Leaves this
-      // exact board on screen instead of immediately overwriting it with
-      // the next random game, so it can be studied manually (or rerun via
-      // "Replay board").
-      if (!resolved){
-        stoppedForStudy = true;
-        statusLine.textContent = `Autorun batch stopped at game ${i}/${n}: not every ship layout was established after this game finished. Study this board, or use "Replay board" to rerun the same layout.`;
-        break;
-      }
+      // Yield back to the browser once per GAME (not per salvo, unlike the
+      // old 300ms pacing this replaced) so the countdown/stats actually
+      // repaint — without this, a run of resolved games (nothing async to
+      // await: no per-salvo sleep anymore, no save) can blow through many
+      // iterations in one synchronous burst, updating batchSizeInput.value
+      // in memory each time but never letting the browser draw any of it
+      // until something finally pauses for real.
+      await sleep(0);
     }
 
     batchRunning = false;
+
+    // Full re-render of just the final game — every game during the loop
+    // above skipped its own per-shot/per-reset visual updates (see
+    // doFire/afterGameStateReset's batchRunning gating) to stay fast, so
+    // the board on screen is still whatever was last drawn before this
+    // batch started. Reconstruct it once here from the WASM game's own
+    // current state (tracked correctly throughout, just never drawn) —
+    // this is the "only show the last" behaviour.
+    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
+    logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+    let finalLog = [];
+    try { finalLog = JSON.parse(game.log_json()); } catch { finalLog = []; }
+    finalLog.forEach(entry => {
+      markFired(entry.coords);
+      appendLogEntry(entry);
+    });
+    turnNo.textContent = game.turn();
+    hitCount.textContent = countHits();
+    refreshFleet();
+    refreshBattleshipCross();
+    refreshFullyEliminatedCells();
+    refreshRefirableCells();
+    refreshHeatmaps();
+    refreshCruiserIdentified();
+    renderSelection();
+    refreshAdvisory();
+
     autoPlayBatchBtn.textContent = originalLabel;
     autoPlayBatchBtn.disabled = false;
     batchSizeInput.disabled = false;
-    batchSizeInput.value = stoppedForStudy ? n - i : n; // restore the original count only if the batch ran to completion
+    batchSizeInput.value = n;
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
+    statusLine.textContent = `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and saved for study.`;
     await refreshSavedBoardsList();
   }
 
@@ -2001,15 +2076,24 @@
     fireBtn.disabled = true;
     useAdvisoryBtn.disabled = false;
     autoPlayBtn.disabled = false;
+    // renderSelection()/refreshAdvisory() always run — both are load-
+    // bearing logic (fireBtn.disabled, `suggested` for the new game's
+    // first shot) even during a batch run, where they just skip their own
+    // DOM rendering internally. Everything below is pure visual state for
+    // a game about to be immediately overwritten by the next one during a
+    // batch — skipped there, and reconstructed once at the very end from
+    // the final game's own state (see runAutoPlayBatch).
+    renderSelection();
+    refreshAdvisory();
+    if (batchRunning) return;
+
     autoPlayBtn.textContent = 'Auto-play (30+ salvos)';
     setAutoPlayState('blue');
     logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
     gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
     turnNo.textContent = game.turn();
     hitCount.textContent = '0';
-    renderSelection();
     refreshFleet();
-    refreshAdvisory();
     refreshBattleshipCross();
     refreshFullyEliminatedCells();
     refreshRefirableCells();
