@@ -387,6 +387,7 @@ impl Game {
         let unfired_count: usize = self.state.fired.iter().flatten().filter(|&&f| !f).count();
         let board_exhausted = unfired_count < 3;
         let mut cells_to_fire: Vec<(usize, usize)> = Vec::new();
+        let mut extra_refire_cells: Vec<(usize, usize)> = Vec::new();
         for &idx in indices {
             let r = idx / 10;
             let c = idx % 10;
@@ -409,11 +410,28 @@ impl Game {
             // class can't be sunk otherwise), and its cross-exclusive
             // Cruiser/Frigate partner cell is frequently already fired too.
             let is_anchored_isolation_refire = self.ai.is_anchored_isolation_refire(r, c);
-            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !is_anchored_isolation_refire && !board_exhausted {
+            // Same idea one size down, for `AiPlayer::disambiguation_shots_
+            // with_refire`'s "heatmap fully evolved" dead end — but unlike
+            // the 2 refires above (which are always allowed whenever the
+            // underlying strategy calls for them), this one is capped at
+            // one bonus use per cell (see `disambiguation_extra_refire_
+            // used`), so it's tracked separately below to be marked spent
+            // only once the whole salvo actually goes through.
+            let is_disambiguation_extra_refire = self.ai.is_disambiguation_extra_refire(r, c);
+            // One tier further than the capped bonus refire above — see
+            // `AiPlayer::is_last_resort_refire`: only ever true once the
+            // capped tier has already come back with nothing, so this can
+            // never bypass the one-bonus-per-cell cap while it's still
+            // doing useful work, only once it genuinely can't help anymore.
+            let is_last_resort_refire = self.ai.is_last_resort_refire(r, c);
+            if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !is_anchored_isolation_refire && !is_disambiguation_extra_refire && !is_last_resort_refire && !board_exhausted {
                 return r#"{"error":"cell already fired"}"#.to_string();
             }
             if cells_to_fire.iter().any(|&(pr, pc)| pr == r && pc == c) {
                 return r#"{"error":"duplicate cell in salvo"}"#.to_string();
+            }
+            if is_disambiguation_extra_refire {
+                extra_refire_cells.push((r, c));
             }
             cells_to_fire.push((r, c));
         }
@@ -460,6 +478,9 @@ impl Game {
         self.ai.apply_salvo(coords_arr, values_arr);
         for size in sunk_sizes {
             self.ai.mark_sunk(size);
+        }
+        for (r, c) in extra_refire_cells {
+            self.ai.mark_disambiguation_extra_refire_used(r, c);
         }
 
         let battleship_discovered =
@@ -521,6 +542,58 @@ impl Game {
     /// Same idea as `ai_cruiser_disambiguation_pending`, one size down.
     pub fn ai_frigate_disambiguation_pending(&self) -> bool {
         self.ai.frigate_disambiguation_pending()
+    }
+
+    /// The manual "heatmap fully evolved" workflow's first step: once the
+    /// Cruisers are cross-reasoning-identified (`AiPlayer::cruiser_
+    /// identified_cells_refined`), lock that layout in, feed it into the
+    /// size-3/size-2 FSM, refresh the cross-3/cross-2 bags against it, and
+    /// clear the memoized heatmap candidate lists so the next read
+    /// reflects the change. See `AiPlayer::update_fsm_and_resolve`. Returns
+    /// whether it actually locked anything in (false if already locked, or
+    /// if the Cruisers aren't cross-reasoning-identified yet).
+    pub fn update_fsm_and_resolve(&mut self) -> bool {
+        self.ai.update_fsm_and_resolve()
+    }
+
+    /// The manual workflow's second step, for the dead end where every
+    /// cell the remaining Cruiser/Frigate hypotheses disagree on has
+    /// already been fired: the best disambiguating salvo if one specific
+    /// already-fired cell were allowed exactly one bonus refire. Returns a
+    /// JSON array of flat indices, same shape as `ai_suggest`, or `[]` if
+    /// no such salvo exists (either nothing is ambiguous, or ambiguity
+    /// remains but no refire could ever resolve it). See `AiPlayer::
+    /// disambiguation_shots_with_refire`; `Game::fire` only accepts an
+    /// already-fired cell if it matches this exact suggestion, and only
+    /// once per cell.
+    pub fn ai_suggest_disambiguation_refire(&self) -> String {
+        let shots = self.ai.disambiguation_shots_with_refire();
+        let indices: Vec<usize> = match shots {
+            Some(cells) => cells.iter().map(|&(r, c)| r * 10 + c).collect(),
+            None => Vec::new(),
+        };
+        serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// One tier further than `ai_suggest_disambiguation_refire`: for the
+    /// genuine dead end where the discriminating cell(s) ALSO already spent
+    /// their one-time bonus refire (typically resolving some earlier,
+    /// now-settled ambiguity) — a "cluster of 3" Frigate/Cruiser ambiguity
+    /// (certain pivot cell, 2 mutually-exclusive end cells) can leave both
+    /// ends permanently tied under the normal cap even though a single
+    /// clean refire would resolve it outright. Only meaningfully different
+    /// from `ai_suggest_disambiguation_refire` once that one has already
+    /// returned `[]` — see `AiPlayer::disambiguation_shots_last_resort`;
+    /// `Game::fire` only accepts the already-fired cell(s) this suggests
+    /// once the capped tier genuinely has nothing left to offer (see
+    /// `AiPlayer::is_last_resort_refire`).
+    pub fn ai_suggest_disambiguation_last_resort(&self) -> String {
+        let shots = self.ai.disambiguation_shots_last_resort();
+        let indices: Vec<usize> = match shots {
+            Some(cells) => cells.iter().map(|&(r, c)| r * 10 + c).collect(),
+            None => Vec::new(),
+        };
+        serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Toggle whether the AI's advisory (`ai_suggest`/`choose_shots`) may
@@ -2170,7 +2243,9 @@ mod tests {
 
     #[test]
     fn ai_cruiser_layout_elimination_narrows_the_cruiser_and_frigate_fsm() {
-        // Once the Cruisers' exact layout is confirmed via the heatmap,
+        // Once the Cruisers' exact layout is confirmed via the heatmap and
+        // `update_fsm_and_resolve` is called (the manual "heatmap fully
+        // evolved" trigger — this no longer happens automatically),
         // choose_shots' ordinary hunting FSM should learn from it too: no
         // Cruiser possible anywhere else on the board, and no Frigate
         // possible adjacent to either real Cruiser.
@@ -2179,6 +2254,7 @@ mod tests {
         ai.apply_salvo([(6, 6), (6, 7), (6, 8)], [3, 3, 3]);
         ai.mark_sunk(3);
         ai.mark_sunk(3);
+        assert!(ai.update_fsm_and_resolve(), "the Cruisers are already cross-reasoning-identified, must actually lock in");
 
         let (rows3, _) = ai.line_states(3);
         for r in 1..=8 {
@@ -2782,6 +2858,218 @@ mod tests {
         assert!(refined_heatmap[0][5] > 0.0, "Option FB touches neither Cruiser hypothesis, so it must remain a live candidate");
     }
 
+    #[test]
+    fn update_fsm_and_resolve_locks_in_a_cross_reasoned_cruiser_layout_the_raw_candidates_alone_missed() {
+        // Same ambiguity as `ai_cross_reasoning_resolves_a_cruiser_ambiguity_
+        // the_cruiser_heatmap_cannot_resolve_alone`: the RAW Cruiser
+        // candidate list never collapses to 1 hypothesis on its own (Option
+        // A stays a live alternative forever, as far as `consistent_cruiser_
+        // candidates` alone is concerned) — only cross-reasoning against the
+        // confirmed Frigates narrows it to Option B. The old, always-
+        // automatic elimination this replaced only ever checked the raw
+        // list, so it could never have fired here at all; `update_fsm_and_
+        // resolve` must be able to lock this in anyway.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed
+        ai.apply_salvo([(6, 3), (6, 4), (0, 0)], [2, 2, 0]); // Frigate: confirmed, touches Option A
+        ai.apply_salvo([(8, 1), (8, 2), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        ai.apply_salvo([(8, 7), (8, 8), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
+        flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8)]);
+
+        assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the un-cross-reasoned identification must still be empty");
+        let heatmap = ai.cruiser_heatmap();
+        assert!((0.0..1.0).contains(&heatmap[4][1]), "sanity: Option A must still be a live but uncertain RAW candidate: {heatmap:?}");
+        assert!((0.0..1.0).contains(&heatmap[4][5]), "sanity: Option B must still be a live but uncertain RAW candidate: {heatmap:?}");
+
+        assert!(ai.update_fsm_and_resolve(), "cross-reasoning has already resolved this to Option B, must lock in");
+        assert!(!ai.update_fsm_and_resolve(), "must be idempotent — nothing left to lock in a second time");
+
+        // Option B ((5,6),(5,7),(5,8)) is now locked in — every OTHER row
+        // must show 0 alive Cruiser placements, same style of assertion as
+        // the raw-already-resolved case in `ai_cruiser_layout_elimination_
+        // narrows_the_cruiser_and_frigate_fsm`.
+        let (rows3, _) = ai.line_states(3);
+        for r in 1..=8 {
+            let alive = AiPlayer::alive_count(3, rows3[r]);
+            if r == 2 || r == 5 {
+                assert!(alive > 0, "row {r} passes through a confirmed Cruiser cell, must still show alive Cruiser placements, got {alive}");
+            } else {
+                assert_eq!(alive, 0, "row {r} has no confirmed Cruiser cell, must show 0 alive Cruiser placements now, got {alive}");
+            }
+        }
+    }
+
+    #[test]
+    fn update_fsm_and_resolve_is_a_noop_while_still_ambiguous() {
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 0, 0]);
+        assert!(!ai.update_fsm_and_resolve(), "nothing is cross-reasoning-identified yet, must not lock anything in");
+    }
+
+    #[test]
+    fn frigate_disambiguation_shots_with_refire_finds_a_shot_once_ordinary_disambiguation_is_exhausted() {
+        // Both Cruisers and 2 of the 3 Frigates fixed and unambiguous. The
+        // 3rd Frigate is ambiguous among 3 candidate windows — W1=(4,2)-
+        // (4,3), W2=(4,5)-(4,6), W3=(8,5)-(8,6). Firing exactly one cell
+        // from each window together in a single "2 0 0" bag keeps all 3
+        // windows simultaneously consistent (each has exactly 1 of its 2
+        // cells touched, matching the bag's lone "2") — genuine unordered-
+        // bag ambiguity, not a search giving up early. Doing this twice
+        // (once per half of each window) fires every cell any of the 3
+        // windows could ever be distinguished by, without ever resolving
+        // which is real — the "heatmap fully evolved" dead end this
+        // feature exists for.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(2, 6), (2, 7), (2, 8)], [3, 3, 3]);
+        ai.apply_salvo([(6, 1), (6, 2), (0, 0)], [2, 2, 0]);
+        ai.apply_salvo([(6, 7), (6, 8), (0, 1)], [2, 2, 0]);
+        ai.apply_salvo([(4, 2), (4, 5), (8, 5)], [2, 0, 0]);
+        ai.apply_salvo([(4, 3), (4, 6), (8, 6)], [2, 0, 0]);
+
+        flood_inner_misses_except(
+            &mut ai,
+            &[
+                (2, 2), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8),
+                (6, 1), (6, 2), (6, 7), (6, 8),
+                (4, 2), (4, 3), (4, 5), (4, 6), (8, 5), (8, 6),
+            ],
+        );
+
+        assert!(ai.frigate_identified_cells().is_empty(), "sanity: the 3rd Frigate must still be ambiguous among all 3 windows");
+        assert_eq!(
+            ai.frigate_disambiguation_shots(), None,
+            "sanity: every cell the 3 hypotheses disagree on is already fired — the exact dead end this feature exists for"
+        );
+        assert_eq!(ai.cruiser_disambiguation_shots_with_refire(), None, "sanity: Cruisers are already unambiguous, nothing to refire there");
+
+        let shots = ai.frigate_disambiguation_shots_with_refire().expect("a refire-based disambiguation shot must exist");
+        for &(r, c) in &shots {
+            assert!(ai.is_fired(r, c), "every cell in the refire salvo must be one of the already-fired, still-disagreeing cells: {:?}", (r, c));
+            assert!(
+                [(4, 2), (4, 3), (4, 5), (4, 6), (8, 5), (8, 6)].contains(&(r, c)),
+                "refire target {:?} must be one of the cells the 3 hypotheses actually disagree on", (r, c)
+            );
+        }
+
+        // The combined entry point must agree (Cruiser has nothing to
+        // offer, so it must fall through to this same Frigate salvo).
+        assert_eq!(ai.disambiguation_shots_with_refire(), Some(shots));
+
+        // Capped at exactly one bonus use per cell.
+        let (r0, c0) = shots[0];
+        assert!(ai.is_disambiguation_extra_refire(r0, c0), "must be recognized as a valid extra refire before being consumed");
+        ai.mark_disambiguation_extra_refire_used(r0, c0);
+        assert!(!ai.is_disambiguation_extra_refire(r0, c0), "must be capped at exactly one use — a second refire of the same cell must be rejected");
+    }
+
+    #[test]
+    fn frigate_disambiguation_shots_never_fires_two_mutually_exclusive_alternatives_together() {
+        // 2 Frigates fixed and unambiguous. The 3rd is ambiguous between
+        // exactly 2 candidate windows sharing a pivot cell: (4,2)-(4,3) or
+        // (4,3)-(4,4) — (4,3) confirmed hit either way, (4,2) and (4,4)
+        // each still fully unfired. Only 2 total candidates survive, and
+        // they disagree on exactly ONE cell each ((4,2) vs (4,4)) — the
+        // same shape as a real "B4-or-C5 completes this Frigate" pivot
+        // ambiguity. Firing (4,2) and (4,4) TOGETHER in the same salvo is
+        // the worst possible choice: exactly one of them is always the
+        // hit no matter which hypothesis is real, so the resulting bag
+        // (one "2", rest misses) is identical either way — genuinely
+        // uninformative — whereas firing just one of them plus 2 neutral
+        // fillers fully resolves it. A padding bug once left the search
+        // pool at exactly {(4,2), (4,4), one filler} with no alternative
+        // triple ever compared against it, forcing exactly this
+        // uninformative combination.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(2, 6), (2, 7), (2, 8)], [3, 3, 3]);
+        ai.apply_salvo([(6, 1), (6, 2), (0, 0)], [2, 2, 0]);
+        ai.apply_salvo([(6, 7), (6, 8), (0, 1)], [2, 2, 0]);
+        ai.apply_salvo([(4, 3), (0, 2), (0, 3)], [2, 0, 0]);
+
+        flood_inner_misses_except(
+            &mut ai,
+            &[
+                (2, 2), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8),
+                (6, 1), (6, 2), (6, 7), (6, 8),
+                (4, 2), (4, 3), (4, 4),
+            ],
+        );
+
+        assert!(ai.frigate_identified_cells().is_empty(), "sanity: the 3rd Frigate must still be ambiguous between the 2 pivot windows");
+
+        let shots = ai.frigate_disambiguation_shots().expect("an ordinary disambiguating shot must exist — (4,2) and (4,4) are both unfired");
+        assert!(
+            !(shots.contains(&(4, 2)) && shots.contains(&(4, 4))),
+            "must not fire both mutually-exclusive alternatives together — that combination is provably uninformative: {:?}", shots
+        );
+    }
+
+    #[test]
+    fn frigate_disambiguation_shots_last_resort_unlocks_a_cluster_tie_whose_ends_already_spent_their_bonus() {
+        // Same "cluster of 3" pivot ambiguity as the padding-fix test above
+        // — (4,2)-(4,3) or (4,3)-(4,4), sharing pivot (4,3) — but here BOTH
+        // end cells ((4,2) and (4,4)) are already fired AND have already
+        // spent their one-time bonus refire (simulating them having been
+        // used earlier — separately, for some other legitimate reason —
+        // before the game ever narrowed down to this being the final,
+        // otherwise-permanent tie). The capped tier
+        // (disambiguation_shots_with_refire) can no longer help; the
+        // last-resort tier must still be able to.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]);
+        ai.apply_salvo([(2, 6), (2, 7), (2, 8)], [3, 3, 3]);
+        ai.apply_salvo([(6, 1), (6, 2), (0, 0)], [2, 2, 0]);
+        ai.apply_salvo([(6, 7), (6, 8), (0, 1)], [2, 2, 0]);
+        ai.apply_salvo([(4, 3), (0, 2), (0, 3)], [2, 0, 0]);
+        // Fires both (4,2) and (4,4) — uninformative (exactly one is always
+        // the hit either way), but that's irrelevant here: the point is
+        // just to get both genuinely fired while the ambiguity survives.
+        ai.apply_salvo([(4, 2), (4, 4), (0, 4)], [2, 0, 0]);
+
+        flood_inner_misses_except(
+            &mut ai,
+            &[
+                (2, 2), (2, 3), (2, 4), (2, 6), (2, 7), (2, 8),
+                (6, 1), (6, 2), (6, 7), (6, 8),
+                (4, 2), (4, 3), (4, 4),
+            ],
+        );
+
+        assert!(ai.frigate_identified_cells().is_empty(), "sanity: still ambiguous between the 2 pivot windows");
+        assert!(
+            ai.frigate_disambiguation_shots_with_refire().is_some(),
+            "sanity: the capped tier should still work before either end cell's bonus is actually marked spent"
+        );
+
+        ai.mark_disambiguation_extra_refire_used(4, 2);
+        ai.mark_disambiguation_extra_refire_used(4, 4);
+
+        assert_eq!(
+            ai.frigate_disambiguation_shots_with_refire(), None,
+            "the capped tier must now report nothing — both discriminating cells already spent their bonus"
+        );
+
+        let shots = ai.frigate_disambiguation_shots_last_resort().expect("the last-resort tier must still find a shot");
+        assert!(
+            shots.contains(&(4, 2)) || shots.contains(&(4, 4)),
+            "last-resort salvo must include one of the 2 already-bonus-spent discriminating cells: {:?}", shots
+        );
+        assert!(
+            !(shots.contains(&(4, 2)) && shots.contains(&(4, 4))),
+            "must not fire both mutually-exclusive alternatives together, same as the ordinary padding fix: {:?}", shots
+        );
+
+        let (r0, c0) = if shots.contains(&(4, 2)) { (4, 2) } else { (4, 4) };
+        assert!(ai.is_last_resort_refire(r0, c0), "must be recognized as a valid last-resort refire");
+        assert!(
+            !ai.is_disambiguation_extra_refire(r0, c0),
+            "must NOT be recognized as a fresh capped-tier refire — its bonus is already spent"
+        );
+
+        // Combined entry point must agree.
+        assert_eq!(ai.disambiguation_shots_last_resort(), Some(shots));
+    }
 
     #[test]
     fn ai_firing_an_outer_ring_cell_never_drives_the_fsm_for_size_2_3_or_4() {
@@ -2976,5 +3264,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn autoplay_equivalent_resolves_board_23_layout() {
+        // Reproduces the exact ship layout from a live-play save (board
+        // #23) and replays it via `run_autoplay_equivalent` — the same
+        // priority order `runAutoPlay`/the "AI Advisory" panel use in
+        // index.html. Diagnostic/regression test for a live "gets stuck"
+        // report.
+        let layout_json = r#"{"board": [[null, null, null, null, null, null, null, null, null, null], [null, 0, 0, 0, 0, null, null, 5, null, null], [null, null, null, null, null, null, null, 5, null, null], [null, 4, null, 7, null, null, null, null, null, null], [null, 4, null, null, 8, null, null, null, null, null], [9, null, null, null, null, null, 2, 2, 2, null], [null, null, null, 3, 3, null, null, null, null, null], [null, null, null, null, null, null, 1, 1, 1, null], [null, null, 6, null, null, null, null, null, null, null], [null, null, null, null, null, null, null, null, null, null]], "ships": [{"id": 0, "name": "Battleship", "size": 4, "cells": [{"row": 1, "col": 1}, {"row": 1, "col": 2}, {"row": 1, "col": 3}, {"row": 1, "col": 4}], "hits": 4, "sunk": true}, {"id": 1, "name": "Cruiser", "size": 3, "cells": [{"row": 7, "col": 6}, {"row": 7, "col": 7}, {"row": 7, "col": 8}], "hits": 3, "sunk": true}, {"id": 2, "name": "Cruiser", "size": 3, "cells": [{"row": 5, "col": 6}, {"row": 5, "col": 7}, {"row": 5, "col": 8}], "hits": 3, "sunk": true}, {"id": 3, "name": "Frigate", "size": 2, "cells": [{"row": 6, "col": 3}, {"row": 6, "col": 4}], "hits": 2, "sunk": true}, {"id": 4, "name": "Frigate", "size": 2, "cells": [{"row": 3, "col": 1}, {"row": 4, "col": 1}], "hits": 2, "sunk": true}, {"id": 5, "name": "Frigate", "size": 2, "cells": [{"row": 1, "col": 7}, {"row": 2, "col": 7}], "hits": 2, "sunk": true}, {"id": 6, "name": "Submarine", "size": 1, "cells": [{"row": 8, "col": 2}], "hits": 1, "sunk": true}, {"id": 7, "name": "Submarine", "size": 1, "cells": [{"row": 3, "col": 3}], "hits": 1, "sunk": true}, {"id": 8, "name": "Submarine", "size": 1, "cells": [{"row": 4, "col": 4}], "hits": 1, "sunk": true}, {"id": 9, "name": "Submarine", "size": 1, "cells": [{"row": 5, "col": 0}], "hits": 0, "sunk": false}]}"#;
+        run_autoplay_equivalent(layout_json, 40);
+    }
+
+    /// Replays a saved board layout the same way `runAutoPlay`/the "AI
+    /// Advisory" panel drive `Game` in index.html: once `ai_target_size()`
+    /// drops to 1 (Battleship/Cruiser/Frigate all fully sunk), prioritize
+    /// `update_fsm_and_resolve` + the refire-based suggestion over the
+    /// ordinary advisory (which would otherwise silently prefer Submarine
+    /// hunting the moment its own no-refire disambiguation attempt comes up
+    /// empty). Panics (via the assertions below) if the game doesn't
+    /// resolve within `max_shots`.
+    fn run_autoplay_equivalent(layout_json: &str, max_shots: usize) {
+        let mut game = Game::new();
+        let load_result = game.load_board_layout_json(layout_json);
+        assert!(!load_result.contains("error"), "board layout failed to load: {load_result}");
+
+        let mut shots_taken = 0;
+        loop {
+            if game.is_won() {
+                break;
+            }
+            assert!(shots_taken < max_shots, "autoplay-equivalent loop did not resolve within {max_shots} shots");
+
+            let mut indices: Vec<usize> = Vec::new();
+            if game.ai_target_size() <= 1 {
+                game.update_fsm_and_resolve();
+                indices = serde_json::from_str(&game.ai_suggest_disambiguation_refire()).unwrap_or_default();
+            }
+            if indices.len() != 3 {
+                indices = serde_json::from_str(&game.ai_suggest()).unwrap_or_default();
+            }
+            assert_eq!(indices.len(), 3, "no valid 3-cell salvo available (shots_taken={shots_taken})");
+
+            let response = game.fire(&indices);
+            assert!(!response.contains("\"error\""), "shot {shots_taken} rejected: {response} (indices={indices:?})");
+            shots_taken += 1;
+        }
+    }
+
+    #[test]
+    fn autoplay_equivalent_resolves_board_26_layout() {
+        // Reproduces the exact ship layout from a live-play save (board
+        // #26) — reported as still stuck (AI Advisory offering nothing
+        // useful, "Disambiguate" a no-op) even after the ai_target_size()
+        // gating fix. See run_autoplay_equivalent.
+        let layout_json = r#"{"board": [[null, null, null, null, null, null, null, null, null, null], [null, null, null, null, null, null, null, 5, 5, null], [null, 1, null, 8, null, 6, null, null, null, null], [null, 1, null, null, 4, null, 3, null, null, null], [null, 1, null, null, 4, null, 3, null, null, null], [null, null, null, null, null, null, null, null, 2, null], [null, null, 0, 0, 0, 0, null, null, 2, null], [null, null, null, null, null, null, null, null, 2, null], [null, null, null, null, null, null, 7, null, null, null], [null, 9, null, null, null, null, null, null, null, null]], "ships": [{"id": 0, "name": "Battleship", "size": 4, "cells": [{"row": 6, "col": 2}, {"row": 6, "col": 3}, {"row": 6, "col": 4}, {"row": 6, "col": 5}], "hits": 4, "sunk": true}, {"id": 1, "name": "Cruiser", "size": 3, "cells": [{"row": 2, "col": 1}, {"row": 3, "col": 1}, {"row": 4, "col": 1}], "hits": 3, "sunk": true}, {"id": 2, "name": "Cruiser", "size": 3, "cells": [{"row": 5, "col": 8}, {"row": 6, "col": 8}, {"row": 7, "col": 8}], "hits": 3, "sunk": true}, {"id": 3, "name": "Frigate", "size": 2, "cells": [{"row": 3, "col": 6}, {"row": 4, "col": 6}], "hits": 2, "sunk": true}, {"id": 4, "name": "Frigate", "size": 2, "cells": [{"row": 3, "col": 4}, {"row": 4, "col": 4}], "hits": 2, "sunk": true}, {"id": 5, "name": "Frigate", "size": 2, "cells": [{"row": 1, "col": 7}, {"row": 1, "col": 8}], "hits": 2, "sunk": true}, {"id": 6, "name": "Submarine", "size": 1, "cells": [{"row": 2, "col": 5}], "hits": 1, "sunk": true}, {"id": 7, "name": "Submarine", "size": 1, "cells": [{"row": 8, "col": 6}], "hits": 1, "sunk": true}, {"id": 8, "name": "Submarine", "size": 1, "cells": [{"row": 2, "col": 3}], "hits": 1, "sunk": true}, {"id": 9, "name": "Submarine", "size": 1, "cells": [{"row": 9, "col": 1}], "hits": 0, "sunk": false}]}"#;
+        run_autoplay_equivalent(layout_json, 40);
     }
 }

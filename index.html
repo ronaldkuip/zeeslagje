@@ -778,6 +778,11 @@
           <div class="refire-toggle-group" style="margin-top:10px;">
             <label class="refire-toggle"><input type="checkbox" id="freezeBeforeFrigatesToggle"> Don't drop evaluation level to 2 (Frigate) — freeze at 3 instead</label>
           </div>
+          <div class="modal-footnote" style="margin:12px 0 6px;">"Heatmap fully evolved" — once the interesting coordinates are all already fired and nothing more can be learned:</div>
+          <div class="fire-row">
+            <button class="btn btn-ghost" id="updateFsmResolveBtn" title="Once the Cruisers' exact layout is cross-reasoning-identified, lock it into the ordinary FSM (no adjacent cells can hold a Frigate or another Cruiser), rework the Cross-3/Cross-2 bags against it, and re-evaluate the heatmap.">Update FSM and resolve</button>
+            <button class="btn btn-ghost" id="disambiguateRefireBtn" title="Find the best disambiguating salvo allowing one already-fired cell to be fired again (a one-time bonus per cell) — for when every discriminating coordinate is already spent.">Disambiguate (allow 1 refire)</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -836,6 +841,8 @@
   const cross3BagBtn = document.getElementById('cross3BagBtn');
   const cross2BagBtn = document.getElementById('cross2BagBtn');
   const cruiserAliveBtn = document.getElementById('cruiserAliveBtn');
+  const updateFsmResolveBtn = document.getElementById('updateFsmResolveBtn');
+  const disambiguateRefireBtn = document.getElementById('disambiguateRefireBtn');
   const refireToggles = [
     [document.getElementById('refireToggle4'), 4],
     [document.getElementById('refireToggle3'), 3],
@@ -928,9 +935,13 @@
 
   function onCellClick(idx){
     if (won) return;
-    const el = cellEl(idx);
-    if (el.classList.contains('fired') && !game.is_refire_allowed(game.ai_target_size())) return;
 
+    // No frontend gate on refiring an already-fired cell — Game::fire is
+    // the sole authority on whether a given refire is actually permitted
+    // (the per-size toggle, plus the disambiguation/anchored-isolation/
+    // battleship-discriminating special-case allowances the coarse toggle
+    // check here used to miss entirely). An attempt that isn't currently
+    // allowed just comes back as the existing "cell already fired" error.
     const pos = selected.indexOf(idx);
     if (pos !== -1){
       selected.splice(pos, 1);
@@ -945,8 +956,9 @@
   }
 
   function refreshRefirableCells(){
-    const allowed = game.is_refire_allowed(game.ai_target_size());
-    gridScale.querySelectorAll('.cell.fired').forEach(el => el.classList.toggle('refirable', allowed));
+    // Always shown as clickable now — Game::fire decides whether a given
+    // refire actually goes through, not this cosmetic pointer/hover state.
+    gridScale.querySelectorAll('.cell.fired').forEach(el => el.classList.add('refirable'));
   }
 
   function renderSelection(){
@@ -988,9 +1000,97 @@
 
   function refreshAdvisory(){
     if (won) { advisoryReadout.innerHTML = ''; useAdvisoryBtn.disabled = true; return; }
-    const raw = game.ai_suggest();
+    // Prioritize resolving a pending Cruiser/Frigate disambiguation over
+    // ai_suggest()'s ordinary result — choose_shots() only tries its own
+    // no-refire disambiguation attempt, and silently falls through to
+    // Submarine hunting the moment that comes up empty (i.e. once every
+    // discriminating cell is already fired), which otherwise hides a stuck
+    // disambiguation behind an unrelated, perfectly valid-looking
+    // Submarine shot. Checking here — the one place both the "Use these 3"
+    // button and Auto-play's loop pull the suggestion from — means neither
+    // needs its own separate special-casing for this.
+    //
+    // Gated on ai_target_size() <= 1 (Battleship/Cruiser/Frigate all fully
+    // sunk), NOT ai_cruiser_disambiguation_pending()/ai_frigate_
+    // disambiguation_pending() — those flags are defined via the NON-refire
+    // disambiguation_shots(), so they go right back to false the moment
+    // every discriminating cell is already fired (the exact refire-needed
+    // case this is for), never actually gating anything on. ai_target_size()
+    // is a cheap, always-correct stand-in for "nothing bigger left to hunt
+    // ordinarily" — critically, it doesn't require ever computing
+    // consistent_cruiser_candidates/consistent_frigate_candidates just to
+    // check it, which (called before those sizes are actually sunk) is
+    // exactly the kind of premature, unbounded-candidate-count enumeration
+    // this codebase has a "fatal perf hang" history with.
+    let raw = '[]';
+    let parsed = [];
+    if (game.ai_target_size() <= 1){
+      const locked = game.update_fsm_and_resolve();
+      if (locked){
+        refreshHeatmaps();
+        refreshCruiserIdentified();
+      }
+      raw = game.ai_suggest_disambiguation_refire();
+      try { parsed = JSON.parse(raw); } catch { parsed = []; }
+      if (parsed.length !== 3){
+        // One tier further: a cell that's the ONLY remaining discriminator
+        // for a genuine "cluster of 3" tie (certain pivot, 2 mutually-
+        // exclusive ends) can have already spent its one-time bonus refire
+        // earlier resolving some other, now-settled ambiguity — leaving it
+        // permanently stuck under the normal cap even though one more
+        // clean refire would fully resolve it. See AiPlayer::
+        // disambiguation_shots_last_resort/is_last_resort_refire.
+        raw = game.ai_suggest_disambiguation_last_resort();
+        try { parsed = JSON.parse(raw); } catch { parsed = []; }
+      }
+    }
+    if (parsed.length !== 3){
+      raw = game.ai_suggest();
+    }
     suggested = JSON.parse(raw);
     renderSuggested();
+  }
+
+  // Manual "heatmap fully evolved" workflow, step 1: lock in the Cruisers'
+  // cross-reasoned layout (once cross-reasoning has actually resolved it),
+  // feed it into the ordinary FSM, rework the Cross-3/Cross-2 bags, and
+  // re-evaluate the heatmap. See Game::update_fsm_and_resolve.
+  function runUpdateFsmAndResolve(){
+    const locked = game.update_fsm_and_resolve();
+    statusLine.textContent = locked
+      ? 'Cruiser layout locked in — FSM, Cross-3/Cross-2 bags, and heatmap updated.'
+      : 'Nothing to lock in yet (already locked, or the Cruisers are not cross-reasoning-identified).';
+    refreshHeatmaps();
+    refreshCruiserIdentified();
+    refreshFleet();
+    refreshAdvisory();
+  }
+
+  // Manual "heatmap fully evolved" workflow, step 2: the best disambiguating
+  // salvo allowing one already-fired cell a one-time bonus refire, for when
+  // every discriminating coordinate is already spent (see Game::
+  // ai_suggest_disambiguation_refire). Populates the Fire Control slots,
+  // same as "Use these 3" — press Fire to actually submit it.
+  function runDisambiguateWithRefire(){
+    let indices = [];
+    try { indices = JSON.parse(game.ai_suggest_disambiguation_refire()); }
+    catch { indices = []; }
+    let message = 'Refire-based disambiguation salvo loaded — review and fire (may include an already-fired cell).';
+    if (indices.length === 0){
+      // Last-resort tier: for a "cluster of 3" tie whose discriminating
+      // cell(s) already spent their one-time bonus refire earlier —
+      // see AiPlayer::disambiguation_shots_last_resort.
+      try { indices = JSON.parse(game.ai_suggest_disambiguation_last_resort()); }
+      catch { indices = []; }
+      message = 'Last-resort disambiguation salvo loaded (a discriminating cell already spent its one-time refire earlier — this is a one-off exception) — review and fire.';
+    }
+    if (indices.length === 0){
+      statusLine.textContent = 'No refire-based disambiguating shot available right now.';
+      return;
+    }
+    selected = indices;
+    renderSelection();
+    statusLine.textContent = message;
   }
 
   function refreshBattleshipCross(){
@@ -1472,7 +1572,17 @@
       // ai.rs). Wait for that to resolve too, so auto-play actually gets
       // to fire the disambiguating shots instead of declaring victory the
       // instant the last real cell happens to be hit.
-      const layoutsResolved = !game.ai_cruiser_disambiguation_pending() && !game.ai_frigate_disambiguation_pending();
+      //
+      // Deliberately NOT ai_cruiser_disambiguation_pending()/ai_frigate_
+      // disambiguation_pending() — those are defined via the NON-refire
+      // disambiguation_shots(), so they report "resolved" the moment every
+      // discriminating cell is already fired, which is exactly the
+      // refire-needed case this check exists to catch. isFullyResolved()
+      // (see below, a `function` so it's hoisted and safe to call here) is
+      // based on actual cross-reasoning identification rather than "is
+      // there a suggested shot", so it's correct regardless of which tier
+      // (ordinary, capped refire, or last-resort) could still resolve it.
+      const layoutsResolved = isFullyResolved();
       if (bigShipsSunk && layoutsResolved){
         fleetClearedShown = true;
         // No popup here — the auto-play button turning green (see
@@ -1642,10 +1752,14 @@
     let cleared = won || fleetClearedShown;
 
     while (!cleared && shotsTaken < MAX_SHOTS){
+      // refreshAdvisory() (called by useAdvisoryBtn's own click handler)
+      // already prioritizes a pending Cruiser/Frigate disambiguation —
+      // lock-in then refire-based suggestion — over ai_suggest()'s
+      // ordinary result, so Auto-play gets that for free here.
       useAdvisoryBtn.click();
       if (fireBtn.disabled){
-        // No valid 3-cell advisory available (shouldn't normally happen) —
-        // stop rather than spin forever on a no-op.
+        // No valid 3-cell salvo available via any known strategy — stop
+        // rather than spin forever on a no-op.
         break;
       }
       fireBtn.click();
@@ -1683,23 +1797,19 @@
   // `autoPlayBtn` keeps reporting the MOST RECENT game's outcome live
   // throughout, same as it does outside a batch; `autoPlayBatchBtn`'s own
   // label just tracks overall batch progress.
-  // Whether the Cruiser heatmap still has a low-probability alternative
-  // cell anywhere on the board — i.e. whether the pink "alternative
-  // candidate" border (see `refreshHeatmaps`) would still be showing.
-  // Queries the backend directly rather than the DOM, so it works
-  // regardless of whether the Cruiser heatmap toggle happens to be
-  // checked at the moment (a display preference shouldn't affect
-  // whether the batch notices genuine remaining ambiguity).
-  function hasResidualCruiserAmbiguity(){
-    let grid;
-    try { grid = JSON.parse(game.cruiser_heatmap_json()); } catch { return false; }
-    for (let i = 0; i < 8; i++){
-      for (let j = 0; j < 8; j++){
-        const p = grid[i][j];
-        if (p > 0 && p < 0.80) return true;
-      }
-    }
-    return false;
+  // Whether the Battleship, Cruisers, AND Frigates are ALL genuinely
+  // identified — same "resolved" signal `resolution_status_json()` gives
+  // "Save board" (battleship_identified && cruiser_identified &&
+  // frigate_identified, via the cross-reasoning-aware `_refined` methods),
+  // not a threshold or a single ship type. Deliberately not the old
+  // Cruiser-only/>=0.80-probability heuristic this replaced: that one
+  // never looked at Frigates at all, so a game where Frigate
+  // disambiguation genuinely never resolved would silently pass and the
+  // batch would move straight on to the next game.
+  function isFullyResolved(){
+    let status;
+    try { status = JSON.parse(game.resolution_status_json()); } catch { return false; }
+    return !!status.resolved;
   }
 
   async function runAutoPlayBatch(){
@@ -1727,14 +1837,15 @@
       await runAutoPlay();
       batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
 
-      // Stop the whole batch (not just this game) the moment a finished
-      // game still has a low-probability Cruiser alternative — leaves
-      // this exact board on screen instead of immediately overwriting it
-      // with the next random game, so it can be studied manually (or
-      // rerun via "Replay board").
-      if (hasResidualCruiserAmbiguity()){
+      // Stop the whole batch (not just this game) unless EVERY ship
+      // layout — Battleship, both Cruisers, and all 3 Frigates — is
+      // genuinely established and correct, not just sunk. Leaves this
+      // exact board on screen instead of immediately overwriting it with
+      // the next random game, so it can be studied manually (or rerun via
+      // "Replay board").
+      if (!isFullyResolved()){
         stoppedForStudy = true;
-        statusLine.textContent = `Autorun batch stopped at game ${i}/${n}: a Cruiser alternative (pink border) is still showing after this game finished. Study this board, or use "Replay board" to rerun the same layout.`;
+        statusLine.textContent = `Autorun batch stopped at game ${i}/${n}: not every ship layout was established after this game finished. Study this board, or use "Replay board" to rerun the same layout.`;
         break;
       }
     }
@@ -1851,6 +1962,8 @@
     cross3BagBtn.addEventListener('click', () => openModal('Cross-3 Bags', buildCross3BagHtml()));
     cross2BagBtn.addEventListener('click', () => openModal('Cross-2 Bags', buildCross2BagHtml()));
     cruiserAliveBtn.addEventListener('click', () => openModal('Ship Alive Grids', buildShipAliveGridsHtml()));
+    updateFsmResolveBtn.addEventListener('click', runUpdateFsmAndResolve);
+    disambiguateRefireBtn.addEventListener('click', runDisambiguateWithRefire);
     refireToggles.forEach(([el, size]) => {
       el.addEventListener('change', () => {
         game.set_refire_allowed(size, el.checked);

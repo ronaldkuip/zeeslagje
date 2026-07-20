@@ -183,15 +183,25 @@ pub struct AiPlayer {
     /// cells hold that ship size), and skipping it would understate how
     /// much is actually known.
     salvo_history: Vec<([(usize, usize); 3], [usize; 3])>,
-    /// Whether `apply_cruiser_layout_elimination` has already fed its
-    /// one-time batch of size-3 (elsewhere)/size-2 (adjacency) FSM
-    /// eliminations in, once the Cruisers' exact layout was pinned down
-    /// via the heatmap — unlike `battleship_adjacency_processed`, this
-    /// fires as a single all-at-once event rather than incrementally, so
-    /// a plain flag (not a per-cell grid) is enough to skip the
-    /// (comparatively expensive) `consistent_cruiser_candidates` check on
-    /// every subsequent salvo once it's already done.
-    cruiser_layout_elimination_done: bool,
+    /// The Cruisers' exact 6-cell layout, once `update_fsm_and_resolve` has
+    /// locked it in — `None` until then. Unlike the old always-automatic
+    /// elimination this replaced, this is only ever set by that explicit,
+    /// user-triggered call (see its doc comment for why), so a cell can be
+    /// permanently excluded from `consistent_frigate_candidates` even
+    /// while the RAW `consistent_cruiser_candidates` hasn't collapsed to a
+    /// single hypothesis on its own — only the cross-reasoned identification
+    /// has. See `cells_confirmed_cruiser_or_adjacent`.
+    cruiser_layout_locked: Option<Vec<(usize, usize)>>,
+    /// Per-cell: whether this cell has already used its one-time "extra"
+    /// refire granted by `update_fsm_and_resolve`'s companion feature,
+    /// disambiguation-with-refire (see `disambiguation_shots`'
+    /// `allow_refire` parameter and `Game::fire`'s
+    /// `is_disambiguation_extra_refire` gate). Independent of the general
+    /// `refire_allowed` debug toggle and the Battleship/anchored-isolation
+    /// refire allowances — this one is capped at exactly one use per cell,
+    /// since (unlike those) it exists specifically to let the player pay
+    /// for new information with an extra shot, not to run indefinitely.
+    disambiguation_extra_refire_used: [[bool; 10]; 10],
     /// Memoized `consistent_cruiser_candidates`/`consistent_frigate_candidates`,
     /// keyed by `salvo_history.len()` — every JSON accessor the frontend
     /// polls (`resolution_status_json`, `cruiser_heatmap_json`,
@@ -234,7 +244,8 @@ impl AiPlayer {
             battleship_adjacency_processed: [[false; 10]; 10],
             cross3_entries: Vec::new(),
             cross2_entries: Vec::new(),
-            cruiser_layout_elimination_done: false,
+            cruiser_layout_locked: None,
+            disambiguation_extra_refire_used: [[false; 10]; 10],
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
             salvo_history: Vec::new(),
@@ -370,12 +381,6 @@ impl AiPlayer {
             // the exact salvo that sinks a Cruiser would otherwise see a
             // stale (pre-sinking) sunk count during its own apply_salvo call.
             self.refresh_cross3_entry_flags();
-            // Same one-round gap applies to `apply_cruiser_layout_elimination`'s
-            // cheap `size_fully_found(3)` pre-check — without re-running it
-            // here, the exact salvo that sinks the second Cruiser would
-            // see a stale sunk count and skip the elimination for a whole
-            // extra turn.
-            self.apply_cruiser_layout_elimination();
         }
         if size == 2 {
             // Frigate discovery (pinpointing exact cells) is deliberately
@@ -577,11 +582,6 @@ impl AiPlayer {
         self.refresh_cross3_entry_flags();
         self.refresh_cross2_entry_flags();
         self.refresh_cross4_entry_flags();
-
-        // Same idea as the Battleship adjacency fold-in above, one size
-        // down: once the Cruisers' exact layout is confirmed via the
-        // heatmap, feed that into the ordinary hunting FSM too.
-        self.apply_cruiser_layout_elimination();
     }
 
     /// The Battleship forbids orthogonal *and* diagonal adjacency to any other
@@ -646,36 +646,44 @@ impl AiPlayer {
         }
     }
 
-    /// Once the Cruisers' exact layout is confirmed (see
-    /// `cruiser_identified_cells`), feed that knowledge into the ordinary
-    /// hunting FSM — the same idea as `apply_battleship_adjacency_elimination`,
-    /// one size down:
+    /// Manual counterpart to the old always-automatic Cruiser-layout
+    /// elimination — triggered from the UI's "Update FSM and resolve"
+    /// button once the player judges the heatmap has stopped evolving
+    /// (see `Game::update_fsm_and_resolve`), rather than firing silently
+    /// on every salvo. Uses `cruiser_identified_cells_refined` (the
+    /// cross-reasoning-aware identification), so it can lock in a layout
+    /// the RAW, non-cross-reasoned `consistent_cruiser_candidates` hasn't
+    /// collapsed to a single hypothesis on its own yet.
+    ///
+    /// Once locked in (`cruiser_layout_locked`, checked by
+    /// `cells_confirmed_cruiser_or_adjacent`):
     /// - Every inner cell that ISN'T one of the 6 real Cruiser cells can
     ///   never hold a Cruiser either (there are only 2, and we now know
     ///   exactly where both are) — eliminate size 3 there.
     /// - Every cell adjacent to a real Cruiser cell (including diagonally)
     ///   can never hold a Frigate — eliminate size 2 there.
     ///
-    /// Runs as a single one-time batch (`cruiser_layout_elimination_done`
-    /// guards against repeating it — cheap, since re-deriving
-    /// `cruiser_identified_cells` on every subsequent salvo would
-    /// otherwise redo the full candidate enumeration for no new benefit).
-    fn apply_cruiser_layout_elimination(&mut self) {
-        if self.cruiser_layout_elimination_done {
-            return;
+    /// Then reworks the results: `cross3_entries`/`cross2_entries` are
+    /// refreshed against the newly eliminated state, and the memoized
+    /// candidate lists (`cruiser_candidates_cache`/`frigate_candidates_cache`)
+    /// are cleared so the next heatmap read reflects the narrower
+    /// `cells_confirmed_cruiser_or_adjacent` exclusion — their cache key
+    /// (`salvo_history.len()`) doesn't change here (no new salvo is fired),
+    /// so without an explicit clear they'd keep serving the stale,
+    /// pre-lock candidate lists.
+    ///
+    /// Idempotent and safe to call repeatedly — a no-op once already
+    /// locked, or if the Cruisers aren't cross-reasoning-identified yet.
+    /// Returns whether it actually locked anything in this call.
+    pub fn update_fsm_and_resolve(&mut self) -> bool {
+        if self.cruiser_layout_locked.is_some() {
+            return false;
         }
-        // Cheap pre-check before the comparatively expensive candidate
-        // enumeration: the heatmap can't possibly have narrowed to a
-        // single hypothesis before both Cruisers are actually sunk (there
-        // would still be an entirely unfound one to place anywhere).
-        if !self.size_fully_found(3) {
-            return;
-        }
-        let cells = self.cruiser_identified_cells();
+        let cells = self.cruiser_identified_cells_refined();
         if cells.is_empty() {
-            return;
+            return false;
         }
-        self.cruiser_layout_elimination_done = true;
+        self.cruiser_layout_locked = Some(cells.clone());
 
         let real: std::collections::HashSet<(usize, usize)> = cells.iter().copied().collect();
         for row in INNER_LO..=INNER_HI {
@@ -705,6 +713,12 @@ impl AiPlayer {
                 }
             }
         }
+
+        self.refresh_cross3_entry_flags();
+        self.refresh_cross2_entry_flags();
+        *self.cruiser_candidates_cache.borrow_mut() = None;
+        *self.frigate_candidates_cache.borrow_mut() = None;
+        true
     }
 
     /// Mark a "beam" in both directions through (row, col), reaching `reach` cells
@@ -949,10 +963,13 @@ impl AiPlayer {
 
     /// The Cruisers' own confirmed cells, plus every cell adjacent to them
     /// (including diagonally — no ship may ever be placed adjacent to
-    /// another), once `consistent_cruiser_candidates` has narrowed to a
-    /// single remaining hypothesis. Empirically validated at scale (a
-    /// 1000-game self-play run, ~2M per-cell checks) to never be wrong
-    /// when it reaches that point — see
+    /// another), once EITHER `consistent_cruiser_candidates` has narrowed
+    /// to a single remaining hypothesis on its own, OR `cruiser_layout_locked`
+    /// has been set by `update_fsm_and_resolve` (the cross-reasoned
+    /// identification, which can resolve a layout the raw candidate list
+    /// alone hasn't). Empirically validated at scale (a 1000-game
+    /// self-play run, ~2M per-cell checks) to never be wrong when the raw
+    /// list reaches that point on its own — see
     /// `self_play_discovers_every_ship_of_size_at_least_2_by_game_end`'s
     /// heatmap-soundness assertion — so this is used as ground truth to
     /// prune the Frigate search, exactly like `cells_confirmed_battleship`
@@ -960,8 +977,15 @@ impl AiPlayer {
     fn cells_confirmed_cruiser_or_adjacent(&self) -> [[bool; 10]; 10] {
         let mut out = [[false; 10]; 10];
         let candidates = self.consistent_cruiser_candidates();
-        if candidates.len() == 1 {
-            for &(r, c) in &candidates[0] {
+        let real: Option<Vec<(usize, usize)>> = if let Some(locked) = &self.cruiser_layout_locked {
+            Some(locked.clone())
+        } else if candidates.len() == 1 {
+            Some(candidates[0].iter().copied().collect())
+        } else {
+            None
+        };
+        if let Some(cells) = real {
+            for &(r, c) in &cells {
                 for dr in -1isize..=1 {
                     for dc in -1isize..=1 {
                         let nr = r as isize + dr;
@@ -1336,7 +1360,25 @@ impl AiPlayer {
     /// so it's better to defer and let that happen first, then step in
     /// with dedicated effort once the residual ambiguity has already
     /// shrunk to something a handful of shots can realistically resolve.
-    fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Option<[(usize, usize); 3]> {
+    /// `allow_refire`: when true, a cell already fired is still treated as
+    /// eligible for `informative` (see below) provided it hasn't already
+    /// spent its one-time bonus refire (`disambiguation_extra_refire_used`)
+    /// — see `disambiguation_shots_with_refire`. `false` reproduces the
+    /// original, always-fired-cells-excluded behaviour.
+    /// `ignore_refire_cap`: when true (and `allow_refire` is also true),
+    /// a cell that has ALREADY spent its one-time bonus refire is still
+    /// eligible — see `disambiguation_shots_last_resort`. This exists for
+    /// the genuine dead end one tier further than the ordinary bonus
+    /// refire: a "cluster of 3" Frigate/Cruiser ambiguity (a certain pivot
+    /// cell plus 2 mutually-exclusive end cells) whose 2 end cells both
+    /// already spent their bonus refire earlier resolving some OTHER,
+    /// now-settled ambiguity, leaving this specific tie permanently
+    /// unbreakable under the normal one-bonus-per-cell rule even though a
+    /// single clean refire (paired with 2 known-neutral fillers) would
+    /// fully resolve it. Should only ever be reached once
+    /// `disambiguation_shots(..., true, false)` has already come back
+    /// empty — see `disambiguation_shots_last_resort`'s doc comment.
+    fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>], allow_refire: bool, ignore_refire_cap: bool) -> Option<[(usize, usize); 3]> {
         const MAX_CANDIDATES_TO_ATTEMPT: usize = 80;
         if candidates.len() <= 1 || candidates.len() > MAX_CANDIDATES_TO_ATTEMPT {
             return None;
@@ -1358,7 +1400,12 @@ impl AiPlayer {
         let total = candidates.len();
         let mut informative: Vec<(usize, usize)> = counts
             .iter()
-            .filter(|&(&(r, c), &n)| n > 0 && n < total && !self.fired[r][c])
+            .filter(|&(&(r, c), &n)| {
+                n > 0
+                    && n < total
+                    && (!self.fired[r][c]
+                        || (allow_refire && (ignore_refire_cap || !self.disambiguation_extra_refire_used[r][c])))
+            })
             .map(|(&cell, _)| cell)
             .collect();
 
@@ -1386,28 +1433,34 @@ impl AiPlayer {
         }
 
         let mut pool = informative;
-        if pool.len() < 3 {
-            // Not uncommon by the time a class is fully sunk: the inner 8x8
-            // is often already almost entirely fired (ordinary hunting
-            // covers it heavily), leaving only 1-2 genuinely informative
-            // cells. Pad with ANY other unfired cell on the whole board —
-            // outer ring included — so a shot can still be formed; these
-            // carry no discriminating power of their own for this ship
-            // size, they just fill out the mandatory 3-cell salvo. Bailing
-            // out here instead (as an earlier version did, restricting the
-            // padding search to the inner 8x8 only) meant genuine,
-            // resolvable ambiguity got silently reported as "nothing left
-            // to disambiguate" the moment the inner board ran low on
-            // untouched cells — even with real informative cells still
-            // sitting right there unfired.
-            'pad: for r in 0..10 {
-                for c in 0..10 {
-                    if pool.len() >= 3 {
-                        break 'pad;
-                    }
-                    if !self.fired[r][c] && !pool.contains(&(r, c)) {
-                        pool.push((r, c));
-                    }
+        // Always pad in at least 2 filler cells, even when the informative
+        // set alone is already >= 3 — never just enough to reach the bare
+        // minimum of 3. Padding to exactly 3 total is a trap whenever
+        // `informative` itself has exactly 2 (or 3) cells that are mutually
+        // exclusive alternatives across the surviving hypotheses (e.g. 2
+        // hypotheses differing in exactly one cell each, like "B4 or C5
+        // completes this Frigate"): the O(n^3) search below can only ever
+        // try whichever single triple the pool happens to contain, so
+        // padding to exactly 3 forces BOTH alternatives into that one
+        // triple with no other combination ever compared against it. That
+        // specific combo is provably the worst possible choice here —
+        // firing both alternatives together always yields the identical
+        // bag regardless of which hypothesis is real (exactly one of them
+        // is always the hit), teaching nothing — but the search never gets
+        // a chance to discover that firing just ONE of them plus 2 neutral
+        // fillers would fully resolve it instead, because that
+        // strictly-better triple was never actually a candidate. Fillers
+        // carry no discriminating power of their own; they only need to
+        // exist so genuine alternative triples are available to compare.
+        let mut fillers_added = 0;
+        'pad: for r in 0..10 {
+            for c in 0..10 {
+                if fillers_added >= 2 {
+                    break 'pad;
+                }
+                if !self.fired[r][c] && !pool.contains(&(r, c)) {
+                    pool.push((r, c));
+                    fillers_added += 1;
                 }
             }
         }
@@ -1521,7 +1574,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_cruiser_candidates())
+        self.disambiguation_shots(&self.consistent_cruiser_candidates(), false, false)
     }
 
     /// Same idea as `cruiser_disambiguation_shots`, one size down.
@@ -1529,7 +1582,118 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_frigate_candidates())
+        self.disambiguation_shots(&self.consistent_frigate_candidates(), false, false)
+    }
+
+    /// Same idea as `cruiser_disambiguation_shots`, but allows the salvo to
+    /// include an already-fired cell that hasn't yet spent its one-time
+    /// bonus refire (see `disambiguation_extra_refire_used`) — for the
+    /// "heatmap fully evolved" dead end where every cell the remaining
+    /// hypotheses disagree on has already been fired (see `disambiguation_
+    /// shots`' own `informative.is_empty()` case): pairing one of those
+    /// cells with 2 fresh cells whose own value the AI already knows for
+    /// certain (e.g. cells proven to hold nothing of any relevant size)
+    /// isolates that cell's true value in the new salvo's bag, resolving
+    /// an ambiguity no ordinary (never-refire) shot ever could. `Game::fire`
+    /// only allows the refire through when it matches the specific cell(s)
+    /// this returns — see `is_disambiguation_extra_refire`.
+    pub fn cruiser_disambiguation_shots_with_refire(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
+        self.disambiguation_shots(&self.consistent_cruiser_candidates(), true, false)
+    }
+
+    /// Same idea as `cruiser_disambiguation_shots_with_refire`, one size down.
+    pub fn frigate_disambiguation_shots_with_refire(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
+        self.disambiguation_shots(&self.consistent_frigate_candidates(), true, false)
+    }
+
+    /// Combined entry point for the UI's "disambiguate (allow 1 refire)"
+    /// button — same Cruiser-before-Frigate priority as `choose_shots`'
+    /// ordinary (no-refire) disambiguation block, since narrowing the
+    /// Cruisers first also shrinks the Frigate search.
+    pub fn disambiguation_shots_with_refire(&self) -> Option<[(usize, usize); 3]> {
+        self.cruiser_disambiguation_shots_with_refire()
+            .or_else(|| self.frigate_disambiguation_shots_with_refire())
+    }
+
+    /// Same idea as `cruiser_disambiguation_shots_with_refire`, but ALSO
+    /// eligible for a cell that has already spent its one-time bonus
+    /// refire — the last-resort tier, one further than that: a "cluster of
+    /// 3" ambiguity (certain pivot cell, 2 mutually-exclusive end cells)
+    /// can end up with BOTH end cells' bonus refire already spent
+    /// resolving some earlier, now-settled ambiguity, leaving this
+    /// specific tie permanently unbreakable under the normal cap even
+    /// though a single clean refire would fully resolve it. Only ever
+    /// worth trying once `cruiser_disambiguation_shots_with_refire` itself
+    /// has already come back empty — see `is_last_resort_refire`, which
+    /// gates `Game::fire` letting this through, for why this doesn't just
+    /// replace the capped version outright: it's deliberately a narrower,
+    /// harder-to-reach fallback, not a blanket relaxation of the cap.
+    pub fn cruiser_disambiguation_shots_last_resort(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
+        self.disambiguation_shots(&self.consistent_cruiser_candidates(), true, true)
+    }
+
+    /// Same idea as `cruiser_disambiguation_shots_last_resort`, one size down.
+    pub fn frigate_disambiguation_shots_last_resort(&self) -> Option<[(usize, usize); 3]> {
+        if self.salvo_history.is_empty() {
+            return None;
+        }
+        self.disambiguation_shots(&self.consistent_frigate_candidates(), true, true)
+    }
+
+    /// Combined entry point for the last-resort tier — same Cruiser-before-
+    /// Frigate priority as `disambiguation_shots_with_refire`. The UI should
+    /// only ever reach for this once `disambiguation_shots_with_refire`
+    /// itself has returned `None` (see `is_last_resort_refire`).
+    pub fn disambiguation_shots_last_resort(&self) -> Option<[(usize, usize); 3]> {
+        self.cruiser_disambiguation_shots_last_resort()
+            .or_else(|| self.frigate_disambiguation_shots_last_resort())
+    }
+
+    /// True if (row, col) is fired, hasn't already spent its one-time bonus
+    /// refire, and is part of the exact salvo `disambiguation_shots_with_
+    /// refire` would currently suggest — used by `Game::fire` to let that
+    /// specific refire through even with the general refire-allowed toggle
+    /// off, mirroring `is_battleship_discriminating_refire`/`is_anchored_
+    /// isolation_refire` one size up.
+    pub fn is_disambiguation_extra_refire(&self, row: usize, col: usize) -> bool {
+        self.fired[row][col]
+            && !self.disambiguation_extra_refire_used[row][col]
+            && self.disambiguation_shots_with_refire().is_some_and(|shots| shots.contains(&(row, col)))
+    }
+
+    /// Marks (row, col) as having spent its one-time bonus refire — called
+    /// by `Game::fire` once a salvo `is_disambiguation_extra_refire` let
+    /// through has actually been fired, so it can never be granted a
+    /// second bonus refire.
+    pub fn mark_disambiguation_extra_refire_used(&mut self, row: usize, col: usize) {
+        self.disambiguation_extra_refire_used[row][col] = true;
+    }
+
+    /// True if (row, col) is fired and is part of the exact salvo
+    /// `disambiguation_shots_last_resort` would currently suggest —
+    /// deliberately requires `disambiguation_shots_with_refire` (the
+    /// capped tier) to ALREADY be `None` before this can ever be true, so
+    /// the one-time-bonus cap can never be bypassed just because this
+    /// function exists — only reachable once the capped tier has
+    /// genuinely nothing left to offer. Unlike `is_disambiguation_extra_
+    /// refire`, not capped at one use per cell: by the time this is even
+    /// checked, that cap has already done its job once (that's WHY the
+    /// capped tier came back empty) — see `disambiguation_shots`'
+    /// `ignore_refire_cap` doc comment for the exact scenario this exists
+    /// for.
+    pub fn is_last_resort_refire(&self, row: usize, col: usize) -> bool {
+        self.fired[row][col]
+            && self.disambiguation_shots_with_refire().is_none()
+            && self.disambiguation_shots_last_resort().is_some_and(|shots| shots.contains(&(row, col)))
     }
 
     /// Whether `choose_shots` currently has a genuine Cruiser-disambiguating
