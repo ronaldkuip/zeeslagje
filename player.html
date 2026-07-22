@@ -1,0 +1,1697 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battleship — Player</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%E2%9A%93</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --deep-sea:#0B2436;
+    --deep-sea-2:#0E2C42;
+    --chart-paper:#EFE6D3;
+    --ink:#122031;
+    --brass:#B8892B;
+    --brass-bright:#D9A83E;
+    --coral:#C1503D;
+    --coral-bright:#D8674F;
+    --teal:#4FA9A0;
+    --grid-line:rgba(239,230,211,0.14);
+    --grid-line-strong:rgba(239,230,211,0.28);
+    --muted:#7C93A8;
+    --paper-muted:#8A7C5C;
+    --focus:#D9A83E;
+    --petrol-blue:#0B5563;
+    --petrol-blue-border:rgba(140,210,220,0.25);
+    --shallow-water:#B7D9E8;
+    --shallow-water-border:rgba(20,60,90,0.35);
+    --cross-yellow:#F5D90A;
+    --flag-green:#3F8F5C;
+    --flag-blue:#3B6FC4;
+  }
+
+  *{box-sizing:border-box;}
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important;}
+  }
+
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 800px at 15% -10%, #123350 0%, transparent 60%),
+      radial-gradient(1000px 700px at 110% 10%, #0e2c42 0%, transparent 55%),
+      var(--deep-sea);
+    color:var(--chart-paper);
+    font-family:'IBM Plex Sans', sans-serif;
+    min-height:100vh;
+    padding:32px 20px 60px;
+  }
+  a{color:inherit;}
+  .wrap{max-width:1180px; margin:0 auto;}
+
+  header.masthead{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    gap:20px;
+    flex-wrap:wrap;
+    border-bottom:1px solid var(--grid-line-strong);
+    padding-bottom:18px;
+    margin-bottom:0;
+  }
+  header.masthead h1{
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:400;
+    font-style:normal;
+    font-size:clamp(28px, 4vw, 40px);
+    letter-spacing:0.2px;
+    margin:0;
+    color:var(--chart-paper);
+  }
+  header.masthead h1 .tagline{
+    font-size:clamp(20px, 3vw, 28px);
+  }
+  header.masthead .subtitle{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--brass-bright);
+  }
+  .page-switch-btn{text-decoration:none; display:inline-block;}
+
+  /* 2 independent board columns side by side — each one is what used to
+     be the whole page's single column (chart on top, info panels below). */
+  .boards-row{
+    display:flex;
+    gap:28px;
+    align-items:flex-start;
+    overflow-x:auto;
+    padding-bottom:4px; /* breathing room above a horizontal scrollbar, if one appears */
+  }
+  .board-title{
+    font-family:'Newsreader', serif;
+    font-weight:600;
+    font-style:italic;
+    font-size:22px;
+    letter-spacing:0.2px;
+    text-align:center;
+    margin:0;
+    padding:10px 16px;
+    color:var(--chart-paper);
+    border:1px solid var(--grid-line-strong);
+    border-radius:6px;
+  }
+  .board-meta{
+    /* Hidden from view — turnNo/hitCount/hitTotal elements stay in the DOM
+       (still tracked/updated by the JS below) so nothing needs guarding,
+       they're just no longer shown between the title and the board. */
+    display:none;
+  }
+  .board-meta b{color:var(--chart-paper);}
+
+  .layout{
+    display:flex;
+    flex-direction:column;
+    width:560px;
+    flex-shrink:0; /* never let .boards-row's flex squeeze this narrower — scroll instead of wrapping/shrinking */
+  }
+
+  /* ---------- Chart panel ---------- */
+  .chart-card{
+    background:linear-gradient(180deg, var(--deep-sea-2), var(--deep-sea));
+    border:1px solid var(--grid-line-strong);
+    border-radius:6px;
+    padding:20px;
+    margin-bottom:28px; /* .layout no longer has a uniform gap (see .board-title), so this alone keeps the space before <aside> */
+    position:relative;
+  }
+  .chart-card::before{
+    content:"";
+    position:absolute; inset:0;
+    border-radius:6px;
+    pointer-events:none;
+    box-shadow:inset 0 0 60px rgba(0,0,0,0.35);
+  }
+
+  .grid-scale{
+    display:grid;
+    grid-template-columns:28px repeat(10, 1fr);
+    gap:3px;
+  }
+  .corner{ }
+  .col-label, .row-label{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--brass-bright);
+    letter-spacing:0.05em;
+  }
+  .row-label{ height:100%; }
+
+  .cell{
+    aspect-ratio:1/1;
+    background:rgba(239,230,211,0.03);
+    border:1px solid var(--grid-line);
+    border-radius:2px;
+    cursor:pointer;
+    position:relative;
+    transition:background 120ms ease, border-color 120ms ease, transform 80ms ease;
+  }
+  .cell.outer{
+    background-color:var(--petrol-blue);
+    border-color:var(--petrol-blue-border);
+  }
+  .cell.inner{
+    background-color:var(--shallow-water);
+    border-color:var(--shallow-water-border);
+  }
+  /* background-color, not the `background` shorthand — the shorthand resets
+     background-image to none, which would hide a .wave/.flame marker's icon
+     the moment the cell is hovered/selected/fired (only reappearing once
+     that higher-specificity state cleared). */
+  .cell:hover:not(.fired):not(.disabled):not(.locked){
+    background-color:rgba(217,168,62,0.14);
+    border-color:var(--brass);
+  }
+  /* Placement board, once the fleet is frozen (see freezeAndStart) — no
+     opacity change like .disabled, the placed ship colours stay legible,
+     just no longer interactive. */
+  .cell.locked{cursor:not-allowed;}
+  .cell:focus-visible{
+    outline:2px solid var(--focus);
+    outline-offset:2px;
+  }
+  .cell.selected{
+    background-color:rgba(217,168,62,0.32);
+    border-color:var(--brass-bright);
+  }
+  .cell.fired{
+    cursor:pointer;
+    background-color:rgba(124,147,168,0.10);
+    border-color:var(--grid-line);
+  }
+  .cell.fired.selected{
+    background-color:rgba(217,168,62,0.32);
+    border-color:var(--brass-bright);
+  }
+  .cell.fired::after{
+    content:"";
+    position:absolute; left:50%; top:50%;
+    width:5px; height:5px;
+    background:var(--muted);
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+  }
+  /* Manual player markers, independent of the .fired game state:
+     - fired cells (a salvo's bag never pins a hit to one exact cell,
+       except an all-zero bag, which is auto-marked) cycle
+       initial -> wave -> flame -> initial per click.
+     - not-yet-fired cells cycle initial(blue) -> flame -> wave -> initial
+       per click, letting the player pencil in a suspected layout.
+     The wave mark reuses the Solver Page's own squiggly-water glyph (see
+     .cell.fully-eliminated there); both are self-contained so they render
+     the same whether or not the cell also has .fired. */
+  .cell.wave::after{
+    content:"";
+    position:absolute; left:50%; top:50%;
+    width:0; height:0;
+    background:none;
+    border-radius:0;
+    transform:translate(-50%,-50%);
+  }
+  .cell.wave{
+    background-image:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M2%206%20Q4%204%206%206%20T10%206%20T14%206%20T18%206%20T22%206'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M2%2012%20Q4%2010%206%2012%20T10%2012%20T14%2012%20T18%2012%20T22%2012'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3Cpath%20d='M2%2018%20Q4%2016%206%2018%20T10%2018%20T14%2018%20T18%2018%20T22%2018'%20stroke='white'%20stroke-width='1.5'%20fill='none'%20stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;
+    background-position:center;
+    background-size:65% 65%;
+  }
+  .cell.flame::after{
+    content:"\1F525";
+    position:absolute; left:50%; top:50%;
+    width:auto; height:auto;
+    background:none;
+    border-radius:0;
+    font-size:16px;
+    line-height:1;
+    transform:translate(-50%,-50%);
+  }
+  .cell.suggested::before{
+    content:"";
+    position:absolute; inset:3px;
+    border:1.5px dashed var(--teal);
+    border-radius:2px;
+    animation:pulse-ring 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse-ring{
+    0%,100%{opacity:0.45;}
+    50%{opacity:1;}
+  }
+  /* A board with no Fire Control (nothing to submit a selection to) makes
+     every cell one of these instead of clickable — see createBoard's
+     hasControls. */
+  .cell.disabled{cursor:not-allowed; opacity:0.6;}
+
+  /* Placement mode (board 2) — a click just paints "ship here"; see
+     onPlacementCellClick/shapesViolateRules. Blocks of 2/3/4 get coloured
+     over this via the identified-* classes below once formed. */
+  .cell.ship-placed{
+    background-color:var(--brass-bright);
+    border-color:var(--brass);
+  }
+  /* Overlaid exactly over the 10x10 cell block (not the label row/column)
+     via grid-column/row in buildGrid — lit up once checkFleetLegality()
+     confirms the painted blocks form a complete fleet. */
+  .fleet-frame{
+    pointer-events:none;
+    border-radius:4px;
+  }
+  .fleet-frame.legal{
+    outline:2px solid #ffffff;
+    outline-offset:2px;
+  }
+
+  /* Ship-type identification — this page's own simple scheme, independent
+     of the Solver Page's probability/cross-reasoning colour conventions:
+     once a ship's exact layout is known, its cells paint solid by type. */
+  .cell.identified-battleship{background:var(--cross-yellow) !important; border-color:var(--cross-yellow);}
+  .cell.identified-cruiser{background:var(--coral) !important; border-color:var(--coral);}
+  .cell.identified-frigate{background:var(--flag-green) !important; border-color:var(--flag-green);}
+
+  /* Placement board only (see refreshEnemyIdentified): the player's own
+     ship-type colours (above) are ground truth and never change once
+     frozen — this is a SEPARATE signal for "the attacking AI has now
+     fully identified this ship". One outline per ship BLOCK, not per
+     cell — same grid-column/row-spanning overlay trick as .fleet-frame,
+     so the border wraps the whole straight-line shape (gaps included)
+     instead of boxing in each of its cells separately. */
+  .enemy-ship-outline{
+    /* Every .cell has position:relative, which makes cells "positioned"
+       elements — CSS always paints those AFTER (on top of) static ones,
+       regardless of DOM order. Without a position here, this div (despite
+       being appended later, over cells it visually overlaps thanks to the
+       negative outline-offset below) got painted in the earlier static
+       pass and was invisible underneath every cell. position:relative
+       puts it in the same later, DOM-order-respecting paint pass. */
+    position:relative;
+    pointer-events:none;
+    border-radius:4px;
+    outline:3px solid #ffffff;
+    outline-offset:-3px;
+  }
+
+  .chart-footnote{
+    margin-top:14px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--muted);
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+  .legend-item{display:flex; align-items:center; gap:6px;}
+  .legend-swatch{width:10px; height:10px; border-radius:2px; display:inline-block;}
+  .ship-sunk-count{color:var(--chart-paper); opacity:0.7;}
+
+  /* ---------- Info panels (below the chart, not beside it) ----------
+     2 explicit columns: AI Advisory + Fire Control stacked on the left,
+     Salvo Log to their right — not an auto-flowing grid, so this exact
+     arrangement holds regardless of viewport width.
+     align-items:stretch (the flex default, stated explicitly here) makes
+     both columns match the taller one's height — in practice the left
+     column (AI Advisory + Fire Control's several button rows), so the
+     right column stretches to meet it. */
+  aside{
+    display:flex;
+    gap:18px;
+    align-items:stretch;
+    flex-wrap:wrap;
+  }
+  .panel-col{
+    flex:1 1 250px;
+    min-width:250px;
+    display:flex;
+    flex-direction:column;
+  }
+  /* The last panel in each column absorbs any extra stretched height
+     (harmless for the left column, which already IS the tallest and so
+     has none to absorb) — for the Salvo Log column specifically, this is
+     what actually pushes its bottom edge down to meet Fire Control's. */
+  .panel-col > .panel:last-child{
+    flex:1;
+    min-height:0;
+    display:flex;
+    flex-direction:column;
+  }
+  .panel{
+    background:var(--chart-paper);
+    color:var(--ink);
+    border-radius:6px;
+    padding:18px 20px;
+    margin-bottom:18px;
+  }
+  .panel h2{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--paper-muted);
+    margin:0 0 12px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+  }
+  /* Empty (not started) / "(session in play)" / "(session finished)" —
+     see updateLogStatus(). Normal case, not uppercase/letter-spaced like
+     the rest of the heading, so the parenthetical reads naturally. */
+  .log-status{
+    text-transform:none;
+    letter-spacing:normal;
+    color:var(--teal);
+  }
+
+  .advisory-readout{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:14px;
+    letter-spacing:0.06em;
+    display:flex;
+    gap:10px;
+    margin-bottom:12px;
+  }
+  .advisory-chip{
+    background:rgba(79,169,160,0.14);
+    border:1px solid var(--teal);
+    color:#245a54;
+    padding:5px 10px;
+    border-radius:3px;
+    font-weight:600;
+    display:inline-block;
+    min-width:28px;
+    text-align:center;
+  }
+  /* Once the game is finished (see refreshAdvisory), the 3 boxes stay in
+     place rather than disappearing — just with nothing suggested inside. */
+  .advisory-chip-empty{
+    background:rgba(124,147,168,0.10);
+    border-color:var(--grid-line);
+  }
+  .btn{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+    border:none;
+    border-radius:3px;
+    padding:9px 14px;
+    cursor:pointer;
+    transition:filter 120ms ease, transform 80ms ease;
+  }
+  .btn:active{transform:translateY(1px);}
+  .btn:disabled{cursor:not-allowed; opacity:0.45;}
+  .btn:focus-visible{outline:2px solid var(--deep-sea); outline-offset:2px;}
+  .btn-teal{background:var(--teal); color:#0c2320;}
+  .btn-teal:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-brass{background:var(--brass); color:#2a1c00;}
+  .btn-brass:hover:not(:disabled){filter:brightness(1.1);}
+  .btn-ghost{background:transparent; border:1px solid var(--paper-muted); color:var(--ink);}
+  .btn-ghost:hover:not(:disabled){background:rgba(0,0,0,0.05);}
+  .btn-blue{background:var(--flag-blue); color:#eaf1ff;}
+  .btn-blue:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-red{background:var(--coral-bright); color:#3a0a00;}
+  .btn-red:hover:not(:disabled){filter:brightness(1.08);}
+  .btn-green{background:var(--flag-green); color:#eafff1;}
+  .btn-green:hover:not(:disabled){filter:brightness(1.08);}
+
+  .fire-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  .selection-slots{
+    display:flex; gap:6px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+  }
+  .slot{
+    min-width:38px;
+    padding:5px 6px;
+    text-align:center;
+    border:1px solid var(--paper-muted);
+    border-radius:3px;
+    color:var(--ink);
+    background:rgba(0,0,0,0.03);
+    font-family:inherit;
+    font-size:inherit;
+    text-transform:uppercase;
+  }
+  .slot::placeholder{color:var(--paper-muted); font-style:italic; text-transform:none;}
+  .slot:focus{
+    outline:2px solid var(--focus);
+    outline-offset:1px;
+    border-color:var(--brass-bright);
+  }
+
+  .log-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    flex:1;
+    min-height:0; /* lets this actually shrink to its flex parent's bound, instead of growing to fit all content, so overflow-y can kick in */
+    max-height:340px; /* hard cap regardless of the flex-stretch matching above — past this, the list itself scrolls instead of the panel/page growing */
+    overflow-y:auto;
+    padding-right:2px;
+  }
+  .log-entry{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12.5px;
+    border-left:2px solid var(--brass);
+    padding:4px 0 4px 10px;
+    line-height:1.6;
+  }
+  .log-entry .turn{color:var(--paper-muted); margin-right:6px;}
+  .log-entry .coords{color:var(--ink); font-weight:600;}
+  .log-entry .result{color:#245a54;}
+  .log-entry .sunk{
+    display:block;
+    color:var(--coral);
+    font-weight:600;
+    margin-top:2px;
+  }
+  .log-entry .discovered{
+    display:block;
+    color:#8a6d00;
+    font-weight:600;
+    margin-top:2px;
+  }
+  .log-empty{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--paper-muted);
+    font-style:italic;
+  }
+
+  .status-line{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    color:var(--paper-muted);
+    margin-top:10px;
+    min-height:16px;
+  }
+
+  .loading-notice, .error-notice{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+    color:var(--muted);
+    padding:14px 16px;
+    border:1px dashed var(--grid-line-strong);
+    border-radius:4px;
+  }
+  .error-notice{color:var(--coral-bright); border-color:var(--coral);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <h1>Battleship <span class="tagline">(An imperfect information game)</span></h1>
+      <div class="subtitle">The Player Page</div>
+    </div>
+    <a class="btn btn-brass page-switch-btn" href="index.html">&larr; Solver Page</a>
+  </header>
+
+  <div id="bootNotice" class="loading-notice">Loading chart table…</div>
+
+  <div id="boardsRow" class="boards-row" style="display:none;">
+    <!-- Board 1 and Board 2 are identical, independent game instances —
+         see BOARD_SUFFIXES/createBoard in the script below. -->
+    <div class="layout" data-board="1">
+      <h2 class="board-title">Defeat the enemy!</h2>
+      <div class="board-meta">Turn <b id="turnNo-1">1</b> &nbsp;·&nbsp; Hits <b id="hitCount-1">0</b>/<span id="hitTotal-1">20</span></div>
+      <section class="chart-card">
+        <div class="grid-scale" id="gridScale-1">
+          <div class="corner"></div>
+        </div>
+        <div class="chart-footnote">
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--petrol-blue)"></span>outer ring — submarines only</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8&times;8 — all ships</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship <span class="ship-sunk-count" id="battleshipSunkLabel-1">0/1 sunk</span></span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral)"></span>Cruiser <span class="ship-sunk-count" id="cruiserSunkLabel-1">0/2 sunk</span></span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Frigate <span class="ship-sunk-count" id="frigateSunkLabel-1">0/3 sunk</span></span>
+        </div>
+      </section>
+
+      <aside>
+        <div class="panel-col">
+          <div class="panel">
+            <h2>AI Advisor</h2>
+            <div class="advisory-readout" id="advisoryReadout-1"></div>
+            <button class="btn btn-teal" id="useAdvisoryBtn-1">Use these 3</button>
+          </div>
+
+          <div class="panel">
+            <h2>Fire Control</h2>
+            <div class="selection-slots" id="selectionSlots-1"></div>
+            <div class="fire-row" style="margin-top:12px;">
+              <button class="btn btn-brass" id="fireBtn-1" disabled>Fire salvo</button>
+              <button class="btn btn-ghost" id="clearBtn-1">Clear</button>
+            </div>
+            <div class="status-line" id="statusLine-1">Type 3 coordinates above, or accept the AI's advisory.</div>
+            <div class="fire-row" style="margin-top:10px;">
+              <button class="btn btn-blue" id="autoPlayBtn-1" title="Repeatedly use the AI advisory and fire — up to 30 salvos while still hunting, uncapped afterward until the Battleship, Cruisers, and Frigates are all sunk AND their exact layouts are disambiguated">Auto-play (30+ salvos)</button>
+            </div>
+            <div class="fire-row" style="margin-top:10px;">
+              <button class="btn btn-ghost" id="restartSameBoardBtn-1" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
+              <button class="btn btn-ghost" id="resetBtn-1" style="text-transform:none; letter-spacing:normal;">New game</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-col">
+          <div class="panel">
+            <h2>Salvo Log <span class="log-status" id="logStatus-1"></span></h2>
+            <div class="log-list" id="logList-1">
+              <div class="log-empty">No salvos fired yet.</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="layout" data-board="2">
+      <h2 class="board-title">Position your fleet</h2>
+      <div class="board-meta">Turn <b id="turnNo-2">1</b> &nbsp;·&nbsp; Hits <b id="hitCount-2">0</b>/<span id="hitTotal-2">20</span></div>
+      <section class="chart-card">
+        <div class="grid-scale" id="gridScale-2">
+          <div class="corner"></div>
+        </div>
+        <div class="chart-footnote">
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--petrol-blue)"></span>outer ring — submarines only</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8&times;8 — all ships</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship <span class="ship-sunk-count" id="battleshipSunkLabel-2">0/1 sunk</span></span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral)"></span>Cruiser <span class="ship-sunk-count" id="cruiserSunkLabel-2">0/2 sunk</span></span>
+          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Frigate <span class="ship-sunk-count" id="frigateSunkLabel-2">0/3 sunk</span></span>
+        </div>
+      </section>
+
+      <aside>
+        <!-- No AI Advisory/Fire Control on this board (see hasControls) —
+             this column mirrors board 1's exactly, in the same static
+             markup, so its height matches and (via align-items:stretch on
+             this <aside> + panel-col>panel:last-child{flex:1} below) pushes
+             the real Salvo Log's bottom edge down to line up with board 1's.
+             Not wired to any JS (no ids), just present for its layout box. -->
+        <div class="panel-col" aria-hidden="true" style="visibility:hidden; pointer-events:none;">
+          <div class="panel">
+            <h2>AI Advisor</h2>
+            <div class="advisory-readout">
+              <span class="advisory-chip">A1</span>
+              <span class="advisory-chip">A1</span>
+              <span class="advisory-chip">A1</span>
+            </div>
+            <button class="btn btn-teal">Use these 3</button>
+          </div>
+
+          <div class="panel">
+            <h2>Fire Control</h2>
+            <div class="selection-slots">
+              <input class="slot" type="text" readonly>
+              <input class="slot" type="text" readonly>
+              <input class="slot" type="text" readonly>
+            </div>
+            <div class="fire-row" style="margin-top:12px;">
+              <button class="btn btn-brass">Fire salvo</button>
+              <button class="btn btn-ghost">Clear</button>
+            </div>
+            <div class="status-line">Type 3 coordinates above, or accept the AI's advisory.</div>
+            <div class="fire-row" style="margin-top:10px;">
+              <button class="btn btn-blue">Auto-play (30+ salvos)</button>
+            </div>
+            <div class="fire-row" style="margin-top:10px;">
+              <button class="btn btn-ghost" style="text-transform:none; letter-spacing:normal;">Replay board</button>
+              <button class="btn btn-ghost" style="text-transform:none; letter-spacing:normal;">New game</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-col">
+          <div class="panel">
+            <h2>Salvo Log <span class="log-status" id="logStatus-2"></span></h2>
+            <div class="log-list" id="logList-2">
+              <div class="log-empty">No salvos fired yet.</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+</div>
+
+<script type="module">
+  const bootNotice = document.getElementById('bootNotice');
+  const boardsRow = document.getElementById('boardsRow');
+  const COL_LETTERS = ['A','B','C','D','E','F','G','H','I','J'];
+
+  function sleep(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Builds one fully independent, self-contained game instance bound to
+  // the DOM elements suffixed "-<suffix>" (e.g. gridScale-1, fireBtn-2).
+  // All state below (game, selected, suggested, won, ...) lives in this
+  // function's own closure, so 2 calls to createBoard never share or
+  // clash over anything — each board plays its own separate game.
+  // `hasControls=false` (board 2, currently) means this board has no AI
+  // Advisory/Fire Control panel — nothing to select cells for, since
+  // there'd be no button to actually submit a salvo, so cells aren't made
+  // clickable and none of the controls-dependent init/wiring below runs.
+  // `placementMode=true` (board 2) instead makes cells toggle a
+  // "ship here" marker so the player can pencil in their own fleet —
+  // see onPlacementCellClick/shapesViolateRules.
+  function createBoard(suffix, GameCtor, hasControls = true, placementMode = false){
+    let game = new GameCtor();
+    let selected = [];      // array of flat indices, up to 3
+    let suggested = [];     // array of flat indices from ai_suggest
+    let won = false;
+    let fleetClearedShown = false; // true once the "all size >=2 ships sunk" state has been marked this game
+    let autoPlayRunning = false;
+    let fleetFrame = null;  // every board gets one (see buildGrid) — placementMode toggles 'legal' as the fleet is painted, others just set it unconditionally
+    let frozen = false;     // placementMode only — true once the placed fleet has been locked in and turned into a real game
+    let opponentShipCells = null; // placementMode only — ground truth Set of idx that are real ship cells, for rendering the AI's shots without any bag ambiguity (we placed them, we already know)
+    let opponentShipShapes = null; // placementMode only — ground truth per-ship idx arrays, for refreshEnemyIdentified's outline (see buildLayout)
+    let opponent = null;    // the OTHER board's API (see boot()'s wiring) — hasControls boards call opponent.ensureReady()/takeAiTurn(); placementMode boards don't currently need one back
+    let completionRunning = false; // placementMode only — guards against overlapping runToCompletion() loops (doFire's is_won() trigger can fire repeatedly; runAutoPlay's own call could also overlap)
+
+    const id = (base) => `${base}-${suffix}`;
+    const el = (base) => document.getElementById(id(base));
+
+    const gridScale = el('gridScale');
+    const advisoryReadout = el('advisoryReadout');
+    const useAdvisoryBtn = el('useAdvisoryBtn');
+    const selectionSlots = el('selectionSlots');
+    const fireBtn = el('fireBtn');
+    const clearBtn = el('clearBtn');
+    const autoPlayBtn = el('autoPlayBtn');
+    const statusLine = el('statusLine');
+    const logList = el('logList');
+    const logStatus = el('logStatus');
+    const resetBtn = el('resetBtn');
+    const restartSameBoardBtn = el('restartSameBoardBtn');
+    const turnNo = el('turnNo');
+    const hitCount = el('hitCount');
+    const hitTotal = el('hitTotal');
+
+    // `won` (every real ship cell hit at least once) can flip true BEFORE
+    // the Cruiser/Frigate exact layout is disambiguated — a disambiguation
+    // salvo's filler cell can incidentally be the very last unfound real
+    // cell. Gating all further play on raw `won` would strand a resolvable
+    // ambiguity right at the finish line — same reasoning as the Solver
+    // Page's identical helper, and Game::fire on the Rust side.
+    function gameTrulyDone(){
+      return won && isFullyResolved();
+    }
+
+    function colLabelRow(){
+      const corner = gridScale.querySelector('.corner');
+      corner.style.gridColumn = '1';
+      corner.style.gridRow = '1';
+      for (let c = 0; c < 10; c++){
+        const div = document.createElement('div');
+        div.className = 'col-label';
+        div.textContent = COL_LETTERS[c];
+        div.style.gridColumn = String(c + 2);
+        div.style.gridRow = '1';
+        gridScale.appendChild(div);
+      }
+    }
+
+    function buildGrid(){
+      colLabelRow();
+      for (let r = 0; r < 10; r++){
+        const rowLabel = document.createElement('div');
+        rowLabel.className = 'row-label';
+        rowLabel.textContent = String(r + 1);
+        rowLabel.style.gridColumn = '1';
+        rowLabel.style.gridRow = String(r + 2);
+        gridScale.appendChild(rowLabel);
+
+        for (let c = 0; c < 10; c++){
+          const idx = r * 10 + c;
+          const cell = document.createElement('div');
+          const isOuter = (r === 0 || r === 9 || c === 0 || c === 9);
+          cell.className = 'cell ' + (isOuter ? 'outer' : 'inner');
+          cell.dataset.idx = idx;
+          cell.tabIndex = 0;
+          cell.setAttribute('role','button');
+          cell.setAttribute('aria-label', `${COL_LETTERS[c]}${r+1}`);
+          cell.style.gridColumn = String(c + 2);
+          cell.style.gridRow = String(r + 2);
+          if (hasControls){
+            cell.addEventListener('click', () => onCellClick(idx));
+            cell.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); onCellClick(idx); }
+            });
+          } else if (placementMode){
+            cell.addEventListener('click', () => onPlacementCellClick(idx));
+            cell.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); onPlacementCellClick(idx); }
+            });
+          } else {
+            cell.classList.add('disabled');
+          }
+          gridScale.appendChild(cell);
+        }
+      }
+
+      // Overlaid on every board, exactly over the 10x10 cell block (not
+      // the label row/column) — placementMode boards toggle 'legal' as
+      // the fleet is painted (see checkFleetLegality); every other board
+      // just gets it unconditionally, as a plain frame around the chart.
+      fleetFrame = document.createElement('div');
+      fleetFrame.className = 'fleet-frame';
+      fleetFrame.style.gridColumn = '2 / 12';
+      fleetFrame.style.gridRow = '2 / 12';
+      if (!placementMode) fleetFrame.classList.add('legal');
+      gridScale.appendChild(fleetFrame);
+    }
+
+    function cellEl(idx){
+      return gridScale.querySelector(`.cell[data-idx="${idx}"]`);
+    }
+
+    function idxToCoord(idx){
+      const r = Math.floor(idx / 10), c = idx % 10;
+      return `${COL_LETTERS[c]}${r + 1}`;
+    }
+
+    function coordToIdx(coord){
+      const col = coord.charCodeAt(0) - 65;
+      const row = parseInt(coord.slice(1), 10) - 1;
+      return row * 10 + col;
+    }
+
+    // Placement mode (board 2 only, see createBoard's `placementMode`):
+    // a click paints/unpaints "ship here" — no ship-picker, no drag.
+    // Removing a cell is always allowed; adding one is only committed if
+    // the resulting shapes still satisfy every placement rule (see
+    // shapesViolateRules) — an illegal addition is simply refused, the
+    // click has no effect. Only blocks (shapes of size >= 2) are governed
+    // by these rules/colours; lone single cells are unrestricted and stay
+    // the plain brass "ship-placed" colour.
+    function onPlacementCellClick(idx){
+      if (frozen) return;
+      const cell = cellEl(idx);
+      if (!cell) return;
+
+      const placed = getPlacedSet();
+      if (placed.has(idx)){
+        placed.delete(idx);
+        cell.classList.remove('ship-placed');
+        applyPlacementColours(placed);
+        checkFleetLegality(placed);
+        return;
+      }
+
+      const candidate = new Set(placed);
+      candidate.add(idx);
+      if (shapesViolateRules(groupIntoShapes(candidate))) return;
+
+      cell.classList.add('ship-placed');
+      applyPlacementColours(candidate);
+      checkFleetLegality(candidate);
+    }
+
+    function getPlacedSet(){
+      const placed = new Set();
+      gridScale.querySelectorAll('.cell.ship-placed').forEach(c => placed.add(parseInt(c.dataset.idx, 10)));
+      return placed;
+    }
+
+    // Orthogonal-adjacency connected components of the painted set — each
+    // one is a candidate ship ("block").
+    function groupIntoShapes(placedSet){
+      const visited = new Set();
+      const shapes = [];
+      for (const idx of placedSet){
+        if (visited.has(idx)) continue;
+        const stack = [idx];
+        visited.add(idx);
+        const shape = [];
+        while (stack.length){
+          const cur = stack.pop();
+          shape.push(cur);
+          const r = Math.floor(cur / 10), c = cur % 10;
+          const neighbours = [];
+          if (r > 0) neighbours.push(cur - 10);
+          if (r < 9) neighbours.push(cur + 10);
+          if (c > 0) neighbours.push(cur - 1);
+          if (c < 9) neighbours.push(cur + 1);
+          for (const n of neighbours){
+            if (placedSet.has(n) && !visited.has(n)){
+              visited.add(n);
+              stack.push(n);
+            }
+          }
+        }
+        shapes.push(shape);
+      }
+      return shapes;
+    }
+
+    function shapeIsStraightLine(shape){
+      const rows = shape.map(i => Math.floor(i / 10));
+      const cols = shape.map(i => i % 10);
+      const sameRow = rows.every(r => r === rows[0]);
+      const sameCol = cols.every(c => c === cols[0]);
+      if (sameRow === sameCol) return false; // neither a pure row nor a pure column line
+      const varying = (sameRow ? cols : rows).slice().sort((a, b) => a - b);
+      for (let i = 1; i < varying.length; i++){
+        if (varying[i] !== varying[i - 1] + 1) return false; // gap in the line
+      }
+      return true;
+    }
+
+    // Everything the player is NOT allowed to create: a block longer than
+    // 4, a block that isn't a straight contiguous line, a block reaching
+    // into the outer ring, more than 1 four-block/2 three-blocks/3
+    // two-blocks, or any two blocks touching — horizontally, vertically,
+    // or diagonally. Lone single cells are exempt from all of this.
+    function shapesViolateRules(shapes){
+      // Deliberately NOT capping how many size-2/3/4 blocks exist here —
+      // a ship is painted one cell at a time, so a Battleship-in-progress
+      // spends a moment looking exactly like a 2-cell Frigate, then a
+      // 3-cell Cruiser, before its 4th cell lands. Rejecting on a
+      // per-size count at that intermediate stage means once one size's
+      // count is already at its final cap (e.g. all 3 Frigates placed),
+      // NOTHING bigger could ever be started — its first 2 cells would
+      // always look like an illegal 4th Frigate. Only reject things that
+      // are permanently wrong regardless of what gets painted next; the
+      // exact final composition (1x4, 2x3, 3x2, no stray cells) is
+      // checked once building is done, by computeFleetComplete.
+      for (const shape of shapes){
+        const size = shape.length;
+        if (size <= 1) continue;
+        if (size > 4) return true;
+        if (!shapeIsStraightLine(shape)) return true;
+        for (const i of shape){
+          const r = Math.floor(i / 10), c = i % 10;
+          if (r < 1 || r > 8 || c < 1 || c > 8) return true; // blocks must stay in the inner 8x8
+        }
+      }
+
+      const blocks = shapes.filter(s => s.length >= 2);
+      for (let a = 0; a < blocks.length; a++){
+        for (let b = a + 1; b < blocks.length; b++){
+          for (const i of blocks[a]){
+            const ri = Math.floor(i / 10), ci = i % 10;
+            for (const j of blocks[b]){
+              const rj = Math.floor(j / 10), cj = j % 10;
+              if (Math.abs(ri - rj) <= 1 && Math.abs(ci - cj) <= 1) return true;
+            }
+          }
+        }
+      }
+      return false;
+    }
+
+    const BLOCK_SIZE_CLASS = { 4: 'identified-battleship', 3: 'identified-cruiser', 2: 'identified-frigate' };
+
+    function applyPlacementColours(placedSet){
+      gridScale.querySelectorAll('.cell.identified-battleship, .cell.identified-cruiser, .cell.identified-frigate')
+        .forEach(c => c.classList.remove('identified-battleship', 'identified-cruiser', 'identified-frigate'));
+      for (const shape of groupIntoShapes(placedSet)){
+        const cls = BLOCK_SIZE_CLASS[shape.length];
+        if (!cls) continue;
+        shape.forEach(i => cellEl(i)?.classList.add(cls));
+      }
+    }
+
+    // Complete fleet: exactly 1 four-block (Battleship), 2 three-blocks
+    // (Cruisers), 3 two-blocks (Frigates) — shapesViolateRules already
+    // guarantees every block that exists is individually legal, so this
+    // only needs to check the final counts. No Submarines in this fleet,
+    // so a stray lone cell (shapesViolateRules lets singles through freely
+    // — they're not blocks) must NOT count as complete even once all 6
+    // real ships are also present: it's one coordinate too many.
+    function computeFleetComplete(placedSet){
+      const counts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+      for (const shape of groupIntoShapes(placedSet)){
+        counts[shape.length] = (counts[shape.length] || 0) + 1;
+      }
+      return !counts[1] && counts[4] === 1 && counts[3] === 2 && counts[2] === 3;
+    }
+
+    // For the white outer-ring border only — the actual gate that also
+    // locks the fleet in is ensureReady()/freezeAndStart() below.
+    function checkFleetLegality(placedSet){
+      if (!fleetFrame) return;
+      fleetFrame.classList.toggle('legal', computeFleetComplete(placedSet));
+    }
+
+    // Builds a Game::load_board_layout_json-compatible payload straight
+    // from the painted blocks — id order follows SHIP_DEFS (Battleship,
+    // then Cruisers, then Frigates), which is only cosmetic (ship identity
+    // doesn't matter to the engine beyond size), but keeps ids in the same
+    // familiar order as a normally-generated board. Also returns the flat
+    // set of cells that are ACTUALLY ships in that layout (a lone
+    // unclassified single cell the player painted is not part of any
+    // submitted ship, so it must not be treated as one when rendering the
+    // AI's shots — see opponentShipCells in freezeAndStart/takeAiTurn), and
+    // the per-ship shapes themselves (see opponentShipShapes in
+    // freezeAndStart/refreshEnemyIdentified) — each one is, by
+    // construction, always a single clean straight-line block, which is
+    // not something safe to assume of the attacker's own identified-cells
+    // JSON (see refreshEnemyIdentified's comment).
+    function buildLayout(placedSet){
+      const nameForSize = { 4: 'Battleship', 3: 'Cruiser', 2: 'Frigate' };
+      const shapes = groupIntoShapes(placedSet)
+        .filter(s => s.length >= 2)
+        .sort((a, b) => b.length - a.length);
+      const board = Array.from({ length: 10 }, () => Array(10).fill(null));
+      const shipCells = new Set();
+      const ships = shapes.map((shape, shipId) => {
+        const cells = shape.map(i => ({ row: Math.floor(i / 10), col: i % 10 }));
+        cells.forEach(({ row, col }) => { board[row][col] = shipId; });
+        shape.forEach(i => shipCells.add(i));
+        return { id: shipId, name: nameForSize[shape.length], size: shape.length, cells, hits: 0, sunk: false };
+      });
+      return { json: JSON.stringify({ board, ships }), shipCells, shapes };
+    }
+
+    // Locks the placed fleet in (no more clicks) and turns it into a real
+    // Game the AI can attack — called once, the first time the opponent
+    // board tries to fire. Returns false (and leaves everything editable)
+    // if the fleet isn't a complete legal set of 6 ships yet.
+    function freezeAndStart(){
+      if (frozen) return true;
+      const placed = getPlacedSet();
+      if (!computeFleetComplete(placed)) return false;
+
+      const layout = buildLayout(placed);
+      opponentShipCells = layout.shipCells;
+      opponentShipShapes = layout.shapes;
+      game.load_board_layout_json(layout.json);
+      frozen = true;
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.add('locked'));
+
+      hitTotal.textContent = 16; // 1x4 + 2x3 + 3x2, no Submarines in this placement flow
+      turnNo.textContent = game.turn();
+      hitCount.textContent = '0';
+      refreshFleet();
+      refreshEnemyIdentified();
+      return true;
+    }
+
+    // Called by the opponent board before every fire/auto-play — freezes
+    // the fleet on first use, or pops the reminder if it isn't legal yet.
+    function ensureReady(){
+      if (frozen) return true;
+      if (!computeFleetComplete(getPlacedSet())){
+        alert('Please position your own fleet first');
+        return false;
+      }
+      return freezeAndStart();
+    }
+
+    // One AI salvo against the player's own placed fleet — called after
+    // every successful player salvo on the opponent board, keeping the two
+    // games in turn-by-turn lockstep. Hit/miss is read straight from
+    // opponentShipCells (we placed these ships ourselves, so there's no
+    // "unordered bag" ambiguity to resolve for rendering purposes — that
+    // only matters to whichever side does NOT already know the layout).
+    function takeAiTurn(){
+      if (!frozen || gameTrulyDone()) return;
+
+      let raw;
+      if (game.ai_target_size() <= 1){
+        game.update_fsm_and_resolve();
+        raw = game.ai_suggest_disambiguation_refire();
+        let parsed = [];
+        try { parsed = JSON.parse(raw); } catch { parsed = []; }
+        if (parsed.length !== 3){
+          raw = game.ai_suggest_disambiguation_last_resort();
+          try { parsed = JSON.parse(raw); } catch { parsed = []; }
+        }
+        if (parsed.length !== 3) raw = game.ai_suggest();
+      } else {
+        raw = game.ai_suggest();
+      }
+
+      let coordsIdx;
+      try { coordsIdx = JSON.parse(raw); } catch { return; }
+      if (!Array.isArray(coordsIdx) || coordsIdx.length !== 3) return;
+
+      const raw2 = game.fire(new Uint32Array(coordsIdx));
+      let salvo;
+      try { salvo = JSON.parse(raw2); } catch { return; }
+      if (salvo.error) return;
+
+      markFired(salvo.coords);
+      salvo.coords.forEach(coord => {
+        const i = coordToIdx(coord);
+        cellEl(i)?.classList.add(opponentShipCells.has(i) ? 'flame' : 'wave');
+      });
+      appendLogEntry(salvo);
+      refreshFleet();
+      refreshEnemyIdentified();
+      turnNo.textContent = game.turn();
+      hitCount.textContent = countHits();
+      if (game.is_won()) won = true;
+      updateLogStatus();
+    }
+
+    // Called once board 1's own auto-play loop stops (however it stops —
+    // cleared, or ran into its hunt-salvo cap): this board's own game
+    // doesn't get to stop just because the other one did. Keeps firing on
+    // its own, same hunt cap/uncapped-disambiguation reasoning as board
+    // 1's runAutoPlay, until THIS fleet is also fully sunk and resolved.
+    async function runToCompletion(){
+      if (!frozen || completionRunning) return;
+      completionRunning = true;
+      updateLogStatus();
+      try {
+        const MAX_HUNT_SALVOS = 30;
+        let salvosTaken = 0;
+        while (!gameTrulyDone()){
+          if (game.ai_target_size() > 1 && salvosTaken >= MAX_HUNT_SALVOS) break;
+          takeAiTurn();
+          salvosTaken++;
+          await sleep(300);
+        }
+      } finally {
+        completionRunning = false;
+        updateLogStatus();
+      }
+    }
+
+    // Called when the opponent board (board 1) does New Game / Replay
+    // board — undoes freezeAndStart entirely, back to a blank "position
+    // your fleet" chart so the player can lay out (or re-lay-out) their
+    // fleet before the next round. game.reset() just discards the frozen
+    // layout for a fresh (irrelevant until the next freezeAndStart)
+    // board, purely so ships_json()/turn()/log_json() read as a clean
+    // slate for refreshFleet()/refreshShipIdentification() below.
+    function resetPlacement(){
+      frozen = false;
+      opponentShipCells = null;
+      opponentShipShapes = null;
+      won = false;
+      game.reset();
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove(
+        'ship-placed', 'identified-battleship', 'identified-cruiser', 'identified-frigate',
+        'fired', 'wave', 'flame', 'locked'
+      ));
+      gridScale.querySelectorAll('.enemy-ship-outline').forEach(el => el.remove());
+      fleetFrame.classList.remove('legal');
+      logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+      turnNo.textContent = game.turn();
+      hitCount.textContent = '0';
+      refreshFleet();
+      refreshEnemyIdentified();
+      updateLogStatus();
+    }
+
+    // Called by the opponent board's Replay board (not New Game) — unlike
+    // resetPlacement, this KEEPS the already-placed fleet (that's the
+    // point of "replay the same board") and only resets the round: hits,
+    // turns, log, fired/wave/flame marks and the white identified
+    // outlines. game.restart_same_board() mirrors board 1's own Replay
+    // board — it resets hit/turn/log state but leaves the loaded ship
+    // layout untouched. A no-op if the fleet was never frozen (nothing to
+    // replay yet).
+    function replaySamePlacement(){
+      if (!frozen) return;
+      game.restart_same_board();
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove('fired', 'wave', 'flame'));
+      gridScale.querySelectorAll('.enemy-ship-outline').forEach(el => el.remove());
+      logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+      turnNo.textContent = game.turn();
+      hitCount.textContent = '0';
+      won = false;
+      refreshFleet();
+      refreshEnemyIdentified();
+      updateLogStatus();
+    }
+
+    // Clicking a coordinate never selects it for firing — that's Fire
+    // Control's job (see selectionSlots' <input>s below). A click purely
+    // cycles that cell's own marker, letting the player pencil in their
+    // suspected fleet layout independent of the engine's confirmed state:
+    //   fired cells:     initial -> wave  -> flame -> initial
+    //   not-yet-fired:   initial -> flame -> wave  -> initial
+    function onCellClick(idx){
+      if (gameTrulyDone()) return;
+      const cell = cellEl(idx);
+      if (!cell) return;
+      cycleMarker(cell, cell.classList.contains('fired') ? ['wave', 'flame'] : ['flame', 'wave']);
+    }
+
+    function cycleMarker(cell, [first, second]){
+      if (cell.classList.contains(second)){
+        cell.classList.remove(second);
+      } else if (cell.classList.contains(first)){
+        cell.classList.remove(first);
+        cell.classList.add(second);
+      } else {
+        cell.classList.add(first);
+      }
+    }
+
+    // Selection now lives entirely in `selected[0..2]`, filled in by typing
+    // a coordinate into a Fire Control slot (or by the AI Advisory's "Use
+    // these 3"); a slot can be a genuine hole (never typed into) so use
+    // selectedCount() rather than selected.length to know how many are set.
+    function selectedCount(){
+      return selected.filter(v => v !== undefined && v !== null).length;
+    }
+
+    function parseCoordInput(raw){
+      const m = /^([A-J])(10|[1-9])$/.exec(raw.trim().toUpperCase());
+      if (!m) return null;
+      const col = m[1].charCodeAt(0) - 65;
+      const row = parseInt(m[2], 10) - 1;
+      return row * 10 + col;
+    }
+
+    function applySlotInput(i, input){
+      const raw = input.value.trim();
+      if (raw === ''){
+        selected[i] = undefined;
+        syncSelectionState();
+        return;
+      }
+      const idx = parseCoordInput(raw);
+      if (idx === null){
+        statusLine.textContent = `"${raw}" isn't a valid coordinate (A1-J10).`;
+        input.value = selected[i] !== undefined ? idxToCoord(selected[i]) : '';
+        return;
+      }
+      const dupAt = selected.findIndex((v, j) => j !== i && v === idx);
+      if (dupAt !== -1){
+        statusLine.textContent = `${idxToCoord(idx)} is already in another slot.`;
+        input.value = selected[i] !== undefined ? idxToCoord(selected[i]) : '';
+        return;
+      }
+      selected[i] = idx;
+      input.value = idxToCoord(idx);
+      syncSelectionState();
+    }
+
+    function renderSelection(){
+      selectionSlots.innerHTML = '';
+      for (let i = 0; i < 3; i++){
+        const input = document.createElement('input');
+        input.className = 'slot';
+        input.type = 'text';
+        input.maxLength = 3;
+        input.placeholder = '—';
+        input.value = selected[i] !== undefined ? idxToCoord(selected[i]) : '';
+        input.addEventListener('change', () => applySlotInput(i, input));
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter'){ e.preventDefault(); applySlotInput(i, input); }
+        });
+        selectionSlots.appendChild(input);
+      }
+      syncSelectionState();
+    }
+
+    function syncSelectionState(){
+      fireBtn.disabled = gameTrulyDone() || selectedCount() !== 3;
+
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove('selected'));
+      selected.forEach(idx => cellEl(idx)?.classList.add('selected'));
+
+      if (!gameTrulyDone()){
+        const remaining = 3 - selectedCount();
+        statusLine.textContent = remaining === 0
+          ? 'Ready — review your 3 coordinates and fire.'
+          : `Enter ${remaining} more coordinate${remaining === 1 ? '' : 's'} in Fire Control.`;
+      }
+    }
+
+    function renderSuggested(){
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove('suggested'));
+      suggested.forEach(idx => cellEl(idx)?.classList.add('suggested'));
+      advisoryReadout.innerHTML = '';
+      suggested.forEach(idx => {
+        const chip = document.createElement('span');
+        chip.className = 'advisory-chip';
+        chip.textContent = idxToCoord(idx);
+        advisoryReadout.appendChild(chip);
+      });
+    }
+
+    // Same priority order as the Solver Page's identical function: once
+    // ai_target_size() <= 1 (Battleship/Cruiser/Frigate all fully sunk),
+    // prefer resolving a pending disambiguation (lock-in, then the refire
+    // and last-resort tiers) over ai_suggest()'s ordinary result — see that
+    // function's own comment for why this matters (choose_shots() alone
+    // silently falls through to Submarine hunting once its own no-refire
+    // attempt comes up empty).
+    function refreshAdvisory(){
+      // isSessionFinished(), not gameTrulyDone() — must match whatever
+      // updateLogStatus() displays as "(session finished)" exactly (see
+      // doFire's opponent-continuation trigger for the same reasoning),
+      // so the advisory actually stops suggesting shots at the same
+      // moment the board is shown as done. Also clears `suggested` and
+      // its grid highlight — the early-return below used to skip
+      // renderSuggested() entirely, leaving the LAST suggestion's
+      // highlight stuck on the board even once nothing more is offered.
+      if (isSessionFinished()){
+        suggested = [];
+        gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove('suggested'));
+        advisoryReadout.innerHTML = '';
+        for (let i = 0; i < 3; i++){
+          const chip = document.createElement('span');
+          chip.className = 'advisory-chip advisory-chip-empty';
+          advisoryReadout.appendChild(chip);
+        }
+        useAdvisoryBtn.disabled = true;
+        return;
+      }
+      let raw = '[]';
+      let parsed = [];
+      if (game.ai_target_size() <= 1){
+        game.update_fsm_and_resolve();
+        raw = game.ai_suggest_disambiguation_refire();
+        try { parsed = JSON.parse(raw); } catch { parsed = []; }
+        if (parsed.length !== 3){
+          raw = game.ai_suggest_disambiguation_last_resort();
+          try { parsed = JSON.parse(raw); } catch { parsed = []; }
+        }
+      }
+      if (parsed.length !== 3){
+        raw = game.ai_suggest();
+      }
+      suggested = JSON.parse(raw);
+      renderSuggested();
+    }
+
+    function isFullyResolved(){
+      let status;
+      try { status = JSON.parse(game.resolution_status_json()); } catch { return false; }
+      return !!status.resolved;
+    }
+
+    // Paints a ship's cells solid by type once its exact layout is known —
+    // this page's own simple yellow/red/green scheme (see the legend),
+    // independent of the Solver Page's probability-heatmap conventions.
+    function refreshShipIdentification(){
+      gridScale.querySelectorAll('.cell.identified-battleship, .cell.identified-cruiser, .cell.identified-frigate')
+        .forEach(c => c.classList.remove('identified-battleship', 'identified-cruiser', 'identified-frigate'));
+
+      const idsFrom = (json) => { try { return JSON.parse(json); } catch { return []; } };
+
+      idsFrom(game.battleship_identified_json()).forEach(idx => cellEl(idx)?.classList.add('identified-battleship'));
+      idsFrom(game.found_battleship_json()).forEach(idx => cellEl(idx)?.classList.add('identified-battleship'));
+      idsFrom(game.cruiser_identified_json()).forEach(idx => cellEl(idx)?.classList.add('identified-cruiser'));
+      idsFrom(game.frigate_identified_json()).forEach(idx => cellEl(idx)?.classList.add('identified-frigate'));
+    }
+
+    // Placement board's equivalent of refreshShipIdentification, used by
+    // freezeAndStart/takeAiTurn instead of that one: the ship-type colours
+    // here are ground truth from painting the fleet, so they must never be
+    // cleared/reset the way refreshShipIdentification does for board 1's
+    // attacker-side deduction. This only ADDS a white outline — applies
+    // to the Battleship exactly the same as Cruisers/Frigates — once the
+    // AI attacking this fleet has fully identified that ship's own cells.
+    function refreshEnemyIdentified(){
+      gridScale.querySelectorAll('.enemy-ship-outline').forEach(el => el.remove());
+      if (!opponentShipShapes) return;
+
+      const idsFrom = (json) => { try { return JSON.parse(json); } catch { return []; } };
+      const identifiedCells = new Set([
+        ...idsFrom(game.battleship_identified_json()),
+        ...idsFrom(game.found_battleship_json()),
+        ...idsFrom(game.cruiser_identified_json()),
+        ...idsFrom(game.frigate_identified_json()),
+      ]);
+
+      // Draw the outline from OUR OWN known ship shapes (opponentShipShapes
+      // — always exactly one clean straight-line block per real ship,
+      // ground truth from placement), not by re-grouping the attacker's
+      // identified-cells JSON: that JSON isn't guaranteed to always come
+      // back as one tidy contiguous set (multiple Cruisers/Frigates can be
+      // reported in one flat list, or partial/edge-case reasoning can
+      // return a sparser set) — grouping THAT by adjacency risked
+      // fragmenting a single ship into several small boxes. Gate each real
+      // ship's outline on all of its own cells being identified.
+      for (const shape of opponentShipShapes){
+        if (!shape.every(i => identifiedCells.has(i))) continue;
+        const rows = shape.map(i => Math.floor(i / 10));
+        const cols = shape.map(i => i % 10);
+        const minRow = Math.min(...rows), maxRow = Math.max(...rows);
+        const minCol = Math.min(...cols), maxCol = Math.max(...cols);
+        const outline = document.createElement('div');
+        outline.className = 'enemy-ship-outline';
+        outline.style.gridColumn = `${minCol + 2} / ${maxCol + 3}`;
+        outline.style.gridRow = `${minRow + 2} / ${maxRow + 3}`;
+        gridScale.appendChild(outline);
+      }
+    }
+
+    // Unlike the Solver Page's separate Fleet Status panel (hull bars per
+    // ship instance), this page folds the sunk count directly into the
+    // chart legend line for each ship type — see the "0/1 sunk" etc. spans
+    // next to each colour swatch.
+    function refreshFleet(){
+      const ships = JSON.parse(game.ships_json());
+      const counts = {};
+      for (const s of ships){
+        counts[s.name] ??= { total: 0, sunk: 0 };
+        counts[s.name].total++;
+        if (s.sunk) counts[s.name].sunk++;
+      }
+      const setLabel = (base, name) => {
+        const target = document.getElementById(id(base));
+        if (target && counts[name]) target.textContent = `${counts[name].sunk}/${counts[name].total} sunk`;
+      };
+      setLabel('battleshipSunkLabel', 'Battleship');
+      setLabel('cruiserSunkLabel', 'Cruiser');
+      setLabel('frigateSunkLabel', 'Frigate');
+    }
+
+    function appendLogEntry(salvo){
+      if (logList.querySelector('.log-empty')) logList.innerHTML = '';
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      const discoveredLines = [
+        salvo.battleship_discovered ? `<span class="discovered">◆ Battleship discovered</span>` : '',
+      ].join('');
+      const sunkLine = salvo.sunk_names.length
+        ? `<span class="sunk">⚓ ${salvo.sunk_names.join(', ')} sunk</span>`
+        : '';
+      entry.innerHTML = `<span class="turn">T${String(salvo.turn).padStart(2,'0')}</span><span class="coords">${salvo.coords.join(' · ')}</span> → <span class="result">${salvo.result}</span>${discoveredLines}${sunkLine}`;
+      logList.prepend(entry);
+      // NOT updateLogStatus() here — this runs before the caller sets
+      // `won` on the decisive shot (see doFire/takeAiTurn), so it would
+      // read a stale won=false and never show "(session finished)". Both
+      // callers call it themselves once `won` is actually up to date.
+    }
+
+    // Blank (nothing logged yet) / "(session in play)" / "(session
+    // finished)" next to the Salvo Log heading — the one place both
+    // boards make it explicit whether a game is still going, since board
+    // 2 in particular has no Fire Control/status-line of its own to show
+    // that runToCompletion() is still working in the background.
+    // "Finished" mirrors board 1's OWN definition of done — the same
+    // check that sets fleetClearedShown/stops Auto-play early — computed
+    // fresh rather than read from that one-time latch: game.is_won(), OR
+    // every size>=2 ship sunk and the layout resolved. Board 1's Auto-play
+    // deliberately stops at that point without hunting down every last
+    // Submarine, so is_won() alone (needs literally every cell hit) could
+    // stay false forever even though the game is clearly done; board 2
+    // has no such shortcut and reaches genuine is_won() on its own.
+    function isSessionFinished(){
+      if (!hasControls){
+        // No early-stop shortcut here (see runToCompletion) — it always
+        // keeps firing all the way to full resolution, so "finished" must
+        // match that exact condition. is_won() alone would fire the
+        // moment this (Submarine-free) fleet is fully hit, well before
+        // runToCompletion's own loop actually gives up.
+        return gameTrulyDone();
+      }
+      // Board 1: is_won() alone covers a player just stopping once they
+      // see "Fleet destroyed" (whether or not disambiguation is done);
+      // the second branch covers Auto-play's own early stop (all size>=2
+      // ships sunk + resolved, without hunting every last Submarine).
+      if (game.is_won()) return true;
+      let ships;
+      try { ships = JSON.parse(game.ships_json()); } catch { return false; }
+      return ships.length > 0 && ships.filter(s => s.size >= 2).every(s => s.sunk) && isFullyResolved();
+    }
+
+    function updateLogStatus(){
+      if (!logStatus) return;
+      let hasLog = false;
+      try { hasLog = JSON.parse(game.log_json()).length > 0; } catch { hasLog = false; }
+      logStatus.textContent = !hasLog ? '' : (isSessionFinished() ? '(session finished)' : '(session in play)');
+    }
+
+    function markFired(coords){
+      coords.forEach(coord => {
+        const idx = coordToIdx(coord);
+        const c = cellEl(idx);
+        if (c){
+          c.classList.add('fired');
+          // A refire on this cell supersedes any prior guess — start fresh.
+          c.classList.remove('selected', 'suggested', 'wave', 'flame');
+        }
+      });
+    }
+
+    function countHits(){
+      let hits = 0;
+      JSON.parse(game.log_json()).forEach(s => {
+        s.result.split(' ').forEach(v => { if (v !== '0') hits++; });
+      });
+      return hits;
+    }
+
+    function logGameEnd(label, turns){
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+      const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      const line = `${date} ${time}  ${label} (board ${suffix})  turns: ${turns}`;
+      fetch('/log', { method: 'POST', body: line }).catch(() => { /* no logging server available — ignore */ });
+    }
+
+    function setAutoPlayState(state){
+      autoPlayBtn.classList.remove('btn-blue', 'btn-red', 'btn-green');
+      autoPlayBtn.classList.add(`btn-${state}`);
+    }
+
+    function doFire(){
+      if (gameTrulyDone() || selectedCount() !== 3) return;
+      if (opponent && !opponent.ensureReady()) return;
+      const idxArr = new Uint32Array(selected);
+      const raw = game.fire(idxArr);
+      let salvo;
+      try { salvo = JSON.parse(raw); }
+      catch { statusLine.textContent = 'Malformed response from engine.'; return; }
+
+      if (salvo.error){
+        statusLine.textContent = `Engine refused: ${salvo.error}`;
+        return;
+      }
+
+      markFired(salvo.coords);
+      // An all-zero bag is the one unambiguous case (no cell in the salvo
+      // hit anything) — auto-mark all three as waves. Any other bag only
+      // says how many of the three hit, not which, so those cells stay
+      // "initial" for the player to mark by hand via cycleAnnotation.
+      if (salvo.result.split(' ').every(v => v === '0')){
+        salvo.coords.forEach(coord => cellEl(coordToIdx(coord))?.classList.add('wave'));
+      }
+      appendLogEntry(salvo);
+      refreshFleet();
+      refreshShipIdentification();
+      selected = [];
+
+      turnNo.textContent = game.turn();
+      hitCount.textContent = countHits();
+
+      if (!fleetClearedShown && !game.is_won()){
+        const ships = JSON.parse(game.ships_json());
+        const bigShipsSunk = ships.length > 0 && ships.filter(s => s.size >= 2).every(s => s.sunk);
+        const layoutsResolved = isFullyResolved();
+        if (bigShipsSunk && layoutsResolved){
+          fleetClearedShown = true;
+          setAutoPlayState('green');
+        }
+      }
+
+      if (game.is_won()){
+        won = true;
+        logGameEnd('full-win', salvo.turn);
+        statusLine.textContent = isFullyResolved()
+          ? 'Fleet destroyed. Start a new game to sail again.'
+          : 'Fleet destroyed, but the exact Cruiser/Frigate layout is still ambiguous — keep firing (Auto-play or "Use these 3") to finish disambiguating.';
+      }
+
+      renderSelection();
+      refreshAdvisory();
+      if (opponent){
+        opponent.takeAiTurn();
+        // isSessionFinished(), not gameTrulyDone() or a bare is_won() —
+        // must match whatever updateLogStatus() below is about to display
+        // as "(session finished)" exactly, including Auto-play's own
+        // early-stop shortcut (all size>=2 ships sunk + resolved, without
+        // hunting every last Submarine). Otherwise a player who
+        // reasonably stops firing the moment the label says finished —
+        // before is_won() is literally true — would leave board 2
+        // stranded waiting on a "final shot" that never comes.
+        if (isSessionFinished()) opponent.runToCompletion();
+      }
+      updateLogStatus();
+    }
+
+    async function runAutoPlay(){
+      if (autoPlayRunning || gameTrulyDone()) return undefined;
+      if (opponent && !opponent.ensureReady()) return undefined;
+      autoPlayRunning = true;
+      autoPlayBtn.disabled = true;
+      resetBtn.disabled = true;
+      restartSameBoardBtn.disabled = true;
+      const originalLabel = autoPlayBtn.textContent;
+      autoPlayBtn.textContent = 'Auto-playing…';
+
+      // Only the HUNTING phase is capped — disambiguation itself is provably
+      // bounded (see the Solver Page's identical function for the fuller
+      // reasoning), so it's let run uncapped once everything size >=2 is sunk.
+      const MAX_HUNT_SALVOS = 30;
+      let salvosTaken = 0;
+      let cleared = gameTrulyDone() || fleetClearedShown;
+
+      while (!cleared){
+        if (game.ai_target_size() > 1 && salvosTaken >= MAX_HUNT_SALVOS){
+          break;
+        }
+        useAdvisoryBtn.click();
+        if (fireBtn.disabled){
+          break;
+        }
+        fireBtn.click();
+        salvosTaken++;
+        cleared = gameTrulyDone() || fleetClearedShown;
+        await sleep(300);
+      }
+
+      // This board stopping (cleared, or the hunt cap) doesn't mean the
+      // fight is over — the opponent board's own game keeps going until
+      // IT is also fully sunk and resolved. Not awaited: board 1's own UI
+      // below shouldn't wait on that.
+      if (opponent) opponent.runToCompletion();
+
+      autoPlayRunning = false;
+      resetBtn.disabled = false;
+      restartSameBoardBtn.disabled = false;
+      autoPlayBtn.textContent = originalLabel;
+      autoPlayBtn.disabled = gameTrulyDone();
+
+      if (cleared){
+        setAutoPlayState('green');
+        if (!won){
+          logGameEnd('auto-play cleared', game.turn());
+        }
+      } else {
+        setAutoPlayState('red');
+        logGameEnd('auto-play timeout', game.turn());
+        statusLine.textContent = `Auto-play stopped after ${salvosTaken} salvos — the Battleship, Cruisers, and Frigates aren't all sunk and disambiguated yet.`;
+      }
+
+      return { salvosTaken, cleared };
+    }
+
+    function afterGameStateReset(message){
+      selected = [];
+      won = false;
+      fleetClearedShown = false;
+      fireBtn.disabled = true;
+      useAdvisoryBtn.disabled = false;
+      autoPlayBtn.disabled = false;
+      autoPlayBtn.textContent = 'Auto-play (30+ salvos)';
+      setAutoPlayState('blue');
+      logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+      gridScale.querySelectorAll('.cell').forEach(c => c.classList.remove('fired','selected','suggested','wave','flame','identified-battleship','identified-cruiser','identified-frigate'));
+      turnNo.textContent = game.turn();
+      hitCount.textContent = '0';
+      renderSelection();
+      refreshFleet();
+      refreshAdvisory();
+      refreshShipIdentification();
+      statusLine.textContent = message;
+      updateLogStatus();
+    }
+
+    // New Game means a genuinely new round — the opponent board's fleet
+    // placement rewinds all the way back to blank "position your fleet".
+    function resetGame(){
+      game.reset();
+      afterGameStateReset('New chart laid out. Type 3 coordinates in Fire Control, or accept the AI\'s advisory.');
+      if (opponent) opponent.resetPlacement();
+    }
+
+    // Replay board means the SAME board again — the opponent board's
+    // already-placed fleet is kept as-is, only its round state (hits,
+    // turns, log) resets, mirroring restart_same_board() here.
+    function restartSameBoard(){
+      game.restart_same_board();
+      afterGameStateReset('Same board restarted. Type 3 coordinates in Fire Control, or accept the AI\'s advisory.');
+      if (opponent) opponent.replaySamePlacement();
+    }
+
+    buildGrid();
+    hitTotal.textContent = 20;
+    turnNo.textContent = game.turn();
+    refreshFleet();
+    refreshShipIdentification();
+    updateLogStatus();
+
+    if (hasControls){
+      refreshAdvisory();
+      renderSelection();
+
+      fireBtn.addEventListener('click', doFire);
+      clearBtn.addEventListener('click', () => { selected = []; renderSelection(); });
+      useAdvisoryBtn.addEventListener('click', () => {
+        selected = suggested.slice(0, 3);
+        renderSelection();
+      });
+      autoPlayBtn.addEventListener('click', runAutoPlay);
+      resetBtn.addEventListener('click', resetGame);
+      restartSameBoardBtn.addEventListener('click', restartSameBoard);
+    }
+
+    // Cross-board wiring (see boot()): a hasControls board calls
+    // opponent.ensureReady()/takeAiTurn() on its opponent's API; a
+    // placementMode board exposes those two for exactly that purpose.
+    return {
+      setOpponent(api){ opponent = api; },
+      ensureReady,
+      takeAiTurn,
+      runToCompletion,
+      replaySamePlacement,
+      resetPlacement,
+    };
+  }
+
+  async function boot(){
+    let GameCtor;
+    try {
+      const mod = await import('./pkg/zeeslag.js');
+      await mod.default();
+      GameCtor = mod.Game;
+    } catch (err) {
+      bootNotice.className = 'error-notice';
+      bootNotice.textContent = 'Could not load the WASM module from ./pkg — run build.ps1 first, then serve this folder over HTTP (not file://).';
+      console.error(err);
+      return;
+    }
+
+    bootNotice.style.display = 'none';
+    boardsRow.style.display = 'flex';
+
+    // The WASM module only needs loading once above — each board gets its
+    // own independent `new GameCtor()` instance and DOM subtree. Board 2
+    // has no AI Advisory/Fire Control panel, so it's created without
+    // controls (see createBoard's hasControls doc comment); it's in
+    // placementMode instead, so the player can lay out their own fleet.
+    //
+    // Board 1 is linked to board 2 as its opponent: every time board 1
+    // fires (manually or via auto-play), it first makes sure board 2's
+    // fleet is placed and locked in (freezing it into its own separate
+    // Game instance on first use), then lets the AI fire one salvo back
+    // at that fleet — two independent games, kept in turn-by-turn sync.
+    const board1 = createBoard('1', GameCtor);
+    const board2 = createBoard('2', GameCtor, false, true);
+    board1.setOpponent(board2);
+  }
+
+  boot();
+</script>
+</body>
+</html>

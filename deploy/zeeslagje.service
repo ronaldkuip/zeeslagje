@@ -1,0 +1,44 @@
+# systemd unit for serve.py — keeps it running persistently (survives
+# SSH logout, auto-restarts on crash/reboot) instead of needing tmux/nohup.
+#
+# Setup on the VPS:
+#   1. Replace the placeholders below:
+#        <USER>        - a dedicated non-root user to run this as
+#                        (e.g. `sudo adduser zeeslagje` first — don't run
+#                        this as root; nothing here needs root)
+#        <PATH_TO_REPO> - the absolute path this project was cloned/copied
+#                        to on the VPS, e.g. /home/zeeslagje/zeeslagje
+#   2. Copy this file into place and enable it:
+#        sudo cp deploy/zeeslagje.service /etc/systemd/system/zeeslagje.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now zeeslagje
+#   3. Check it's actually up:
+#        sudo systemctl status zeeslagje
+#        journalctl -u zeeslagje -f      # follow its stdout/stderr live
+#
+# This only starts serve.py itself (bound to 127.0.0.1, see serve.py's
+# HOST default) — Caddy (see deploy/Caddyfile) is what's actually exposed
+# to the internet and proxies to this.
+
+[Unit]
+Description=Zeeslagje (Battleship) game server
+After=network.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=<PATH_TO_REPO>
+ExecStart=/usr/bin/python3 serve.py 8080 127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+# Light sandboxing — this process doesn't need anything outside its own
+# directory (that's also where .auth_secret/saved_boards.json/
+# simpleresult.txt live, so it still needs write access there).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=<PATH_TO_REPO>
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+# Reverse proxy + automatic HTTPS (Let's Encrypt) for Zeeslagje.
+#
+# Replace the domain below with your actual (sub)domain — it must already
+# point (an A/AAAA DNS record) at this VPS's IP address before Caddy can
+# request a certificate for it. Caddy handles obtaining AND renewing the
+# certificate automatically; nothing else to configure for TLS.
+#
+# serve.py itself binds to 127.0.0.1 only (see serve.py's HOST default) —
+# it is never reachable directly from the internet. Caddy is the only
+# thing actually listening on the public interface (ports 80/443), and
+# forwards to serve.py over localhost.
+#
+# Install: https://caddyserver.com/docs/install (apt/yum package, or a
+# static binary). Then, from this directory:
+#   sudo caddy run --config Caddyfile
+# or point the caddy systemd service's config at this file's path.
+
+battleship.rkcs.nl {
+    reverse_proxy 127.0.0.1:8080
+}

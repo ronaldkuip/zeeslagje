@@ -1,0 +1,124 @@
+Zeeslagje (Battleship) — VPS deployment instructions
+=====================================================
+
+This project needs almost nothing to host: one lightweight Python 3
+process (standard library only, no dependencies to install), no
+database. The Rust/WASM game engine runs entirely client-side in the
+visitor's browser — the server just serves it as a static file.
+
+Prerequisites
+-------------
+- A VPS with root/SSH access (NOT shared/cPanel-style hosting — you need
+  to run your own process and install a reverse proxy).
+- A domain (or subdomain) with its DNS A/AAAA record pointed at the
+  VPS's IP address. E.g. battleship.rkcs.nl -> <VPS IP>.
+- Python 3 installed on the VPS (`python3 --version` to check; install
+  via your distro's package manager if missing, e.g.
+  `sudo apt install python3` on Debian/Ubuntu).
+
+Step 1 — Get the code onto the VPS
+-----------------------------------
+From your own machine, copy the whole project folder to the VPS (excludes
+build artifacts/target/pkg since those regenerate — but simplest is just
+to copy everything and not worry about it for a small project like this):
+
+    scp -r c:\Users\ronal\projects\zeeslagje user@<VPS IP>:/home/<user>/zeeslagje
+
+Or clone from the git repo directly on the VPS if you prefer:
+
+    git clone <your repo URL> /home/<user>/zeeslagje
+
+Step 2 — Create a dedicated user (don't run this as root)
+-----------------------------------------------------------
+    sudo adduser zeeslagje
+    sudo chown -R zeeslagje:zeeslagje /home/<user>/zeeslagje
+
+Step 3 — Lock down the auth secret file's permissions
+--------------------------------------------------------
+serve.py auto-generates .auth_secret on first run (a random password,
+printed to the console too). On a shared/multi-user VPS, restrict who
+can read it:
+
+    chmod 600 /home/<user>/zeeslagje/.auth_secret
+
+(This file is created the first time serve.py runs — do this after the
+first run, or after Step 5 below.)
+
+Step 4 — Run serve.py as a systemd service
+---------------------------------------------
+A ready-made template is in deploy/zeeslagje.service. Edit it first:
+  - Replace <USER>          with the user from Step 2 (e.g. zeeslagje)
+  - Replace <PATH_TO_REPO>  with the actual path (e.g. /home/zeeslagje/zeeslagje)
+
+Then install it:
+
+    sudo cp deploy/zeeslagje.service /etc/systemd/system/zeeslagje.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now zeeslagje
+
+Check it's actually up:
+
+    sudo systemctl status zeeslagje
+    journalctl -u zeeslagje -f      # follow its logs live (also shows failed-login attempts)
+
+Note: this binds to 127.0.0.1 only, by design — it is NOT reachable from
+the internet directly. Only Caddy (next step) is actually exposed.
+
+Step 5 — Install Caddy for HTTPS (reverse proxy + automatic Let's Encrypt certs)
+-----------------------------------------------------------------------------------
+Install Caddy (see https://caddyserver.com/docs/install for your distro —
+usually a one-line apt/yum command, or a static binary).
+
+Edit deploy/Caddyfile first: replace the placeholder domain
+(battleship.rkcs.nl) with your actual domain/subdomain — it must already
+resolve (DNS) to this VPS before Caddy can request a certificate for it.
+
+Then either run it directly:
+
+    sudo caddy run --config deploy/Caddyfile
+
+...or, if your distro's Caddy package installs its own systemd service,
+copy deploy/Caddyfile's contents into Caddy's default config location
+(commonly /etc/caddy/Caddyfile) and:
+
+    sudo systemctl reload caddy
+
+Caddy handles obtaining AND automatically renewing the TLS certificate —
+nothing further to configure for HTTPS.
+
+Step 6 — Firewall
+--------------------
+Only 3 ports should ever be open to the public internet:
+  - 22   (SSH)
+  - 80   (HTTP — Caddy needs this for the Let's Encrypt certificate challenge)
+  - 443  (HTTPS — the actual site)
+
+Example with ufw:
+
+    sudo ufw allow 22
+    sudo ufw allow 80
+    sudo ufw allow 443
+    sudo ufw enable
+
+Port 8080 (serve.py itself) should NOT be opened here — it's bound to
+127.0.0.1 already, so it isn't reachable externally regardless, but don't
+add a firewall rule for it either.
+
+Step 7 — Verify
+------------------
+Visit https://<your domain>/player.html in a browser. You should see:
+  - A valid HTTPS padlock (Caddy's automatic certificate).
+  - A username/password prompt (HTTP Basic Auth) — username can be
+    anything, password is whatever's in .auth_secret / was printed when
+    serve.py started (check `journalctl -u zeeslagje` if you missed it).
+
+Ongoing maintenance
+-----------------------
+  - Logs: `journalctl -u zeeslagje -f` (includes failed login attempts,
+    with source IP — 5 failures from one IP within 5 minutes triggers a
+    temporary 429 lockout for that IP automatically).
+  - Restart after a code change: `sudo systemctl restart zeeslagje`
+    (pure Python/HTML/JS changes need no rebuild; only Rust source
+    changes require re-running build.sh/build.ps1 and copying the new
+    pkg/ output before restarting).
+  - Caddy renews certificates automatically — no manual action needed.

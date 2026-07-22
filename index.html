@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Zeeslagje — Chart Table</title>
+<title>Battleship — Chart Table</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%E2%9A%93</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -71,13 +71,16 @@
     margin-bottom:28px;
   }
   header.masthead h1{
-    font-family:'Newsreader', serif;
-    font-weight:600;
-    font-style:italic;
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:400;
+    font-style:normal;
     font-size:clamp(28px, 4vw, 40px);
     letter-spacing:0.2px;
     margin:0;
     color:var(--chart-paper);
+  }
+  header.masthead h1 .tagline{
+    font-size:clamp(20px, 3vw, 28px);
   }
   header.masthead .subtitle{
     font-family:'IBM Plex Mono', monospace;
@@ -94,6 +97,13 @@
     line-height:1.7;
   }
   header.masthead .meta b{color:var(--chart-paper);}
+  header.masthead .meta-wrap{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-end;
+    gap:8px;
+  }
+  .page-switch-btn{text-decoration:none; display:inline-block;}
 
   .layout{
     display:grid;
@@ -712,12 +722,15 @@
 
   <header class="masthead">
     <div>
-      <h1>Zeeslagje</h1>
+      <h1>Battleship <span class="tagline">(An imperfect information game)</span></h1>
       <div class="subtitle">Chart Table &amp; Salvo Log</div>
     </div>
-    <div class="meta">
-      Turn <b id="turnNo">1</b> &nbsp;·&nbsp; Hits <b id="hitCount">0</b>/<span id="hitTotal">20</span>
-      <br><span style="opacity:0.5;">build 5</span>
+    <div class="meta-wrap">
+      <a class="btn btn-brass page-switch-btn" href="player.html">Player Page &rarr;</a>
+      <div class="meta">
+        Turn <b id="turnNo">1</b> &nbsp;·&nbsp; Hits <b id="hitCount">0</b>/<span id="hitTotal">20</span>
+        <br><span style="opacity:0.5;">build 5</span>
+      </div>
     </div>
   </header>
 
@@ -750,7 +763,7 @@
       <!-- Sidebar -->
       <aside>
         <div class="panel">
-          <h2>AI Advisory</h2>
+          <h2>AI Advisor</h2>
           <div class="advisory-readout" id="advisoryReadout"></div>
           <button class="btn btn-teal" id="useAdvisoryBtn">Use these 3</button>
         </div>

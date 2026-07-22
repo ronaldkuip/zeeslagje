@@ -688,6 +688,15 @@ impl Game {
         serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// Same idea as `cruiser_identified_json`, one size down — see
+    /// `AiPlayer::frigate_identified_cells_refined`. Empty until all 3
+    /// Frigates' exact 6-cell layout is pinned down.
+    pub fn frigate_identified_json(&self) -> String {
+        let cells = self.ai.frigate_identified_cells_refined();
+        let indices: Vec<usize> = cells.iter().map(|&(r, c)| r * 10 + c).collect();
+        serde_json::to_string(&indices).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Debug/inspector: every 3-bearing salvo seen so far — same shape as
     /// `cross2_debug_json`, one ship size up.
     ///
@@ -3462,5 +3471,73 @@ mod tests {
         // gating fix. See run_autoplay_equivalent.
         let layout_json = r#"{"board": [[null, null, null, null, null, null, null, null, null, null], [null, null, null, null, null, null, null, 5, 5, null], [null, 1, null, 8, null, 6, null, null, null, null], [null, 1, null, null, 4, null, 3, null, null, null], [null, 1, null, null, 4, null, 3, null, null, null], [null, null, null, null, null, null, null, null, 2, null], [null, null, 0, 0, 0, 0, null, null, 2, null], [null, null, null, null, null, null, null, null, 2, null], [null, null, null, null, null, null, 7, null, null, null], [null, 9, null, null, null, null, null, null, null, null]], "ships": [{"id": 0, "name": "Battleship", "size": 4, "cells": [{"row": 6, "col": 2}, {"row": 6, "col": 3}, {"row": 6, "col": 4}, {"row": 6, "col": 5}], "hits": 4, "sunk": true}, {"id": 1, "name": "Cruiser", "size": 3, "cells": [{"row": 2, "col": 1}, {"row": 3, "col": 1}, {"row": 4, "col": 1}], "hits": 3, "sunk": true}, {"id": 2, "name": "Cruiser", "size": 3, "cells": [{"row": 5, "col": 8}, {"row": 6, "col": 8}, {"row": 7, "col": 8}], "hits": 3, "sunk": true}, {"id": 3, "name": "Frigate", "size": 2, "cells": [{"row": 3, "col": 6}, {"row": 4, "col": 6}], "hits": 2, "sunk": true}, {"id": 4, "name": "Frigate", "size": 2, "cells": [{"row": 3, "col": 4}, {"row": 4, "col": 4}], "hits": 2, "sunk": true}, {"id": 5, "name": "Frigate", "size": 2, "cells": [{"row": 1, "col": 7}, {"row": 1, "col": 8}], "hits": 2, "sunk": true}, {"id": 6, "name": "Submarine", "size": 1, "cells": [{"row": 2, "col": 5}], "hits": 1, "sunk": true}, {"id": 7, "name": "Submarine", "size": 1, "cells": [{"row": 8, "col": 6}], "hits": 1, "sunk": true}, {"id": 8, "name": "Submarine", "size": 1, "cells": [{"row": 2, "col": 3}], "hits": 1, "sunk": true}, {"id": 9, "name": "Submarine", "size": 1, "cells": [{"row": 9, "col": 1}], "hits": 0, "sunk": false}]}"#;
         run_autoplay_equivalent(layout_json, 40);
+    }
+
+    /// Like `run_autoplay_equivalent`, but stops on
+    /// `resolution_status_json().resolved` rather than `is_won()` — the
+    /// exact stopping condition `gameTrulyDone()`/`takeAiTurn()`/
+    /// `runToCompletion()` use in player.html for board 2 (the player's
+    /// own placed fleet), which keeps firing disambiguation salvos past a
+    /// win precisely because a reduced no-Submarine fleet can reach
+    /// `is_won()` well before the Cruiser/Frigate layout is pinned down.
+    fn run_until_resolved(layout_json: &str, max_shots: usize) {
+        let mut game = Game::new();
+        let load_result = game.load_board_layout_json(layout_json);
+        assert!(!load_result.contains("error"), "board layout failed to load: {load_result}");
+
+        let mut shots_taken = 0;
+        loop {
+            let status: serde_json::Value = serde_json::from_str(&game.resolution_status_json()).unwrap();
+            if status["resolved"].as_bool().unwrap_or(false) {
+                break;
+            }
+            assert!(
+                shots_taken < max_shots,
+                "did not resolve within {max_shots} shots (won={}, status={status:?})",
+                game.is_won()
+            );
+
+            let mut indices: Vec<usize> = Vec::new();
+            if game.ai_target_size() <= 1 {
+                game.update_fsm_and_resolve();
+                indices = serde_json::from_str(&game.ai_suggest_disambiguation_refire()).unwrap_or_default();
+                if indices.len() != 3 {
+                    indices = serde_json::from_str(&game.ai_suggest_disambiguation_last_resort()).unwrap_or_default();
+                }
+            }
+            if indices.len() != 3 {
+                indices = serde_json::from_str(&game.ai_suggest()).unwrap_or_default();
+            }
+            assert_eq!(indices.len(), 3, "no valid 3-cell salvo available (shots_taken={shots_taken})");
+
+            let response = game.fire(&indices);
+            assert!(!response.contains("\"error\""), "shot {shots_taken} rejected: {response} (indices={indices:?})");
+            shots_taken += 1;
+        }
+    }
+
+    #[test]
+    fn ai_can_fully_resolve_a_no_submarine_fleet() {
+        // The Player Page's "position your fleet" board (player.html)
+        // loads a 6-ship layout — 1 Battleship, 2 Cruisers, 3 Frigates —
+        // with NO Submarines at all, unlike every other layout tested in
+        // this file. Live report: the "ship fully identified" outline
+        // never lights up there. Checks whether resolution_status_json()
+        // .resolved is EVEN REACHABLE for a fleet shaped like this — a
+        // simple, well-separated layout.
+        let layout_json = r#"{"board": [[null,null,null,null,null,null,null,null,null,null],[null,0,0,0,0,null,null,null,null,null],[null,null,null,null,null,null,null,null,null,null],[null,1,1,1,null,null,2,2,2,null],[null,null,null,null,null,null,null,null,null,null],[null,3,3,null,4,4,null,5,5,null],[null,null,null,null,null,null,null,null,null,null],[null,null,null,null,null,null,null,null,null,null],[null,null,null,null,null,null,null,null,null,null],[null,null,null,null,null,null,null,null,null,null]], "ships": [{"id":0,"name":"Battleship","size":4,"cells":[{"row":1,"col":1},{"row":1,"col":2},{"row":1,"col":3},{"row":1,"col":4}],"hits":0,"sunk":false},{"id":1,"name":"Cruiser","size":3,"cells":[{"row":3,"col":1},{"row":3,"col":2},{"row":3,"col":3}],"hits":0,"sunk":false},{"id":2,"name":"Cruiser","size":3,"cells":[{"row":3,"col":6},{"row":3,"col":7},{"row":3,"col":8}],"hits":0,"sunk":false},{"id":3,"name":"Frigate","size":2,"cells":[{"row":5,"col":1},{"row":5,"col":2}],"hits":0,"sunk":false},{"id":4,"name":"Frigate","size":2,"cells":[{"row":5,"col":4},{"row":5,"col":5}],"hits":0,"sunk":false},{"id":5,"name":"Frigate","size":2,"cells":[{"row":5,"col":7},{"row":5,"col":8}],"hits":0,"sunk":false}]}"#;
+        run_until_resolved(layout_json, 60);
+    }
+
+    #[test]
+    fn ai_can_fully_resolve_a_no_submarine_fleet_tight_layout() {
+        // Same idea, but reusing the exact Battleship/Cruiser/Frigate
+        // positions from `autoplay_equivalent_resolves_board_23_layout`'s
+        // known-tricky layout, with its 4 Submarines simply removed —
+        // a tighter, more adversarial arrangement than the well-separated
+        // one above, to check the "no Submarines" gap isn't only safe for
+        // easy layouts.
+        let layout_json = r#"{"board": [[null,null,null,null,null,null,null,null,null,null],[null,0,0,0,0,null,null,5,null,null],[null,null,null,null,null,null,null,5,null,null],[null,4,null,null,null,null,null,null,null,null],[null,4,null,null,null,null,null,null,null,null],[null,null,null,null,null,null,2,2,2,null],[null,null,null,3,3,null,null,null,null,null],[null,null,null,null,null,null,1,1,1,null],[null,null,null,null,null,null,null,null,null,null],[null,null,null,null,null,null,null,null,null,null]], "ships": [{"id":0,"name":"Battleship","size":4,"cells":[{"row":1,"col":1},{"row":1,"col":2},{"row":1,"col":3},{"row":1,"col":4}],"hits":0,"sunk":false},{"id":1,"name":"Cruiser","size":3,"cells":[{"row":7,"col":6},{"row":7,"col":7},{"row":7,"col":8}],"hits":0,"sunk":false},{"id":2,"name":"Cruiser","size":3,"cells":[{"row":5,"col":6},{"row":5,"col":7},{"row":5,"col":8}],"hits":0,"sunk":false},{"id":3,"name":"Frigate","size":2,"cells":[{"row":6,"col":3},{"row":6,"col":4}],"hits":0,"sunk":false},{"id":4,"name":"Frigate","size":2,"cells":[{"row":3,"col":1},{"row":4,"col":1}],"hits":0,"sunk":false},{"id":5,"name":"Frigate","size":2,"cells":[{"row":1,"col":7},{"row":2,"col":7}],"hits":0,"sunk":false}]}"#;
+        run_until_resolved(layout_json, 60);
     }
 }

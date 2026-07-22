@@ -3,3 +3,5 @@
 .claude/
 /simpleresult.txt
 /identifiability.csv
+/.auth_secret
+__pycache__/
