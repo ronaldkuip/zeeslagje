@@ -237,6 +237,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_HEAD(self):
+        if not self._require_auth():
+            return
+        self._ensure_session()
+        super().do_HEAD()
+
     def do_GET(self):
         if not self._require_auth():
             return
