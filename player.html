@@ -508,6 +508,122 @@
     border-radius:4px;
   }
   .error-notice{color:var(--coral-bright); border-color:var(--coral);}
+
+  /* "Position your fleet" title row (board 2 only) — the title chip stays
+     centred exactly as before; the help button is pinned to this relative
+     wrapper's right edge instead of disturbing the h2's own box. */
+  .board-title-wrap{position:relative;}
+  .help-btn{
+    position:absolute;
+    right:0;
+    top:50%;
+    transform:translateY(-50%);
+    width:28px;
+    height:28px;
+    border-radius:50%;
+    border:1px solid var(--brass);
+    background:transparent;
+    color:var(--brass-bright);
+    font-family:'IBM Plex Mono', monospace;
+    font-size:14px;
+    font-weight:600;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    transition:background 120ms ease;
+  }
+  .help-btn:hover{background:rgba(217,168,62,0.14);}
+  .help-btn:active{transform:translateY(calc(-50% + 1px));}
+  .help-btn:focus-visible{outline:2px solid var(--focus); outline-offset:2px;}
+
+  /* ---------- Fleet placement help modal ---------- */
+  .modal-backdrop{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(6,16,26,0.72);
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    z-index:100;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal-box{
+    background:var(--chart-paper);
+    color:var(--ink);
+    border-radius:8px;
+    padding:24px;
+    max-width:360px;
+    width:100%;
+    position:relative;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal-box h3{
+    font-family:'Newsreader', serif;
+    font-weight:600;
+    font-style:italic;
+    font-size:20px;
+    margin:0 0 14px;
+  }
+  .modal-close{
+    position:absolute;
+    top:14px;
+    right:14px;
+    width:26px;
+    height:26px;
+    border-radius:50%;
+    border:none;
+    background:transparent;
+    color:var(--ink);
+    font-size:16px;
+    line-height:1;
+    cursor:pointer;
+    opacity:0.6;
+  }
+  .modal-close:hover{opacity:1; background:rgba(0,0,0,0.08);}
+  .help-grid{
+    display:grid;
+    grid-template-columns:repeat(8, 1fr);
+    gap:2px;
+    max-width:256px;
+    margin:0 auto;
+  }
+  .help-cell{
+    aspect-ratio:1/1;
+    background:var(--shallow-water);
+    border:1px solid var(--shallow-water-border);
+    border-radius:2px;
+  }
+  .help-cell.battleship{background:var(--cross-yellow); border-color:var(--cross-yellow);}
+  .help-cell.cruiser{background:var(--coral); border-color:var(--coral);}
+  .help-cell.frigate{background:var(--flag-green); border-color:var(--flag-green);}
+  .help-legend{
+    display:flex;
+    gap:14px;
+    flex-wrap:wrap;
+    justify-content:center;
+    margin-top:12px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    color:var(--paper-muted);
+  }
+  .help-legend .swatch{
+    display:inline-block;
+    width:9px;
+    height:9px;
+    border-radius:2px;
+    margin-right:5px;
+    vertical-align:middle;
+  }
+  .help-note{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    line-height:1.6;
+    color:var(--ink);
+    margin:14px 0 0;
+  }
+  .help-note.muted{color:var(--paper-muted); margin-top:6px;}
 </style>
 </head>
 <body>
@@ -580,7 +696,10 @@
     </div>
 
     <div class="layout" data-board="2">
-      <h2 class="board-title">Position your fleet</h2>
+      <div class="board-title-wrap">
+        <h2 class="board-title">Position your fleet</h2>
+        <button class="help-btn" id="fleetHelpBtn" type="button" aria-haspopup="dialog" title="Fleet placement help">?</button>
+      </div>
       <div class="board-meta">Turn <b id="turnNo-2">1</b> &nbsp;·&nbsp; Hits <b id="hitCount-2">0</b>/<span id="hitTotal-2">20</span></div>
       <section class="chart-card">
         <div class="grid-scale" id="gridScale-2">
@@ -647,6 +766,21 @@
     </div>
   </div>
 
+</div>
+
+<div class="modal-backdrop" id="fleetHelpBackdrop">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="fleetHelpTitle">
+    <button class="modal-close" id="fleetHelpClose" type="button" aria-label="Close">&times;</button>
+    <h3 id="fleetHelpTitle">Example valid fleet placement</h3>
+    <div class="help-grid" id="fleetHelpGrid"></div>
+    <div class="help-legend">
+      <span><span class="swatch" style="background:var(--cross-yellow)"></span>Battleship</span>
+      <span><span class="swatch" style="background:var(--coral)"></span>Cruiser</span>
+      <span><span class="swatch" style="background:var(--flag-green)"></span>Frigate</span>
+    </div>
+    <p class="help-note">Place 1 Battleship (4 blocks), 2 Cruisers (3 blocks), 3 Frigates (2 blocks).</p>
+    <p class="help-note muted">Borders will turn white when placement is complete.</p>
+  </div>
 </div>
 
 <script type="module">
@@ -1690,6 +1824,49 @@
     const board2 = createBoard('2', GameCtor, false, true);
     board1.setOpponent(board2);
   }
+
+  // ---------- Fleet placement help modal ----------
+  // Purely a static reference (one hand-picked valid layout) — not wired
+  // to either board's actual game state, so it works even before boot()
+  // has finished loading the WASM module.
+  (function setupFleetHelp(){
+    const btn = document.getElementById('fleetHelpBtn');
+    const backdrop = document.getElementById('fleetHelpBackdrop');
+    const closeBtn = document.getElementById('fleetHelpClose');
+    const grid = document.getElementById('fleetHelpGrid');
+    if (!btn || !backdrop || !grid) return;
+
+    // Hand-picked to satisfy the actual placement rules (inner 8x8 only,
+    // no orthogonal/diagonal touching between different ships).
+    const SHIPS = [
+      { type: 'battleship', cells: [[0,0],[0,1],[0,2],[0,3]] },
+      { type: 'cruiser',    cells: [[0,5],[0,6],[0,7]] },
+      { type: 'cruiser',    cells: [[2,0],[3,0],[4,0]] },
+      { type: 'frigate',    cells: [[2,3],[2,4]] },
+      { type: 'frigate',    cells: [[2,6],[3,6]] },
+      { type: 'frigate',    cells: [[5,2],[5,3]] },
+    ];
+    const shipTypeByCell = new Map();
+    for (const ship of SHIPS){
+      for (const [r,c] of ship.cells) shipTypeByCell.set(`${r},${c}`, ship.type);
+    }
+    for (let r = 0; r < 8; r++){
+      for (let c = 0; c < 8; c++){
+        const cell = document.createElement('div');
+        const type = shipTypeByCell.get(`${r},${c}`);
+        cell.className = 'help-cell' + (type ? ` ${type}` : '');
+        grid.appendChild(cell);
+      }
+    }
+
+    function open(){ backdrop.classList.add('open'); }
+    function close(){ backdrop.classList.remove('open'); }
+
+    btn.addEventListener('click', open);
+    closeBtn.addEventListener('click', close);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  })();
 
   boot();
 </script>
