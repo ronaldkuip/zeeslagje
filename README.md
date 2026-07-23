@@ -19,6 +19,20 @@ A browser Battleship deduction game. All game logic runs in WebAssembly compiled
 | Frigate        | 2    | 3     | Inner 8×8             | No orthogonal or diagonal neighbours |
 | Submarine      | 1    | 4     | Full 10×10            | No orthogonal neighbours; diagonal OK |
 
+## The Solver's Underlying Methodology
+
+**Problem formulation.** Unlike the canonical single-cell variant of Battleship, this implementation issues salvos of three shots per turn on a 10×10 grid, and returns results as an unordered multiset — e.g., "4, 1, 0" denotes one hit on a size-4 vessel, one hit on a size-1 vessel, and one miss — without disclosing which coordinate produced which outcome. This partial observability precludes naïve cell-by-cell inference and necessitates a constraint-satisfaction approach: the solver must maintain, and continually revise, the set of board configurations consistent with the complete observation history.
+
+**Line-wise state compression.** For each row and column independently, the solver maintains a finite-state representation encoding the subset of admissible ship placements along that line, given a target vessel length. These automata are precomputed offline as lookup tables, such that each incoming shot induces an O(1) state transition rather than a re-derivation from first principles. This decomposition reduces what would otherwise be a two-dimensional combinatorial problem to a set of tractable one-dimensional subproblems, at the cost of not directly capturing cross-axis dependencies.
+
+**Global consistency enumeration for larger vessels.** For the battleship and cruiser classes, the solver performs exhaustive enumeration over all candidate placements on the full board, filtering this hypothesis space against the entire salvo history — including the adjacency constraint that no two vessels may occupy orthogonally or diagonally adjacent cells. The surviving hypothesis set constitutes an implicit posterior over ship locations; marginal occupancy probability per cell is estimated by frequency of appearance across the surviving hypotheses, yielding a heatmap analogous to a uniform Bayesian posterior over a discrete, combinatorially pruned hypothesis space — rather than a sampled or Monte Carlo approximation.
+
+**Search prioritization: hunt versus target.** Target selection follows a fixed size-priority ordering (battleship, then cruisers, then frigates, then submarines). Upon partial localization of a vessel, the objective function shifts from pure expected-hit maximization toward an information-theoretic criterion: the solver preferentially selects cells that bisect the remaining hypothesis space as evenly as possible, a strategy structurally analogous to optimal strategies in the Rényi–Ulam "twenty questions" problem, rather than continuing to maximize immediate hit probability alone.
+
+**Joint salvo optimization.** Because feedback is only available at the granularity of the full three-shot salvo, shot selection is not performed greedily on a per-cell basis. Instead, the solver evaluates candidate triples of cells jointly, simulating the range of possible aggregate outcomes for each triple, and selects the combination maximizing expected information gain or hit yield over the salvo as a whole.
+
+**Summary characterization.** The system is best described as an exact, incrementally-maintained constraint-propagation engine operating over a discretized hypothesis space — combining per-axis finite-state compression with full-board combinatorial filtering for larger vessels — rather than a stochastic or sampling-based estimator. Its behavior is deterministic given the observation history, and its probability estimates derive from exact counting over surviving logical hypotheses rather than from randomized simulation.
+
 ## Project structure
 
 ```
