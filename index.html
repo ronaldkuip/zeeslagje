@@ -1983,16 +1983,24 @@
     return !!status.resolved;
   }
 
-  // Salvos-taken (each 3 coordinates fired together) for every RESOLVED
-  // game in the current batch run (reset at the start of each new
-  // "Autorun batch" click) — unresolved games are deliberately excluded,
-  // since their salvo count reflects hitting the hunting-phase cap rather
-  // than genuinely finishing. Resolved games are otherwise forgotten
-  // entirely (not saved) — only their salvo count is kept, for the stats
-  // line below. Unresolved games ARE saved (that's the whole point of a
-  // large batch: harvesting the rare ones that don't resolve), tracked
-  // here just as their saved ids for the summary line.
-  let batchResolvedSalvoCounts = [];
+  // Running min/max/sum/count of salvos-taken (each 3 coordinates fired
+  // together) across every RESOLVED game in the current batch run (reset
+  // at the start of each new "Autorun batch" click) — unresolved games are
+  // deliberately excluded, since their salvo count reflects hitting the
+  // hunting-phase cap rather than genuinely finishing. Resolved games are
+  // otherwise forgotten entirely (not saved) — only these running stats
+  // are kept, for the stats line below. Tracked incrementally (not as a
+  // growing array reduced via Math.min(...arr)/Math.max(...arr)) because a
+  // 500000-long batch made that spread blow past the engine's max-call-
+  // arguments ceiling partway through, throwing an uncaught RangeError
+  // that silently wedged the whole batch. Unresolved games ARE saved
+  // (that's the whole point of a large batch: harvesting the rare ones
+  // that don't resolve), tracked here just as their saved ids for the
+  // summary line.
+  let batchResolvedCount = 0;
+  let batchResolvedSum = 0;
+  let batchResolvedMin = Infinity;
+  let batchResolvedMax = -Infinity;
   let batchUnresolvedIds = [];
 
   // Games-resolved-in-exactly-N-salvos histogram, N = 1..30 (index 0
@@ -2007,11 +2015,9 @@
 
   function updateBatchStatsLine(){
     const parts = [];
-    if (batchResolvedSalvoCounts.length > 0){
-      const min = Math.min(...batchResolvedSalvoCounts);
-      const max = Math.max(...batchResolvedSalvoCounts);
-      const avg = (batchResolvedSalvoCounts.reduce((a, b) => a + b, 0) / batchResolvedSalvoCounts.length).toFixed(1);
-      parts.push(`Resolved — min salvos: ${min}, average: ${avg}, max: ${max} (n=${batchResolvedSalvoCounts.length})`);
+    if (batchResolvedCount > 0){
+      const avg = (batchResolvedSum / batchResolvedCount).toFixed(1);
+      parts.push(`Resolved — min salvos: ${batchResolvedMin}, average: ${avg}, max: ${batchResolvedMax} (n=${batchResolvedCount})`);
     }
     if (batchUnresolvedIds.length > 0){
       const shown = batchUnresolvedIds.slice(0, 20).map(id => `#${id}`).join(', ');
@@ -2071,7 +2077,10 @@
     resetBtn.disabled = true;
     restartSameBoardBtn.disabled = true;
     const originalLabel = autoPlayBatchBtn.textContent;
-    batchResolvedSalvoCounts = [];
+    batchResolvedCount = 0;
+    batchResolvedSum = 0;
+    batchResolvedMin = Infinity;
+    batchResolvedMax = -Infinity;
     batchUnresolvedIds = [];
     batchSalvoHistogram = new Array(31).fill(0);
     updateBatchStatsLine();
@@ -2086,7 +2095,10 @@
 
       const resolved = isFullyResolved();
       if (resolved && result){
-        batchResolvedSalvoCounts.push(result.salvosTaken);
+        batchResolvedCount++;
+        batchResolvedSum += result.salvosTaken;
+        if (result.salvosTaken < batchResolvedMin) batchResolvedMin = result.salvosTaken;
+        if (result.salvosTaken > batchResolvedMax) batchResolvedMax = result.salvosTaken;
         batchSalvoHistogram[Math.min(result.salvosTaken, 30)]++;
       } else if (!resolved){
         // Not every ship layout — Battleship, both Cruisers, and all 3
