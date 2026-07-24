@@ -1929,6 +1929,17 @@
       // is already the global flag that distinguishes the 2 cases.
       if (!batchRunning){
         await sleep(300);
+      } else if (salvosTaken % 25 === 0){
+        // Disambiguation (once ai_target_size() drops to 1) is uncapped by
+        // design — see the comment above MAX_HUNT_SALVOS — so an unlucky
+        // board could in principle need far more than the ~15-40 salvos a
+        // typical game takes. With zero yields during a batch run, that
+        // whole stretch would run as one uninterrupted synchronous burst:
+        // the tab would look hard-frozen (not just the batch UI not
+        // updating) for as long as it takes, with no way to tell that from
+        // an actual hang. A yield every 25 salvos keeps the tab responsive
+        // either way, at negligible cost for the common case.
+        await sleep(0);
       }
     }
 
@@ -2086,71 +2097,99 @@
     updateBatchStatsLine();
     batchHistogramEl.innerHTML = '';
 
-    for (let i = 1; i <= n; i++){
-      autoPlayBatchBtn.textContent = `Autorun batch (${i}/${n})`;
-      resetGame();
-      autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
-      const result = await runAutoPlay();
-      batchSizeInput.value = n - i; // counts down to 0 as games finish, so progress is visible at a glance
+    // currentGameIndex lives outside the loop (not `let i` scoped to the
+    // for-statement) so the catch block below can report which game a
+    // stop happened on. Previously, ANY exception anywhere in this loop
+    // (WASM trap, unhandled edge case, a future bug like the one this
+    // replaces) reject the whole async function's promise with nothing
+    // awaiting it — batchRunning/the disabled buttons never got reset,
+    // so the batch just went silently and permanently unresponsive with
+    // zero on-screen indication of what happened or even that anything
+    // went wrong. See the fix for the Math.min(...array) case that used
+    // to live here for the first occurrence of this failure mode.
+    let currentGameIndex = 0;
+    let stopError = null;
 
-      const resolved = isFullyResolved();
-      if (resolved && result){
-        batchResolvedCount++;
-        batchResolvedSum += result.salvosTaken;
-        if (result.salvosTaken < batchResolvedMin) batchResolvedMin = result.salvosTaken;
-        if (result.salvosTaken > batchResolvedMax) batchResolvedMax = result.salvosTaken;
-        batchSalvoHistogram[Math.min(result.salvosTaken, 30)]++;
-      } else if (!resolved){
-        // Not every ship layout — Battleship, both Cruisers, and all 3
-        // Frigates — was genuinely established and correct. Save it (skip
-        // the Saved Boards panel refresh here — see saveCurrentBoard's doc
-        // comment — done once, after the whole batch, instead) and keep
-        // going rather than stopping the batch.
-        const id = await saveCurrentBoard(false);
-        if (id !== undefined){
-          batchUnresolvedIds.push(id);
+    try {
+      for (currentGameIndex = 1; currentGameIndex <= n; currentGameIndex++){
+        autoPlayBatchBtn.textContent = `Autorun batch (${currentGameIndex}/${n})`;
+        resetGame();
+        autoPlayBtn.disabled = true; // resetGame() re-enables it; keep it disabled for the whole batch
+        const result = await runAutoPlay();
+        batchSizeInput.value = n - currentGameIndex; // counts down to 0 as games finish, so progress is visible at a glance
+
+        const resolved = isFullyResolved();
+        if (resolved && result){
+          batchResolvedCount++;
+          batchResolvedSum += result.salvosTaken;
+          if (result.salvosTaken < batchResolvedMin) batchResolvedMin = result.salvosTaken;
+          if (result.salvosTaken > batchResolvedMax) batchResolvedMax = result.salvosTaken;
+          batchSalvoHistogram[Math.min(result.salvosTaken, 30)]++;
+        } else if (!resolved){
+          // Not every ship layout — Battleship, both Cruisers, and all 3
+          // Frigates — was genuinely established and correct. Save it (skip
+          // the Saved Boards panel refresh here — see saveCurrentBoard's doc
+          // comment — done once, after the whole batch, instead) and keep
+          // going rather than stopping the batch.
+          const id = await saveCurrentBoard(false);
+          if (id !== undefined){
+            batchUnresolvedIds.push(id);
+          }
         }
-      }
-      updateBatchStatsLine();
+        updateBatchStatsLine();
 
-      // Yield back to the browser once per GAME (not per salvo, unlike the
-      // old 300ms pacing this replaced) so the countdown/stats actually
-      // repaint — without this, a run of resolved games (nothing async to
-      // await: no per-salvo sleep anymore, no save) can blow through many
-      // iterations in one synchronous burst, updating batchSizeInput.value
-      // in memory each time but never letting the browser draw any of it
-      // until something finally pauses for real.
-      await sleep(0);
+        // Yield back to the browser once per GAME (not per salvo, unlike the
+        // old 300ms pacing this replaced) so the countdown/stats actually
+        // repaint — without this, a run of resolved games (nothing async to
+        // await: no per-salvo sleep anymore, no save) can blow through many
+        // iterations in one synchronous burst, updating batchSizeInput.value
+        // in memory each time but never letting the browser draw any of it
+        // until something finally pauses for real.
+        await sleep(0);
+      }
+    } catch (err) {
+      stopError = err;
+      console.error(`Autorun batch stopped early at game ${currentGameIndex}/${n}:`, err);
     }
 
     batchRunning = false;
 
-    // Full re-render of just the final game — every game during the loop
-    // above skipped its own per-shot/per-reset visual updates (see
-    // doFire/afterGameStateReset's batchRunning gating) to stay fast, so
-    // the board on screen is still whatever was last drawn before this
-    // batch started. Reconstruct it once here from the WASM game's own
-    // current state (tracked correctly throughout, just never drawn) —
-    // this is the "only show the last" behaviour.
-    gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
-    logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
-    let finalLog = [];
-    try { finalLog = JSON.parse(game.log_json()); } catch { finalLog = []; }
-    finalLog.forEach(entry => {
-      markFired(entry.coords);
-      appendLogEntry(entry);
-    });
-    turnNo.textContent = game.turn();
-    hitCount.textContent = countHits();
-    refreshFleet();
-    refreshBattleshipCross();
-    refreshFullyEliminatedCells();
-    refreshRefirableCells();
-    refreshHeatmaps();
-    refreshCruiserIdentified();
-    renderSelection();
-    refreshAdvisory();
-    renderBatchHistogram();
+    // Also try/catch the final re-render: if `stopError` came from a WASM
+    // trap, the wasm instance can be left unusable, and every one of these
+    // game.*() calls would throw too — without this, that would abort the
+    // function again right here and still leave the buttons disabled below
+    // unreached, defeating the whole point of the try/catch above.
+    try {
+      // Full re-render of just the final game — every game during the loop
+      // above skipped its own per-shot/per-reset visual updates (see
+      // doFire/afterGameStateReset's batchRunning gating) to stay fast, so
+      // the board on screen is still whatever was last drawn before this
+      // batch started. Reconstruct it once here from the WASM game's own
+      // current state (tracked correctly throughout, just never drawn) —
+      // this is the "only show the last" behaviour.
+      gridScale.querySelectorAll('.cell').forEach(el => el.classList.remove('fired','selected','suggested','cross-candidate','cross-identified','refirable','fully-eliminated','cruiser-identified','cruiser-alt-candidate'));
+      logList.innerHTML = '<div class="log-empty">No salvos fired yet.</div>';
+      let finalLog = [];
+      try { finalLog = JSON.parse(game.log_json()); } catch { finalLog = []; }
+      finalLog.forEach(entry => {
+        markFired(entry.coords);
+        appendLogEntry(entry);
+      });
+      turnNo.textContent = game.turn();
+      hitCount.textContent = countHits();
+      refreshFleet();
+      refreshBattleshipCross();
+      refreshFullyEliminatedCells();
+      refreshRefirableCells();
+      refreshHeatmaps();
+      refreshCruiserIdentified();
+      renderSelection();
+      refreshAdvisory();
+      renderBatchHistogram();
+    } catch (err) {
+      if (!stopError) stopError = err;
+      console.error('Autorun batch: final re-render failed:', err);
+    }
 
     autoPlayBatchBtn.textContent = originalLabel;
     autoPlayBatchBtn.disabled = false;
@@ -2158,7 +2197,9 @@
     batchSizeInput.value = n;
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
-    statusLine.textContent = `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and saved for study.`;
+    statusLine.textContent = stopError
+      ? `Autorun batch stopped early at game ${currentGameIndex}/${n} (${batchUnresolvedIds.length} unresolved saved so far): ${stopError.message || stopError}`
+      : `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and saved for study.`;
     await refreshSavedBoardsList();
   }
 
