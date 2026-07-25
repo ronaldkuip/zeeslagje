@@ -1891,23 +1891,25 @@
     const originalLabel = autoPlayBtn.textContent;
     autoPlayBtn.textContent = 'Auto-playing…';
 
-    // Only the HUNTING phase (still tracking down where the Battleship/
-    // Cruisers/Frigates even are) is capped — an unlucky random board can
-    // occasionally need a lot of hunting salvos before everything's even
-    // sunk. Once ai_target_size() drops to 1 (everything size >=2 is
-    // sunk), disambiguation is provably bounded — each round either
-    // resolves it outright or reports nothing further is possible (see
-    // disambiguation_shots' termination), so it's let run uncapped rather
-    // than risk the hunting phase's bad luck eating into the salvos
-    // disambiguation needs, stopping the game short of a genuinely
-    // reachable resolution. fireBtn.disabled (nothing left to try, via any
-    // tier) remains the real backstop against ever looping forever.
-    const MAX_HUNT_SALVOS = 30;
+    // Hard cap on the WHOLE game (hunting AND disambiguation), not just
+    // hunting. Disambiguation used to run uncapped past this point on the
+    // theory that it's "provably bounded" (each round either resolves it
+    // outright or reports nothing further is possible) — in practice, a
+    // rare board made the Cruiser/Frigate candidate search (consistent_
+    // frigate_candidates_uncached's O(n^3) window-triple enumeration, see
+    // src/ai.rs) blow up badly enough to peg a CPU core indefinitely,
+    // freezing the whole tab with no error and no way to recover except
+    // killing the browser process. A hard 30-salvo ceiling means any game
+    // that hasn't resolved by then is simply bucketed as unresolved (same
+    // bucket as a genuinely unreachable disambiguation) instead of risking
+    // that again. fireBtn.disabled (nothing left to try, via any tier)
+    // remains the backstop for the normal termination path below it.
+    const MAX_SALVOS_PER_GAME = 30;
     let salvosTaken = 0;
     let cleared = gameTrulyDone() || fleetClearedShown;
 
     while (!cleared){
-      if (game.ai_target_size() > 1 && salvosTaken >= MAX_HUNT_SALVOS){
+      if (salvosTaken >= MAX_SALVOS_PER_GAME){
         break;
       }
       // refreshAdvisory() (called by useAdvisoryBtn's own click handler)
@@ -1930,15 +1932,11 @@
       if (!batchRunning){
         await sleep(300);
       } else if (salvosTaken % 25 === 0){
-        // Disambiguation (once ai_target_size() drops to 1) is uncapped by
-        // design — see the comment above MAX_HUNT_SALVOS — so an unlucky
-        // board could in principle need far more than the ~15-40 salvos a
-        // typical game takes. With zero yields during a batch run, that
-        // whole stretch would run as one uninterrupted synchronous burst:
-        // the tab would look hard-frozen (not just the batch UI not
-        // updating) for as long as it takes, with no way to tell that from
-        // an actual hang. A yield every 25 salvos keeps the tab responsive
-        // either way, at negligible cost for the common case.
+        // MAX_SALVOS_PER_GAME now bounds how many ROUNDS a game can take,
+        // but not the cost of any single round — if a rare board makes one
+        // disambiguation round itself expensive (rather than needing many
+        // rounds), this yield is what would keep the tab from looking
+        // hard-frozen while that round runs, at negligible cost otherwise.
         await sleep(0);
       }
     }
@@ -2015,13 +2013,13 @@
   let batchUnresolvedIds = [];
 
   // Games-resolved-in-exactly-N-salvos histogram, N = 1..30 (index 0
-  // unused). 30 matches MAX_HUNT_SALVOS — disambiguation itself is
-  // uncapped, so a resolved game needing more than 30 total salvos is a
-  // genuine outlier; clamped into the 30 bucket rather than growing this
-  // unbounded. Reset alongside the other batch stats at the start of each
-  // run, only ever rendered once at the end (see renderBatchHistogram) —
-  // not live during the run, same reasoning as the rest of Autorun
-  // Batch's visual gating.
+  // unused). 30 matches MAX_SALVOS_PER_GAME, the hard per-game cap — a
+  // resolved game can never need more than that, so the Math.min(...,30)
+  // clamp at the push site is just a defensive bound, not something
+  // expected to ever actually trigger. Reset alongside the other batch
+  // stats at the start of each run, only ever rendered once at the end
+  // (see renderBatchHistogram) — not live during the run, same reasoning
+  // as the rest of Autorun Batch's visual gating.
   let batchSalvoHistogram = new Array(31).fill(0);
 
   function updateBatchStatsLine(){
