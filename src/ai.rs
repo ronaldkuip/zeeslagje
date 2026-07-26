@@ -1379,7 +1379,19 @@ impl AiPlayer {
     /// `disambiguation_shots(..., true, false)` has already come back
     /// empty — see `disambiguation_shots_last_resort`'s doc comment.
     fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>], allow_refire: bool, ignore_refire_cap: bool) -> Option<[(usize, usize); 3]> {
-        const MAX_CANDIDATES_TO_ATTEMPT: usize = 80;
+        // Was 80 — measured empirically to be far too conservative: the cost
+        // of this search is dominated by the O(pool^3) triple loop below
+        // (pool capped at MAX_POOL=14 regardless of candidates.len()), with
+        // candidates.len() only a linear factor inside that — 112,872
+        // candidates (a real saved board that plateaued forever under the
+        // old cap) resolves in ~0.1ms once actually allowed through. The old
+        // 80-cap meant this search — including the with-refire and
+        // last-resort tiers, which all share it — never even ran once a
+        // board had more than 80 surviving hypotheses, silently falling
+        // back to non-disambiguating filler shots for the rest of the game
+        // no matter how many salvos were spent. 200,000 keeps real headroom
+        // while comfortably covering boards like that one.
+        const MAX_CANDIDATES_TO_ATTEMPT: usize = 200_000;
         if candidates.len() <= 1 || candidates.len() > MAX_CANDIDATES_TO_ATTEMPT {
             return None;
         }
