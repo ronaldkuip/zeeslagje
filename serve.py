@@ -15,10 +15,18 @@ session (see "Sessions" below):
   GET  /saved_boards  returns this session's boards merged with the
                       shared legacy pool (or {} if none yet).
   POST /delete_boards body: {"ids": [1, 2, 3]}
-                      removes those ids from THIS session's own boards
-                      (missing ids, or ids only in the shared pool, are
-                      silently ignored), responds
+                      removes those ids from THIS session's own boards AND
+                      the shared legacy pool (missing ids are silently
+                      ignored — there's no ownership distinction on the
+                      shared pool to enforce), responds
                       {"deleted": [...ids actually removed...]}.
+
+Separately, POST /save_fast_solve body: {"board": <BoardLayout>, "salvos": N}
+appends one line to fast_solves.jsonl (gitignored) — a plain append, not
+the read-modify-write-the-whole-file scheme above, since a large Autorun
+Batch harvesting every game solved in exactly 10 salvos could produce far
+more of these than the occasional unresolved board saved_board.json is
+meant for.
 
 Sessions: identified by a "session_id" cookie, set automatically on a
 browser's first request (any request — a plain page load included) and
@@ -72,6 +80,7 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 HOST = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
 LOG_FILE = Path(__file__).resolve().parent / "simpleresult.txt"
 SAVED_BOARDS_FILE = Path(__file__).resolve().parent / "saved_boards.json"
+FAST_SOLVE_FILE = Path(__file__).resolve().parent / "fast_solves.jsonl"
 AUTH_FILE = Path(__file__).resolve().parent / ".auth_secret"
 
 SESSION_COOKIE_NAME = "session_id"
@@ -286,6 +295,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json(200, {"id": next_id})
             return
 
+        if self.path == "/save_fast_solve":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                self._send_json(400, {"error": "invalid JSON body"})
+                return
+
+            # Plain append, not the saved_board read-modify-write-the-
+            # whole-file scheme — a large batch harvesting every game
+            # solved in exactly 10 salvos could produce far more of these
+            # than that scheme is sized for; appending one line stays O(1)
+            # per save regardless of how large the file has already grown.
+            # Still lock-guarded: concurrent appends across sessions are a
+            # real possibility (see _boards_lock's own reasoning), and an
+            # unguarded interleaved write could corrupt a line.
+            with _boards_lock:
+                with FAST_SOLVE_FILE.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry) + "\n")
+
+            self._send_json(200, {"ok": True})
+            return
+
         if self.path == "/delete_boards":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length).decode("utf-8", errors="replace")
@@ -298,10 +331,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             with _boards_lock:
                 all_boards = load_all_boards()
+                # Checks the session's own bucket AND the shared legacy
+                # bucket (see load_all_boards' migration note) — boards
+                # saved before per-session scoping existed live in
+                # `_shared`, visible to every session via session_view, but
+                # were previously only ever deletable from a session's own
+                # bucket, meaning they could be selected and "deleted" in
+                # the UI (200 response) yet silently reappear forever since
+                # nothing was actually removed. Any session can delete a
+                # shared board — there's no ownership distinction on that
+                # legacy bucket to enforce, and hiding-forever isn't a
+                # reasonable substitute for the delete the user asked for.
                 own = all_boards.get(self.session_id, {})
-                deleted = [int(i) for i in ids if i in own]
+                shared = all_boards.get(SHARED_KEY, {})
+                deleted = [int(i) for i in ids if i in own or i in shared]
                 for i in ids:
                     own.pop(i, None)
+                    shared.pop(i, None)
                 save_all_boards(all_boards)
 
             self._send_json(200, {"deleted": deleted})

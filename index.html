@@ -790,7 +790,7 @@
           </div>
           <div class="fire-row" style="margin-top:10px;">
             <label for="batchSizeInput" style="font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--ink);">Batch size</label>
-            <input type="number" id="batchSizeInput" class="batch-input" min="1" max="500000" step="1" value="1">
+            <input type="number" id="batchSizeInput" class="batch-input" min="1" max="1000000" step="1" value="1">
             <button class="btn btn-teal" id="autoPlayBatchBtn" title="Start a fresh game and auto-play it, repeated batch-size times in a row">Autorun batch</button>
           </div>
           <div class="modal-footnote" id="batchStatsLine" style="margin-top:6px;"></div>
@@ -1693,7 +1693,7 @@
     if (game.is_won()){
       won = true;
       if (!batchRunning){
-        logGameEnd('full-win', salvo.turn); // a fetch() per game — 500000 of these would itself be real overhead in a big batch
+        logGameEnd('full-win', salvo.turn); // a fetch() per game — 1000000 of these would itself be real overhead in a big batch
       }
       statusLine.textContent = isFullyResolved()
         ? 'Fleet destroyed. Start a new game to sail again.'
@@ -1751,6 +1751,32 @@
     } catch {
       statusLine.textContent = 'Could not save the board — is the dev server (serve.py) running?';
       return undefined;
+    }
+  }
+
+  // Appends one line to the dev server's fast_solves.jsonl (see
+  // serve.py's /save_fast_solve) for a game that resolved in exactly
+  // FAST_SOLVE_SALVOS salvos — a separate, append-only log rather than
+  // saveCurrentBoard's read-modify-write-the-whole-file scheme, since a
+  // large batch could produce far more of these than that scheme is
+  // sized for. Silently does nothing on failure (same reasoning as
+  // saveCurrentBoard) — never worth interrupting or slowing a batch over
+  // a single missed research sample. No status line update either: unlike
+  // saveCurrentBoard (a deliberate, one-off user action), this fires
+  // routinely and repeatedly during a large batch, and stomping the
+  // status line every time would just be noise over the batch's own
+  // progress text.
+  async function saveFastSolve(salvosTaken){
+    let board;
+    try {
+      board = JSON.parse(game.board_layout_json());
+    } catch {
+      return;
+    }
+    try {
+      await fetch('/save_fast_solve', { method: 'POST', body: JSON.stringify({ board, salvos: salvosTaken }) });
+    } catch {
+      // no logging server available — ignore, same as logGameEnd
     }
   }
 
@@ -1953,7 +1979,7 @@
       // inside doFire — skip a second, redundant line for the same moment.
       // Both this and the timeout branch below skip logGameEnd/openModal
       // entirely during a batch run: a fetch() and a modal popup per game
-      // would be real overhead (and pure noise) across up to 500000 games.
+      // would be real overhead (and pure noise) across up to 1000000 games.
       if (!won && !batchRunning){
         logGameEnd('auto-play cleared', game.turn());
       }
@@ -2012,6 +2038,12 @@
   let batchResolvedMax = -Infinity;
   let batchUnresolvedIds = [];
 
+  // How many salvos counts as a "fast solve" worth harvesting — see
+  // saveFastSolve. Just a count kept live (batchFastSolveCount), not a
+  // growing array — nothing here needs more than the running total.
+  const FAST_SOLVE_SALVOS = 10;
+  let batchFastSolveCount = 0;
+
   // Games-resolved-in-exactly-N-salvos histogram, N = 1..30 (index 0
   // unused). 30 matches MAX_SALVOS_PER_GAME, the hard per-game cap — a
   // resolved game can never need more than that, so the Math.min(...,30)
@@ -2032,6 +2064,9 @@
       const shown = batchUnresolvedIds.slice(0, 20).map(id => `#${id}`).join(', ');
       const more = batchUnresolvedIds.length > 20 ? ` (+${batchUnresolvedIds.length - 20} more)` : '';
       parts.push(`Unresolved harvested: ${batchUnresolvedIds.length} saved as ${shown}${more}`);
+    }
+    if (batchFastSolveCount > 0){
+      parts.push(`Fast solves (${FAST_SOLVE_SALVOS} salvos): ${batchFastSolveCount} logged to fast_solves.jsonl`);
     }
     batchStatsLine.textContent = parts.join(' — ');
   }
@@ -2067,15 +2102,20 @@
   // Runs `batchSizeInput` independent games back-to-back, same as clicking
   // "New game" then "Auto-play" by hand that many times. Resolved games
   // are forgotten immediately — this is meant to run large (the input
-  // allows up to 500000) hunting for the rare board an unresolved
+  // allows up to 1000000) hunting for the rare board an unresolved
   // disambiguation is genuinely unreachable on, so never stops early:
   // whenever a game finishes unresolved, it's saved for later study and
-  // the batch moves straight on to the next game, all the way to n.
+  // the batch moves straight on to the next game, all the way to n. Games
+  // resolved in exactly 10 salvos are ALSO harvested (see
+  // saveFastSolve/FAST_SOLVE_SALVOS below) — a separate, append-only log
+  // rather than the saved-boards JSON scheme, since at this scale a
+  // meaningful fraction of 1000000 games could land on exactly 10 and the
+  // existing scheme rewrites its entire file on every single save.
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
-    if (!Number.isInteger(n) || n < 1 || n > 500000){
-      statusLine.textContent = 'Batch size must be a whole number between 1 and 500000.';
+    if (!Number.isInteger(n) || n < 1 || n > 1000000){
+      statusLine.textContent = 'Batch size must be a whole number between 1 and 1000000.';
       return;
     }
 
@@ -2091,6 +2131,7 @@
     batchResolvedMin = Infinity;
     batchResolvedMax = -Infinity;
     batchUnresolvedIds = [];
+    batchFastSolveCount = 0;
     batchSalvoHistogram = new Array(31).fill(0);
     updateBatchStatsLine();
     batchHistogramEl.innerHTML = '';
@@ -2123,6 +2164,10 @@
           if (result.salvosTaken < batchResolvedMin) batchResolvedMin = result.salvosTaken;
           if (result.salvosTaken > batchResolvedMax) batchResolvedMax = result.salvosTaken;
           batchSalvoHistogram[Math.min(result.salvosTaken, 30)]++;
+          if (result.salvosTaken === FAST_SOLVE_SALVOS){
+            await saveFastSolve(result.salvosTaken);
+            batchFastSolveCount++;
+          }
         } else if (!resolved){
           // Not every ship layout — Battleship, both Cruisers, and all 3
           // Frigates — was genuinely established and correct. Save it (skip
@@ -2196,8 +2241,8 @@
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
     statusLine.textContent = stopError
-      ? `Autorun batch stopped early at game ${currentGameIndex}/${n} (${batchUnresolvedIds.length} unresolved saved so far): ${stopError.message || stopError}`
-      : `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and saved for study.`;
+      ? `Autorun batch stopped early at game ${currentGameIndex}/${n} (${batchUnresolvedIds.length} unresolved, ${batchFastSolveCount} fast solves saved so far): ${stopError.message || stopError}`
+      : `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and ${batchFastSolveCount} fast solves (${FAST_SOLVE_SALVOS} salvos) saved for study.`;
     await refreshSavedBoardsList();
   }
 
