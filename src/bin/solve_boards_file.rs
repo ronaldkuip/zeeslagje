@@ -42,6 +42,17 @@ struct Component {
     cells: Vec<(usize, usize)>,
 }
 
+/// Strips an optional enclosing `[...]` (and matching quotes just inside
+/// it) some source files wrap each board string in — e.g.
+/// `[4030302040...20]` — leaving the bare 64-char board string. A no-op on
+/// input that's already bare.
+fn extract_board_str(raw: &str) -> &str {
+    let s = raw.trim();
+    let s = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(s);
+    let s = s.trim();
+    s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(s)
+}
+
 /// Parses a 64-char inner-board string and checks it against the exact
 /// placement invariant `try_place` (src/lib.rs) enforces for ships sized
 /// >=2: each ship's cells form a straight run of the right length, and no
@@ -49,6 +60,7 @@ struct Component {
 /// distance 1 of each other. Returns the resulting `Ship` list (1-indexed
 /// into the 10x10 board space, matching `BoardLayout`) or an error reason.
 fn parse_and_validate(line: &str) -> Result<Vec<Ship>, String> {
+    let line = extract_board_str(line);
     let bytes = line.as_bytes();
     if bytes.len() != 64 {
         return Err(format!("expected 64 characters, got {}", bytes.len()));
