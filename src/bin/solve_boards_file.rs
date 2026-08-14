@@ -22,20 +22,44 @@
 //! Prints a histogram of salvo counts across every solved board, plus the
 //! unresolved and invalid counts.
 //!
-//! Run with: `cargo run --release --bin solve_boards_file -- <input_file> [threads] [error_log_path]`
+//! Optionally (5th arg), boards resolved in one of `SPECIAL_SALVO_COUNTS`
+//! salvos — the interesting tails of the distribution, unusually fast or
+//! unusually slow — are additionally appended (one JSON object per line,
+//! same `{"board": <BoardLayout>, "salvos": N}` shape as serve.py's
+//! `fast_solves.jsonl`) to a dedicated file per count in that directory, so
+//! a re-run over the same data accumulates into the same files rather than
+//! clobbering them.
+//!
+//! Run with: `cargo run --release --bin solve_boards_file -- <input_file> [threads] [error_log_path] [special_cases_dir]`
 
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
 use std::sync::mpsc::{channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use serde::Serialize;
 use zeeslag::{BoardLayout, Cell, Game, Ship};
 
 const CAP: usize = 30;
+
+/// The "interesting" salvo counts worth saving a full board layout for:
+/// unusually fast solves (9-11) and unusually slow ones (24-26), both
+/// tails of the histogram far from the typical 16-22 range. See
+/// `solve_boards_file`'s module doc for the output format/location.
+const SPECIAL_SALVO_COUNTS: [usize; 6] = [9, 10, 11, 24, 25, 26];
+
+/// Mirrors serve.py's `fast_solves.jsonl` record shape exactly, so tooling
+/// that already reads that file can read these too.
+#[derive(Serialize)]
+struct SpecialCaseRecord<'a> {
+    board: &'a BoardLayout,
+    salvos: usize,
+}
 
 struct Component {
     value: u8,
@@ -251,14 +275,18 @@ fn solve_one(game: &mut Game, cap: usize) -> Option<usize> {
 
 enum WorkResult {
     Invalid(String),
-    Resolved(usize),
+    /// Salvo count, plus a pre-serialized `SpecialCaseRecord` JSON line
+    /// when that count is one of `SPECIAL_SALVO_COUNTS` and special-case
+    /// tracking is enabled — `None` otherwise, so the common case doesn't
+    /// pay for a board serialization it'll never use.
+    Resolved(usize, Option<String>),
     Unresolved,
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: {} <input_file> [threads] [error_log_path]", args[0]);
+        eprintln!("usage: {} <input_file> [threads] [error_log_path] [special_cases_dir]", args[0]);
         std::process::exit(1);
     }
     let input_path = &args[1];
@@ -267,6 +295,8 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     let error_log_path = args.get(3).cloned().unwrap_or_else(|| "game_board_in_error.log".to_string());
+    let special_cases_dir = args.get(4).cloned();
+    let track_special = special_cases_dir.is_some();
 
     let file = File::open(input_path).unwrap_or_else(|e| {
         eprintln!("cannot open {input_path}: {e}");
@@ -307,7 +337,14 @@ fn main() {
                             continue;
                         }
                         let result = match solve_one(&mut game, CAP) {
-                            Some(n) => WorkResult::Resolved(n),
+                            Some(n) => {
+                                let special_json = if track_special && SPECIAL_SALVO_COUNTS.contains(&n) {
+                                    Some(serde_json::to_string(&SpecialCaseRecord { board: &layout, salvos: n }).expect("serialize special case"))
+                                } else {
+                                    None
+                                };
+                                WorkResult::Resolved(n, special_json)
+                            }
                             None => WorkResult::Unresolved,
                         };
                         let _ = res_tx.send(result);
@@ -322,8 +359,30 @@ fn main() {
         eprintln!("cannot create {error_log_path}: {e}");
         std::process::exit(1);
     });
+    // Opened in append mode (not truncate-on-create) so re-running this
+    // over the same data — or running it once per file in a batch script
+    // like deploy/run_all_boards.sh — accumulates into the same 6 files
+    // instead of each invocation clobbering the previous one's findings.
+    let special_case_files: Option<Vec<File>> = special_cases_dir.as_ref().map(|dir| {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+            eprintln!("cannot create special cases dir {dir}: {e}");
+            std::process::exit(1);
+        });
+        SPECIAL_SALVO_COUNTS
+            .iter()
+            .map(|n| {
+                let path = Path::new(dir).join(format!("salvos_{n:02}.jsonl"));
+                OpenOptions::new().create(true).append(true).open(&path).unwrap_or_else(|e| {
+                    eprintln!("cannot open {}: {e}", path.display());
+                    std::process::exit(1);
+                })
+            })
+            .collect()
+    });
+
     let aggregator = thread::spawn(move || {
         let mut error_writer = BufWriter::new(error_log);
+        let mut special_writers: Option<Vec<BufWriter<File>>> = special_case_files.map(|files| files.into_iter().map(BufWriter::new).collect());
         let mut histogram: HashMap<usize, usize> = HashMap::new();
         let mut unresolved = 0usize;
         let mut invalid = 0usize;
@@ -335,7 +394,13 @@ fn main() {
                     invalid += 1;
                     writeln!(error_writer, "{line}").expect("write error log");
                 }
-                WorkResult::Resolved(n) => *histogram.entry(n).or_insert(0) += 1,
+                WorkResult::Resolved(n, special_json) => {
+                    *histogram.entry(n).or_insert(0) += 1;
+                    if let (Some(json_line), Some(writers)) = (special_json, special_writers.as_mut()) {
+                        let idx = SPECIAL_SALVO_COUNTS.iter().position(|&s| s == n).expect("special_json only set for a SPECIAL_SALVO_COUNTS value");
+                        writeln!(writers[idx], "{json_line}").expect("write special case file");
+                    }
+                }
                 WorkResult::Unresolved => unresolved += 1,
             }
             if total % 100_000 == 0 {
@@ -343,6 +408,11 @@ fn main() {
             }
         }
         error_writer.flush().expect("flush error log");
+        if let Some(writers) = special_writers.as_mut() {
+            for w in writers.iter_mut() {
+                w.flush().expect("flush special case file");
+            }
+        }
         (total, invalid, unresolved, histogram)
     });
 
@@ -368,6 +438,10 @@ fn main() {
     println!("Processed {total} boards ({lines_read} non-empty lines read, {threads} threads) in {:.1}s", elapsed.as_secs_f64());
     println!("Invalid boards:  {invalid} (written to {error_log_path})");
     println!("Unresolved (hit the {CAP}-salvo cap): {unresolved}");
+    if let Some(dir) = &special_cases_dir {
+        let special_total: usize = SPECIAL_SALVO_COUNTS.iter().map(|n| *histogram.get(n).unwrap_or(&0)).sum();
+        println!("Special cases (salvos in {SPECIAL_SALVO_COUNTS:?}): {special_total} (appended to {dir}/salvos_NN.jsonl)");
+    }
     println!();
     println!("salvos,count");
     let mut keys: Vec<&usize> = histogram.keys().collect();
