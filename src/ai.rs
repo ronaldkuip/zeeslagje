@@ -31,24 +31,35 @@ impl LineState {
 }
 
 /// One salvo whose result bag held at least one 3 (a Cruiser hit). Cruiser
-/// exact-cell identification (pinpointing which specific cells a Cruiser
-/// occupies, and so also disambiguating between 2 possible layouts) is
-/// deliberately not attempted — see `refresh_cross3_entry_flags` — only the
-/// raw per-salvo Cross-3 Bag "traffic light" tracking (recomputed purely
-/// from `alive_value(_, _, 3) == 0`) remains. Mirrors `Cross2Entry`.
+/// exact-cell identification via candidate-WINDOW enumeration (pinpointing
+/// which specific cells a Cruiser occupies by narrowing a set of straight-3
+/// placements to one) is deliberately not attempted — see 35e8c16, which
+/// removed it for a soundness bug: that combinatorial search could declare
+/// a phantom Cruiser found by mixing cells from 2 different real ships. What
+/// IS derived — `coord_confirmed_cruiser_hit`, see `derive_confirmed_
+/// cruiser_hits_by_elimination` — is a structurally different, narrower
+/// rule that never reasons about window shapes at all, only literal
+/// per-salvo bag arithmetic plus coordinate identity across salvos, so it
+/// doesn't reintroduce that failure mode. Mirrors `Cross2Entry`.
 #[derive(Clone)]
 pub struct Cross3Entry {
     pub coords: [(usize, usize); 3],
     pub values: [usize; 3],
     /// Per-coordinate flag, parallel to `coords`: true once that specific
-    /// fired cell has been proven impossible to be a Cruiser cell (its alive
-    /// value for size 3 has dropped to zero — or it's on the outer ring,
-    /// which never holds a ship of size >=2) — i.e. this salvo's ambiguous
-    /// "3" result can no longer have come from that particular cell.
-    /// Recomputed at the end of every round by `refresh_cross3_entry_flags`.
-    /// Monotonic: once true, always true, since alive values only ever
-    /// shrink toward zero.
+    /// fired cell has been proven impossible to be a Cruiser cell — either
+    /// because its alive value for size 3 has dropped to zero (or it's on
+    /// the outer ring, which never holds a ship of size >=2), or because
+    /// `derive_confirmed_cruiser_hits_by_elimination` proved this salvo's
+    /// "3" is already explained by a different, confirmed coordinate. I.e.
+    /// this salvo's ambiguous "3" result can no longer have come from that
+    /// particular cell. Recomputed at the end of every round by
+    /// `refresh_cross3_entry_flags`. Monotonic: once true, always true.
     pub coord_ruled_out: [bool; 3],
+    /// True for a coordinate proven to be a genuine Cruiser hit: this bag
+    /// contains a "3", and every OTHER coordinate in it has been ruled out,
+    /// so this one is the only cell left that could possibly have produced
+    /// it. See `derive_confirmed_cruiser_hits_by_elimination`.
+    pub coord_confirmed_cruiser_hit: [bool; 3],
 }
 
 /// One salvo whose result bag held at least one 2 (a Frigate hit) — same
@@ -58,17 +69,18 @@ pub struct Cross2Entry {
     pub coords: [(usize, usize); 3],
     pub values: [usize; 3],
     /// Per-coordinate flag, parallel to `coords`: true once that specific
-    /// fired cell has been proven impossible to be a Frigate cell (its alive
-    /// value for size 2 has dropped to zero — or it's on the outer ring,
-    /// which never holds a ship of size >=2) — i.e. this salvo's ambiguous
-    /// "2" result can no longer have come from that particular cell.
-    /// Recomputed at the end of every round by `refresh_cross2_entry_flags`
-    /// purely from the size-2 FSM's own alive value — deliberately just
-    /// this "traffic light" read-out, with no combination search or
-    /// same-Frigate pairing/identification logic layered on top.
-    /// Monotonic: once true, always true, since alive values only ever
-    /// shrink toward zero.
+    /// fired cell has been proven impossible to be a Frigate cell — either
+    /// its alive value for size 2 has dropped to zero (or it's on the outer
+    /// ring, which never holds a ship of size >=2), or `derive_confirmed_
+    /// frigate_hits_by_elimination` proved this salvo's "2" is already
+    /// explained by a different, confirmed coordinate. Recomputed at the
+    /// end of every round by `refresh_cross2_entry_flags`. Monotonic: once
+    /// true, always true.
     pub coord_ruled_out: [bool; 3],
+    /// True for a coordinate proven to be a genuine Frigate hit — same
+    /// elimination rule as `Cross3Entry::coord_confirmed_cruiser_hit`, one
+    /// size down. See `derive_confirmed_frigate_hits_by_elimination`.
+    pub coord_confirmed_frigate_hit: [bool; 3],
 }
 
 /// One salvo whose result bag held at least one 4 (a Battleship hit),
@@ -799,6 +811,7 @@ impl AiPlayer {
             coords,
             values,
             coord_ruled_out: [false; 3],
+            coord_confirmed_cruiser_hit: [false; 3],
         });
     }
 
@@ -811,6 +824,7 @@ impl AiPlayer {
             coords,
             values,
             coord_ruled_out: [false; 3],
+            coord_confirmed_frigate_hit: [false; 3],
         });
     }
 
@@ -1752,8 +1766,77 @@ impl AiPlayer {
                 flags
             })
             .collect();
+        // OR-merge, never overwrite: `derive_confirmed_cruiser_hits_by_
+        // elimination` below can also set `coord_ruled_out` bits (from bag
+        // arithmetic, not the FSM), and those must survive next round's
+        // refresh too, same monotonic guarantee as the FSM-derived ones.
         for (entry, entry_flags) in self.cross3_entries.iter_mut().zip(flags) {
-            entry.coord_ruled_out = entry_flags;
+            for i in 0..3 {
+                entry.coord_ruled_out[i] |= entry_flags[i];
+            }
+        }
+        self.derive_confirmed_cruiser_hits_by_elimination();
+    }
+
+    /// Once a Cross-3 entry's bag contains a "3" and every coordinate but
+    /// one has been ruled out, that one is a certain Cruiser hit — mirrors
+    /// `derive_confirmed_battleship_hits_by_elimination` one size down.
+    /// Deliberately NOT the removed candidate-window search (see 35e8c16):
+    /// this never asks which straight-3 placement a cell belongs to, only
+    /// this literal salvo's own bag arithmetic, so it can't reproduce that
+    /// bug's phantom-Cruiser failure mode.
+    ///
+    /// Also propagates across entries by coordinate identity: a cell
+    /// confirmed here is the SAME physical board cell wherever else it was
+    /// fired (e.g. a refire, or 2 different salvos happening to share a
+    /// coordinate) — so any OTHER entry containing that exact (row, col)
+    /// and also holding a "3" has its own "3" already explained by it. That
+    /// entry's other 2 coordinates can therefore be ruled out too — genuine
+    /// elimination, not a guess: if either of them were ALSO a real Cruiser
+    /// cell, this entry's bag would need a second "3", which it doesn't
+    /// have. That can in turn confirm further cells elsewhere, so this
+    /// iterates to a fixed point rather than a single pass.
+    fn derive_confirmed_cruiser_hits_by_elimination(&mut self) {
+        loop {
+            let mut changed = false;
+
+            for entry in &mut self.cross3_entries {
+                if !entry.values.contains(&3) {
+                    continue;
+                }
+                let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
+                if let [only] = open[..] {
+                    if !entry.coord_confirmed_cruiser_hit[only] {
+                        entry.coord_confirmed_cruiser_hit[only] = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            let confirmed_coords: std::collections::HashSet<(usize, usize)> = self
+                .cross3_entries
+                .iter()
+                .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_cruiser_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
+                .collect();
+
+            for entry in &mut self.cross3_entries {
+                if !entry.values.contains(&3) {
+                    continue;
+                }
+                let Some(source) = (0..3).find(|&i| confirmed_coords.contains(&entry.coords[i])) else {
+                    continue;
+                };
+                for i in 0..3 {
+                    if i != source && !entry.coord_ruled_out[i] {
+                        entry.coord_ruled_out[i] = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
         }
     }
 
@@ -1803,8 +1886,65 @@ impl AiPlayer {
                 flags
             })
             .collect();
+        // OR-merge, never overwrite — see `refresh_cross3_entry_flags`'s
+        // identical reasoning, one size up.
         for (entry, entry_flags) in self.cross2_entries.iter_mut().zip(flags) {
-            entry.coord_ruled_out = entry_flags;
+            for i in 0..3 {
+                entry.coord_ruled_out[i] |= entry_flags[i];
+            }
+        }
+        self.derive_confirmed_frigate_hits_by_elimination();
+    }
+
+    /// Mirrors `derive_confirmed_cruiser_hits_by_elimination` one size
+    /// down — same per-entry elimination, same coordinate-identity
+    /// propagation across entries, same fixed-point iteration, same reason
+    /// it doesn't reintroduce the soundness bug 35e8c16 removed (see that
+    /// function's doc comment). Frigate exact-cell/layout identification
+    /// via candidate-window enumeration remains untouched (still not
+    /// attempted) — this only ever reasons about literal coordinates and
+    /// bag counts, never window shapes.
+    fn derive_confirmed_frigate_hits_by_elimination(&mut self) {
+        loop {
+            let mut changed = false;
+
+            for entry in &mut self.cross2_entries {
+                if !entry.values.contains(&2) {
+                    continue;
+                }
+                let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
+                if let [only] = open[..] {
+                    if !entry.coord_confirmed_frigate_hit[only] {
+                        entry.coord_confirmed_frigate_hit[only] = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            let confirmed_coords: std::collections::HashSet<(usize, usize)> = self
+                .cross2_entries
+                .iter()
+                .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_frigate_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
+                .collect();
+
+            for entry in &mut self.cross2_entries {
+                if !entry.values.contains(&2) {
+                    continue;
+                }
+                let Some(source) = (0..3).find(|&i| confirmed_coords.contains(&entry.coords[i])) else {
+                    continue;
+                };
+                for i in 0..3 {
+                    if i != source && !entry.coord_ruled_out[i] {
+                        entry.coord_ruled_out[i] = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
         }
     }
 

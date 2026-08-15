@@ -714,6 +714,7 @@ impl Game {
             values: [usize; 3],
             true_cruiser_coords: Vec<usize>,
             ruled_out_coords: Vec<usize>,
+            confirmed_coords: Vec<usize>,
         }
         #[derive(Serialize)]
         struct Cross3Debug {
@@ -744,6 +745,13 @@ impl Game {
                     .filter(|(_, &ruled_out)| ruled_out)
                     .map(|(&(r, c), _)| r * 10 + c)
                     .collect(),
+                confirmed_coords: e
+                    .coords
+                    .iter()
+                    .zip(e.coord_confirmed_cruiser_hit.iter())
+                    .filter(|(_, &confirmed)| confirmed)
+                    .map(|(&(r, c), _)| r * 10 + c)
+                    .collect(),
             })
             .collect();
 
@@ -759,6 +767,7 @@ impl Game {
             values: [usize; 3],
             true_frigate_coords: Vec<usize>,
             ruled_out_coords: Vec<usize>,
+            confirmed_coords: Vec<usize>,
         }
         #[derive(Serialize)]
         struct Cross2Debug {
@@ -787,6 +796,13 @@ impl Game {
                     .iter()
                     .zip(e.coord_ruled_out.iter())
                     .filter(|(_, &ruled_out)| ruled_out)
+                    .map(|(&(r, c), _)| r * 10 + c)
+                    .collect(),
+                confirmed_coords: e
+                    .coords
+                    .iter()
+                    .zip(e.coord_confirmed_frigate_hit.iter())
+                    .filter(|(_, &confirmed)| confirmed)
                     .map(|(&(r, c), _)| r * 10 + c)
                     .collect(),
             })
@@ -2154,6 +2170,43 @@ mod tests {
         let candidates: std::collections::HashSet<(usize, usize)> = ai.battleship_candidate_cells().into_iter().collect();
         assert!(candidates.contains(&(1, 6)), "the confirmed cell G2 itself must remain a candidate");
         assert_eq!(candidates.len(), 9, "sanity: matches the reported scenario's 9 surviving candidates");
+    }
+
+    #[test]
+    fn ai_confirms_a_cross3_hit_by_elimination_and_propagates_to_a_shared_coordinate() {
+        // Mirrors the live scenario that prompted this: (2,2) is fired
+        // alongside 2 outer-ring decoys (ruled out immediately), leaving it
+        // as the only open candidate for its own salvo's "3" — confirmed by
+        // the same "only remaining candidate" logic already used for
+        // Battleship, one size down. See `derive_confirmed_cruiser_hits_
+        // by_elimination`.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
+        assert!(ai.cross3_entries()[0].coord_confirmed_cruiser_hit[0], "sanity: (2,2) confirmed by its own salvo's elimination");
+
+        // A second salvo refires that SAME (2,2) alongside a still-open
+        // candidate (5,5) and another outer-ring decoy. (2,2) is the same
+        // physical cell already confirmed above, so it already explains
+        // this salvo's only "3" too — (5,5) must be ruled out by
+        // elimination, NOT because of anything about (5,5) itself.
+        ai.apply_salvo([(2, 2), (5, 5), (0, 1)], [3, 0, 0]);
+        let entry_b = &ai.cross3_entries()[1];
+        assert!(entry_b.coord_confirmed_cruiser_hit[0], "(2,2) carries its confirmed status into this entry too");
+        assert!(entry_b.coord_ruled_out[1], "(5,5) must be ruled out: (2,2) already accounts for this salvo's only 3");
+    }
+
+    #[test]
+    fn ai_confirms_a_cross2_hit_by_elimination_and_propagates_to_a_shared_coordinate() {
+        // Mirrors `ai_confirms_a_cross3_hit_by_elimination_and_propagates_
+        // to_a_shared_coordinate` one ship size down.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [2, 0, 0]);
+        assert!(ai.cross2_entries()[0].coord_confirmed_frigate_hit[0], "sanity: (2,2) confirmed by its own salvo's elimination");
+
+        ai.apply_salvo([(2, 2), (5, 5), (0, 1)], [2, 0, 0]);
+        let entry_b = &ai.cross2_entries()[1];
+        assert!(entry_b.coord_confirmed_frigate_hit[0], "(2,2) carries its confirmed status into this entry too");
+        assert!(entry_b.coord_ruled_out[1], "(5,5) must be ruled out: (2,2) already accounts for this salvo's only 2");
     }
 
     #[test]
