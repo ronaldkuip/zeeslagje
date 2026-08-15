@@ -2173,6 +2173,62 @@ mod tests {
     }
 
     #[test]
+    fn ai_cross4_hit_propagates_confirmed_status_to_a_shared_coordinate() {
+        // Mirrors `ai_confirms_a_cross3_hit_by_elimination_and_propagates_
+        // to_a_shared_coordinate` one size up — previously MISSING for
+        // Battleship entirely: `derive_confirmed_battleship_hits_by_
+        // elimination` used to be a single flat pass with no cross-entry
+        // propagation and no fixed-point loop at all.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [4, 0, 0]);
+        assert!(ai.cross4_entries()[0].coord_confirmed_battleship_hit[0], "sanity: (2,2) confirmed by its own salvo's elimination");
+
+        // A second salvo refires that SAME (2,2) alongside a still-open
+        // candidate (5,5) and another outer-ring decoy. (2,2) is the same
+        // physical cell already confirmed above, so it already explains
+        // this salvo's only "4" too — (5,5) must be ruled out by
+        // elimination, NOT because of anything about (5,5) itself.
+        ai.apply_salvo([(2, 2), (5, 5), (0, 1)], [4, 0, 0]);
+        let entry_b = &ai.cross4_entries()[1];
+        assert!(entry_b.coord_confirmed_battleship_hit[0], "(2,2) carries its confirmed status into this entry too");
+        assert!(entry_b.coord_ruled_out[1], "(5,5) must be ruled out: (2,2) already accounts for this salvo's only 4");
+    }
+
+    #[test]
+    fn ai_confirmed_battleship_cell_eliminates_other_sizes_but_not_its_own_at_neighbours() {
+        // Mirrors `ai_confirmed_cruiser_cell_eliminates_other_sizes_but_
+        // not_its_own_at_neighbours` one size up.
+        let mut ai = AiPlayer::new();
+        let (_, _, baseline4) = ai.alive_grids(4);
+        assert!(baseline4[2 - 1][3 - 1] > 0, "sanity: (2,3) starts with alive Battleship room");
+
+        // (2,2) confirmed via its own salvo's elimination (2 outer-ring decoys).
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [4, 0, 0]);
+        assert!(ai.cross4_entries()[0].coord_confirmed_battleship_hit[0], "sanity: (2,2) confirmed");
+
+        let (_, _, combined4) = ai.alive_grids(4);
+        let (_, _, combined3) = ai.alive_grids(3);
+        let (_, _, combined2) = ai.alive_grids(2);
+
+        // (2,3): straight-line neighbour of (2,2) — could easily be this
+        // SAME Battleship's own next cell (not yet individually confirmed).
+        assert!(
+            combined4[2 - 1][3 - 1] > 0,
+            "(2,3) could be the SAME Battleship's own next cell — size 4 must NOT be eliminated there from a single confirmed neighbour alone"
+        );
+        // But a Cruiser or Frigate there is genuinely impossible now.
+        assert_eq!(combined3[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Battleship cell, must show 0 alive Cruiser room");
+        assert_eq!(combined2[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Battleship cell, must show 0 alive Frigate room");
+
+        // (2,2) itself: sizes 3 and 2 explicitly stripped as a one-off
+        // own-cell cleanup — unlike a bound-3 or bound-2 hit, a bound-4
+        // hit's ordinary `apply_hit` strips NOTHING on its own (there's no
+        // size larger than 4 to trigger the ">bound" rule).
+        assert_eq!(combined3[2 - 1][2 - 1], 0, "(2,2) itself can't also be a Cruiser");
+        assert_eq!(combined2[2 - 1][2 - 1], 0, "(2,2) itself can't also be a Frigate");
+    }
+
+    #[test]
     fn ai_confirms_a_cross3_hit_by_elimination_and_propagates_to_a_shared_coordinate() {
         // Mirrors the live scenario that prompted this: (2,2) is fired
         // alongside 2 outer-ring decoys (ruled out immediately), leaving it

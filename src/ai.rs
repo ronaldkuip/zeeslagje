@@ -2266,8 +2266,15 @@ impl AiPlayer {
                 flags
             })
             .collect();
+        // OR-merge, never overwrite: `derive_confirmed_battleship_hits_by_
+        // elimination` below can also set `coord_ruled_out` bits (from bag
+        // arithmetic via cross-entry propagation, not the FSM), and those
+        // must survive next round's refresh too — mirrors `refresh_cross3_
+        // entry_flags`/`refresh_cross2_entry_flags`'s identical reasoning.
         for (entry, entry_flags) in self.cross4_entries.iter_mut().zip(flags) {
-            entry.coord_ruled_out = entry_flags;
+            for i in 0..3 {
+                entry.coord_ruled_out[i] |= entry_flags[i];
+            }
         }
         // If an entry's own OTHER 2 candidates are already ruled out, its
         // one remaining candidate is confirmed with total certainty — see
@@ -2284,15 +2291,108 @@ impl AiPlayer {
     /// Once a Cross-4 entry's bag contains a "4" and every coordinate but
     /// one has been ruled out, that one is a certain Battleship hit —
     /// mirrors `derive_confirmed_cruiser_hits_by_elimination`/
-    /// `derive_confirmed_frigate_hits_by_elimination` one size up.
+    /// `derive_confirmed_frigate_hits_by_elimination` one size up, with one
+    /// simplification: a bag can never need more than 1 confirmed
+    /// coordinate here (there's only 1 Battleship, so N is always exactly
+    /// 1) — the "how many does this bag actually need explained" counting
+    /// bug those 2 functions had to guard against structurally can't recur
+    /// here, since a second real "4" in the same bag is impossible.
+    ///
+    /// Also propagates across entries by coordinate identity, same as the
+    /// Cruiser/Frigate versions: a cell confirmed here is the SAME
+    /// physical board cell wherever else it was fired (e.g. a refire), so
+    /// any OTHER entry containing that exact coordinate and also holding a
+    /// "4" has its own "4" already explained by it — its other 2
+    /// coordinates can be ruled out too, fed into the real size-4 FSM via
+    /// `eliminate_size_at`. Iterates to a fixed point.
+    ///
+    /// Every newly confirmed coordinate also:
+    /// - has size 3 and size 2 explicitly stripped at itself — ordinary
+    ///   `apply_hit` doesn't do this for a bound-4 hit on its own (there's
+    ///   no size larger than 4 to trigger the ">bound" rule, and the
+    ///   "value missing from bag entirely" rule is bag-wide, not specific
+    ///   to which of the 3 cells actually held the 4).
+    /// - gets `apply_adjacency_elimination_around(row, col, 4)` applied —
+    ///   the same per-cell adjacency elimination Cruiser/Frigate confirmed
+    ///   cells get, eliminating every OTHER size at its 8 neighbours
+    ///   without needing to know the rest of the Battleship's own layout
+    ///   (which may not resolve to a single straight-4 window for a while
+    ///   yet, or ever, the same way a Cruiser/Frigate layout might not).
     fn derive_confirmed_battleship_hits_by_elimination(&mut self) {
-        for entry in &mut self.cross4_entries {
-            if !entry.values.contains(&4) {
-                continue;
+        loop {
+            let mut changed = false;
+            let mut newly_confirmed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+            for entry in &mut self.cross4_entries {
+                if !entry.values.contains(&4) {
+                    continue;
+                }
+                let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
+                if let [only] = open[..] {
+                    if !entry.coord_confirmed_battleship_hit[only] {
+                        entry.coord_confirmed_battleship_hit[only] = true;
+                        changed = true;
+                        newly_confirmed.insert(entry.coords[only]);
+                    }
+                }
             }
-            let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
-            if let [only] = open[..] {
-                entry.coord_confirmed_battleship_hit[only] = true;
+
+            let confirmed_coords: std::collections::HashSet<(usize, usize)> = self
+                .cross4_entries
+                .iter()
+                .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_battleship_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
+                .collect();
+
+            for entry in &mut self.cross4_entries {
+                if !entry.values.contains(&4) {
+                    continue;
+                }
+                for i in 0..3 {
+                    if !entry.coord_confirmed_battleship_hit[i] && confirmed_coords.contains(&entry.coords[i]) {
+                        entry.coord_confirmed_battleship_hit[i] = true;
+                        changed = true;
+                        newly_confirmed.insert(entry.coords[i]);
+                    }
+                }
+            }
+
+            // See `derive_confirmed_cruiser_hits_by_elimination`'s identical
+            // comment on why this is collected rather than applied inline.
+            let mut newly_ruled_out: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+            for entry in &mut self.cross4_entries {
+                if !entry.values.contains(&4) {
+                    continue;
+                }
+                // N is always exactly 1 here (only 1 Battleship exists) —
+                // once ANY coordinate is confirmed, every other coordinate
+                // in this same entry is definitely not the Battleship hit.
+                if !(0..3).any(|i| entry.coord_confirmed_battleship_hit[i]) {
+                    continue;
+                }
+                for i in 0..3 {
+                    if !entry.coord_confirmed_battleship_hit[i] && !entry.coord_ruled_out[i] {
+                        entry.coord_ruled_out[i] = true;
+                        changed = true;
+                        newly_ruled_out.insert(entry.coords[i]);
+                    }
+                }
+            }
+
+            for (row, col) in newly_ruled_out {
+                self.eliminate_size_at(row, col, 4);
+            }
+
+            for (row, col) in &newly_confirmed {
+                self.eliminate_size_at(*row, *col, 3);
+                self.eliminate_size_at(*row, *col, 2);
+            }
+            for (row, col) in newly_confirmed {
+                self.apply_adjacency_elimination_around(row, col, 4);
+            }
+
+            if !changed {
+                break;
             }
         }
     }
