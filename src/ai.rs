@@ -204,6 +204,10 @@ pub struct AiPlayer {
     /// single hypothesis on its own — only the cross-reasoned identification
     /// has. See `cells_confirmed_cruiser_or_adjacent`.
     cruiser_layout_locked: Option<Vec<(usize, usize)>>,
+    /// The Frigates' exact 6-cell layout (all 3 ships), once
+    /// `update_fsm_and_resolve` has locked it in — mirrors
+    /// `cruiser_layout_locked` one size down. `None` until then.
+    frigate_layout_locked: Option<Vec<(usize, usize)>>,
     /// Per-cell: whether this cell has already used its one-time "extra"
     /// refire granted by `update_fsm_and_resolve`'s companion feature,
     /// disambiguation-with-refire (see `disambiguation_shots`'
@@ -257,6 +261,7 @@ impl AiPlayer {
             cross3_entries: Vec::new(),
             cross2_entries: Vec::new(),
             cruiser_layout_locked: None,
+            frigate_layout_locked: None,
             disambiguation_extra_refire_used: [[false; 10]; 10],
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
@@ -658,36 +663,71 @@ impl AiPlayer {
         }
     }
 
-    /// Manual counterpart to the old always-automatic Cruiser-layout
-    /// elimination — triggered from the UI's "Update FSM and resolve"
-    /// button once the player judges the heatmap has stopped evolving
-    /// (see `Game::update_fsm_and_resolve`), rather than firing silently
-    /// on every salvo. Uses `cruiser_identified_cells_refined` (the
-    /// cross-reasoning-aware identification), so it can lock in a layout
-    /// the RAW, non-cross-reasoned `consistent_cruiser_candidates` hasn't
-    /// collapsed to a single hypothesis on its own yet.
+    /// Manual counterpart to the old always-automatic layout elimination —
+    /// triggered from the UI's "Update FSM and resolve" button once the
+    /// player judges the heatmap has stopped evolving (see
+    /// `Game::update_fsm_and_resolve`), rather than firing silently on
+    /// every salvo. Attempts to lock in BOTH the Cruisers' and the
+    /// Frigates' exact layout — symmetric, since either one identified
+    /// first can narrow the other (see `lock_in_cruiser_layout`/
+    /// `lock_in_frigate_layout`, which do the actual work and explain the
+    /// elimination each performs). Locking one can immediately unlock the
+    /// other in the same call: e.g. locking the Cruisers narrows
+    /// `cells_confirmed_cruiser_or_adjacent`, which
+    /// `consistent_frigate_candidates` excludes from its own window
+    /// search, so the Frigate attempt below deliberately runs against
+    /// freshly-cleared caches rather than ones left over from before the
+    /// Cruiser lock.
+    ///
+    /// Idempotent and safe to call repeatedly — each side is individually
+    /// a no-op once already locked, or if that class isn't cross-reasoning-
+    /// identified yet. Returns whether EITHER side actually locked
+    /// anything in this call.
+    pub fn update_fsm_and_resolve(&mut self) -> bool {
+        let cruiser_locked = self.lock_in_cruiser_layout();
+        if cruiser_locked {
+            // Clear now, not just at the end — the Frigate attempt right
+            // below must see the narrower `cells_confirmed_cruiser_or_
+            // adjacent` exclusion this just produced, not a stale
+            // pre-lock candidate list cached under the same salvo count.
+            *self.cruiser_candidates_cache.borrow_mut() = None;
+            *self.frigate_candidates_cache.borrow_mut() = None;
+        }
+
+        let frigate_locked = self.lock_in_frigate_layout();
+
+        if cruiser_locked || frigate_locked {
+            self.refresh_cross3_entry_flags();
+            self.refresh_cross2_entry_flags();
+            *self.cruiser_candidates_cache.borrow_mut() = None;
+            *self.frigate_candidates_cache.borrow_mut() = None;
+        }
+        cruiser_locked || frigate_locked
+    }
+
+    /// Uses `cruiser_identified_cells_refined` (the cross-reasoning-aware
+    /// identification), so it can lock in a layout the RAW, non-cross-
+    /// reasoned `consistent_cruiser_candidates` hasn't collapsed to a
+    /// single hypothesis on its own yet.
     ///
     /// Once locked in (`cruiser_layout_locked`, checked by
     /// `cells_confirmed_cruiser_or_adjacent`):
     /// - Every inner cell that ISN'T one of the 6 real Cruiser cells can
     ///   never hold a Cruiser either (there are only 2, and we now know
-    ///   exactly where both are) — eliminate size 3 there.
+    ///   exactly where both are) — eliminate size 3 there. This alone
+    ///   already covers every Cruiser-adjacent cell too (they're not among
+    ///   the 6 real cells either), so there's no separate neighbour-only
+    ///   size-3 pass below — it would be pure redundant idempotent work.
     /// - Every cell adjacent to a real Cruiser cell (including diagonally)
-    ///   can never hold a Frigate — eliminate size 2 there.
+    ///   can never hold a Frigate either — eliminate size 2 there. THIS
+    ///   one genuinely needs the neighbour-only pass: unlike size 3, there
+    ///   is no broader "every non-Cruiser-cell loses size 2" step, since
+    ///   plenty of size-2-eligible cells exist far from any Cruiser.
     ///
-    /// Then reworks the results: `cross3_entries`/`cross2_entries` are
-    /// refreshed against the newly eliminated state, and the memoized
-    /// candidate lists (`cruiser_candidates_cache`/`frigate_candidates_cache`)
-    /// are cleared so the next heatmap read reflects the narrower
-    /// `cells_confirmed_cruiser_or_adjacent` exclusion — their cache key
-    /// (`salvo_history.len()`) doesn't change here (no new salvo is fired),
-    /// so without an explicit clear they'd keep serving the stale,
-    /// pre-lock candidate lists.
-    ///
-    /// Idempotent and safe to call repeatedly — a no-op once already
-    /// locked, or if the Cruisers aren't cross-reasoning-identified yet.
-    /// Returns whether it actually locked anything in this call.
-    pub fn update_fsm_and_resolve(&mut self) -> bool {
+    /// Doesn't itself refresh cross-3/cross-2 entries or clear the
+    /// candidate caches — `update_fsm_and_resolve` (the only caller) does
+    /// that once, after attempting both this and `lock_in_frigate_layout`.
+    fn lock_in_cruiser_layout(&mut self) -> bool {
         if self.cruiser_layout_locked.is_some() {
             return false;
         }
@@ -725,11 +765,59 @@ impl AiPlayer {
                 }
             }
         }
+        true
+    }
 
-        self.refresh_cross3_entry_flags();
-        self.refresh_cross2_entry_flags();
-        *self.cruiser_candidates_cache.borrow_mut() = None;
-        *self.frigate_candidates_cache.borrow_mut() = None;
+    /// Mirrors `lock_in_cruiser_layout` one size down, using
+    /// `frigate_identified_cells_refined`. Unlike the Cruiser side, BOTH
+    /// eliminations here need an explicit neighbour-only pass: knowing all
+    /// 6 real Frigate cells only proves size 2 is dead everywhere else
+    /// (the broad, non-neighbour-specific step, mirroring Cruiser's own),
+    /// but says nothing on its own about size 3 anywhere — Frigates being
+    /// smaller than Cruisers, "not a Frigate cell" is a much weaker
+    /// statement than "not a Cruiser cell" was on the Cruiser side, so the
+    /// size-3 exclusion has to come specifically from adjacency (no
+    /// Cruiser may sit next to a confirmed Frigate), not from a broader
+    /// "everywhere but these 6 cells" sweep the way it did one size up.
+    fn lock_in_frigate_layout(&mut self) -> bool {
+        if self.frigate_layout_locked.is_some() {
+            return false;
+        }
+        let cells = self.frigate_identified_cells_refined();
+        if cells.is_empty() {
+            return false;
+        }
+        self.frigate_layout_locked = Some(cells.clone());
+
+        let real: std::collections::HashSet<(usize, usize)> = cells.iter().copied().collect();
+        for row in INNER_LO..=INNER_HI {
+            for col in INNER_LO..=INNER_HI {
+                if !real.contains(&(row, col)) {
+                    self.eliminate_size_at(row, col, 2);
+                }
+            }
+        }
+
+        for &(row, col) in &cells {
+            for dr in -1isize..=1 {
+                for dc in -1isize..=1 {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let nr = row as isize + dr;
+                    let nc = col as isize + dc;
+                    if !(INNER_LO as isize..=INNER_HI as isize).contains(&nr) || !(INNER_LO as isize..=INNER_HI as isize).contains(&nc) {
+                        continue;
+                    }
+                    let (nr, nc) = (nr as usize, nc as usize);
+                    if real.contains(&(nr, nc)) {
+                        continue; // part of a Frigate itself, not a neighbour
+                    }
+                    self.eliminate_size_at(nr, nc, 3);
+                    self.eliminate_size_at(nr, nc, 2);
+                }
+            }
+        }
         true
     }
 

@@ -3025,6 +3025,40 @@ mod tests {
     }
 
     #[test]
+    fn update_fsm_and_resolve_locks_in_frigate_layout_and_eliminates_cruiser_and_frigate_from_its_neighbours() {
+        // Mirrors `update_fsm_and_resolve_locks_in_a_cross_reasoned_cruiser_
+        // layout_the_raw_candidates_alone_missed` one size down, and directly
+        // exercises `AiPlayer::lock_in_frigate_layout` — the actual gap this
+        // was written for: once the Battleship/Cruiser side already fed a
+        // symmetric elimination into the FSM, the Frigate side hadn't. Same
+        // all-2s-on-a-straight-2-run setup as `ai_frigate_heatmap_shows_
+        // certainty_once_all_3_frigates_are_fully_pinned`, which pins all 3
+        // Frigates down with total certainty from the raw candidate list
+        // alone (no cross-reasoning against Cruisers needed here).
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (2, 3), (0, 0)], [2, 2, 0]);
+        ai.apply_salvo([(5, 5), (5, 6), (0, 1)], [2, 2, 0]);
+        ai.apply_salvo([(8, 2), (8, 3), (0, 2)], [2, 2, 0]);
+        assert_eq!(ai.frigate_identified_cells_refined().len(), 6, "sanity: all 3 Frigates fully pinned");
+
+        assert!(ai.update_fsm_and_resolve(), "Frigates are cross-reasoning-identified, must lock in");
+        assert!(!ai.update_fsm_and_resolve(), "must be idempotent — nothing left to lock in a second time");
+
+        // (3,4) is diagonally adjacent to the confirmed Frigate cell (2,3) —
+        // per the adjacency rule (`try_place` in lib.rs forbids any
+        // Chebyshev-distance-1 gap between 2 ships of size >=2, diagonal
+        // included), it can now hold neither a Cruiser NOR another Frigate.
+        let (_, _, combined3) = ai.alive_grids(3);
+        let (_, _, combined2) = ai.alive_grids(2);
+        assert_eq!(combined3[3 - 1][4 - 1], 0, "(3,4) is diagonally adjacent to a confirmed Frigate, must show 0 alive Cruiser placements");
+        assert_eq!(combined2[3 - 1][4 - 1], 0, "(3,4) is diagonally adjacent to a confirmed Frigate, must show 0 alive Frigate placements");
+
+        // (4,8) sits far from all 3 confirmed Frigate clusters — nothing
+        // here proves a Cruiser can't be there, so it must be untouched.
+        assert!(combined3[4 - 1][8 - 1] > 0, "(4,8) is far from every confirmed Frigate, must still show alive Cruiser room");
+    }
+
+    #[test]
     fn frigate_disambiguation_shots_with_refire_finds_a_shot_once_ordinary_disambiguation_is_exhausted() {
         // Both Cruisers and 2 of the 3 Frigates fixed and unambiguous. The
         // 3rd Frigate is ambiguous among 3 candidate windows — W1=(4,2)-
