@@ -2065,7 +2065,7 @@
   function updateBatchStatsLine(){
     const parts = [];
     if (batchResolvedCount > 0){
-      const avg = (batchResolvedSum / batchResolvedCount).toFixed(1);
+      const avg = (batchResolvedSum / batchResolvedCount).toFixed(2);
       parts.push(`Resolved — min salvos: ${batchResolvedMin}, average: ${avg}, max: ${batchResolvedMax} (n=${batchResolvedCount})`);
     }
     if (batchUnresolvedIds.length > 0){
