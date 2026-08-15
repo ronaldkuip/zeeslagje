@@ -1778,37 +1778,67 @@ impl AiPlayer {
         self.derive_confirmed_cruiser_hits_by_elimination();
     }
 
-    /// Once a Cross-3 entry's bag contains a "3" and every coordinate but
-    /// one has been ruled out, that one is a certain Cruiser hit — mirrors
-    /// `derive_confirmed_battleship_hits_by_elimination` one size down.
-    /// Deliberately NOT the removed candidate-window search (see 35e8c16):
-    /// this never asks which straight-3 placement a cell belongs to, only
-    /// this literal salvo's own bag arithmetic, so it can't reproduce that
-    /// bug's phantom-Cruiser failure mode.
+    /// Once a Cross-3 entry's bag holds exactly N copies of "3" and only N
+    /// of its coordinates remain un-ruled-out, those N are certain Cruiser
+    /// hits — mirrors `derive_confirmed_battleship_hits_by_elimination` one
+    /// size down, generalized from N=1 (Battleship only ever has 1 "4" per
+    /// bag, since there's only 1 Battleship) to any N up to 3, since 2 (or
+    /// even 3) of a salvo's cells can genuinely be different Cruiser cells
+    /// at once. Deliberately NOT the removed candidate-window search (see
+    /// 35e8c16): this never asks which straight-3 placement a cell belongs
+    /// to, only this literal salvo's own bag arithmetic, so it can't
+    /// reproduce that bug's phantom-Cruiser failure mode — but it MUST
+    /// count how many "3"s a bag actually holds, not just whether it holds
+    /// at least one, or it reproduces a different version of the exact same
+    /// failure class: an earlier version of this function treated any bag
+    /// containing a "3" as fully explained by a single confirmed
+    /// coordinate, which silently assumed N=1 and wrongly ruled out a
+    /// second, genuinely real Cruiser cell whenever 2 landed in the same
+    /// salvo (caught by `self_play_discovers_every_ship_of_size_at_least_2_
+    /// by_game_end`'s "no real Cruiser cell ever wrongly ruled out"
+    /// assertion — exactly the kind of self-play regression test 35e8c16
+    /// added for the original bug, and it did its job here too).
     ///
-    /// Also propagates across entries by coordinate identity: a cell
-    /// confirmed here is the SAME physical board cell wherever else it was
-    /// fired (e.g. a refire, or 2 different salvos happening to share a
-    /// coordinate) — so any OTHER entry containing that exact (row, col)
-    /// and also holding a "3" has its own "3" already explained by it. That
-    /// entry's other 2 coordinates can therefore be ruled out too — genuine
-    /// elimination, not a guess: if either of them were ALSO a real Cruiser
-    /// cell, this entry's bag would need a second "3", which it doesn't
-    /// have. That can in turn confirm further cells elsewhere, so this
-    /// iterates to a fixed point rather than a single pass.
+    /// 2 counting rules, applied per entry:
+    ///   1. If exactly N coordinates remain un-ruled-out, all N must be real
+    ///      (there's nowhere else the N needed hits could be) — confirm them.
+    ///   2. If exactly N coordinates are already confirmed, every other
+    ///      coordinate must NOT be real (there's no room left) — rule them
+    ///      out.
+    ///
+    /// Confirmed status also propagates across entries by coordinate
+    /// identity: a cell confirmed via one salvo is the SAME physical board
+    /// cell wherever else it was fired (e.g. a refire, or 2 different
+    /// salvos sharing a coordinate), so rule 2 above can fire in another
+    /// entry using a coordinate confirmed elsewhere. Iterates to a fixed
+    /// point, since one round's confirmation/elimination can enable the
+    /// next, in either entry.
+    ///
+    /// A coordinate ruled out this way is fed into the REAL size-3 FSM via
+    /// `eliminate_size_at`, not just recorded on the entry — the reasoning
+    /// above proves it Cruiser-free globally, the same strength as an
+    /// ordinary miss, not just for this one salvo. Without this, the
+    /// deduction would be debug-display-only and never actually change
+    /// `choose_shots`/the heatmaps, which read the FSM directly and know
+    /// nothing about Cross-3 entries.
     fn derive_confirmed_cruiser_hits_by_elimination(&mut self) {
         loop {
             let mut changed = false;
 
+            // Rule 1: exactly N remaining open coordinates, for a bag
+            // holding N "3"s, must all be real.
             for entry in &mut self.cross3_entries {
-                if !entry.values.contains(&3) {
+                let n = entry.values.iter().filter(|&&v| v == 3).count();
+                if n == 0 {
                     continue;
                 }
                 let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
-                if let [only] = open[..] {
-                    if !entry.coord_confirmed_cruiser_hit[only] {
-                        entry.coord_confirmed_cruiser_hit[only] = true;
-                        changed = true;
+                if open.len() == n {
+                    for &i in &open {
+                        if !entry.coord_confirmed_cruiser_hit[i] {
+                            entry.coord_confirmed_cruiser_hit[i] = true;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -1819,19 +1849,53 @@ impl AiPlayer {
                 .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_cruiser_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
                 .collect();
 
+            // Propagate confirmed status across entries by coordinate
+            // identity BEFORE rule 2, so a coordinate confirmed via a
+            // different entry counts toward THIS entry's own confirmed
+            // total too.
             for entry in &mut self.cross3_entries {
                 if !entry.values.contains(&3) {
                     continue;
                 }
-                let Some(source) = (0..3).find(|&i| confirmed_coords.contains(&entry.coords[i])) else {
-                    continue;
-                };
                 for i in 0..3 {
-                    if i != source && !entry.coord_ruled_out[i] {
-                        entry.coord_ruled_out[i] = true;
+                    if !entry.coord_confirmed_cruiser_hit[i] && confirmed_coords.contains(&entry.coords[i]) {
+                        entry.coord_confirmed_cruiser_hit[i] = true;
                         changed = true;
                     }
                 }
+            }
+
+            // Collected rather than applied inline: `eliminate_size_at` needs
+            // `&mut self` as a whole (it drives `row_state`/`col_state`),
+            // which can't happen while `self.cross3_entries` is itself
+            // mutably borrowed by the loop below. A HashSet also naturally
+            // dedupes a coordinate that gets newly ruled out via more than
+            // one entry in the same pass (harmless to feed twice either way
+            // — `eliminate_size_at` is idempotent per cell — but pointless).
+            let mut newly_ruled_out: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+            // Rule 2: exactly N confirmed, for a bag holding N "3"s, means
+            // every other coordinate is definitely not real.
+            for entry in &mut self.cross3_entries {
+                let n = entry.values.iter().filter(|&&v| v == 3).count();
+                if n == 0 {
+                    continue;
+                }
+                let confirmed_count = (0..3).filter(|&i| entry.coord_confirmed_cruiser_hit[i]).count();
+                if confirmed_count != n {
+                    continue;
+                }
+                for i in 0..3 {
+                    if !entry.coord_confirmed_cruiser_hit[i] && !entry.coord_ruled_out[i] {
+                        entry.coord_ruled_out[i] = true;
+                        changed = true;
+                        newly_ruled_out.insert(entry.coords[i]);
+                    }
+                }
+            }
+
+            for (row, col) in newly_ruled_out {
+                self.eliminate_size_at(row, col, 3);
             }
 
             if !changed {
@@ -1897,11 +1961,16 @@ impl AiPlayer {
     }
 
     /// Mirrors `derive_confirmed_cruiser_hits_by_elimination` one size
-    /// down — same per-entry elimination, same coordinate-identity
-    /// propagation across entries, same fixed-point iteration, same reason
-    /// it doesn't reintroduce the soundness bug 35e8c16 removed (see that
-    /// function's doc comment). Frigate exact-cell/layout identification
-    /// via candidate-window enumeration remains untouched (still not
+    /// down — same 2 counting rules (N "2"s in the bag need exactly N
+    /// confirmed/open coordinates, not just "at least one"; see that
+    /// function's doc comment for why the naive "any 2 present" version was
+    /// unsound), same coordinate-identity propagation across entries, same
+    /// fixed-point iteration, same reason it doesn't reintroduce the
+    /// soundness bug 35e8c16 removed, and same feed into the real size-2
+    /// FSM via `eliminate_size_at` for a newly-ruled-out coordinate, so this
+    /// actually changes `choose_shots`/the heatmaps rather than only the
+    /// debug display. Frigate exact-cell/layout identification via
+    /// candidate-window enumeration remains untouched (still not
     /// attempted) — this only ever reasons about literal coordinates and
     /// bag counts, never window shapes.
     fn derive_confirmed_frigate_hits_by_elimination(&mut self) {
@@ -1909,14 +1978,17 @@ impl AiPlayer {
             let mut changed = false;
 
             for entry in &mut self.cross2_entries {
-                if !entry.values.contains(&2) {
+                let n = entry.values.iter().filter(|&&v| v == 2).count();
+                if n == 0 {
                     continue;
                 }
                 let open: Vec<usize> = (0..3).filter(|&i| !entry.coord_ruled_out[i]).collect();
-                if let [only] = open[..] {
-                    if !entry.coord_confirmed_frigate_hit[only] {
-                        entry.coord_confirmed_frigate_hit[only] = true;
-                        changed = true;
+                if open.len() == n {
+                    for &i in &open {
+                        if !entry.coord_confirmed_frigate_hit[i] {
+                            entry.coord_confirmed_frigate_hit[i] = true;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -1931,15 +2003,38 @@ impl AiPlayer {
                 if !entry.values.contains(&2) {
                     continue;
                 }
-                let Some(source) = (0..3).find(|&i| confirmed_coords.contains(&entry.coords[i])) else {
-                    continue;
-                };
                 for i in 0..3 {
-                    if i != source && !entry.coord_ruled_out[i] {
-                        entry.coord_ruled_out[i] = true;
+                    if !entry.coord_confirmed_frigate_hit[i] && confirmed_coords.contains(&entry.coords[i]) {
+                        entry.coord_confirmed_frigate_hit[i] = true;
                         changed = true;
                     }
                 }
+            }
+
+            // See `derive_confirmed_cruiser_hits_by_elimination`'s identical
+            // comment on why this is collected rather than applied inline.
+            let mut newly_ruled_out: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+            for entry in &mut self.cross2_entries {
+                let n = entry.values.iter().filter(|&&v| v == 2).count();
+                if n == 0 {
+                    continue;
+                }
+                let confirmed_count = (0..3).filter(|&i| entry.coord_confirmed_frigate_hit[i]).count();
+                if confirmed_count != n {
+                    continue;
+                }
+                for i in 0..3 {
+                    if !entry.coord_confirmed_frigate_hit[i] && !entry.coord_ruled_out[i] {
+                        entry.coord_ruled_out[i] = true;
+                        changed = true;
+                        newly_ruled_out.insert(entry.coords[i]);
+                    }
+                }
+            }
+
+            for (row, col) in newly_ruled_out {
+                self.eliminate_size_at(row, col, 2);
             }
 
             if !changed {

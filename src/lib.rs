@@ -2196,6 +2196,41 @@ mod tests {
     }
 
     #[test]
+    fn ai_cross3_two_real_hits_in_one_salvo_does_not_wrongly_eliminate_either() {
+        // Regression test for a real bug caught by
+        // `self_play_discovers_every_ship_of_size_at_least_2_by_game_end`'s
+        // "no real Cruiser cell ever wrongly ruled out" assertion: an
+        // earlier version of `derive_confirmed_cruiser_hits_by_elimination`
+        // treated ANY entry containing a coordinate confirmed elsewhere as
+        // "fully explained by that one cell alone," without checking how
+        // many "3"s the bag actually needed explained. A bag with 2 real
+        // Cruiser hits (2 different Cruiser cells landing in the same
+        // salvo) then had its SECOND real hit wrongly ruled out the moment
+        // the FIRST one happened to already be confirmed via some other
+        // salvo.
+        let mut ai = AiPlayer::new();
+
+        // (2,2) gets independently confirmed via its own salvo: 2
+        // outer-ring decoys ruled out immediately, leaving it as the sole
+        // candidate.
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
+        assert!(ai.cross3_entries()[0].coord_confirmed_cruiser_hit[0], "sanity: (2,2) confirmed");
+
+        // (2,2) is refired alongside a genuinely DIFFERENT real Cruiser
+        // cell, (2,7), plus a genuine miss at (5,5) — this bag legitimately
+        // needs 2 of its 3 coordinates explained as real Cruiser hits, not 1.
+        ai.apply_salvo([(2, 2), (2, 7), (5, 5)], [3, 3, 0]);
+        let entry_b = &ai.cross3_entries()[1];
+        assert!(entry_b.coord_confirmed_cruiser_hit[0], "(2,2)'s confirmed status still propagates in");
+        assert!(
+            !entry_b.coord_ruled_out[1],
+            "(2,7) is a genuinely real Cruiser cell and must NOT be ruled out just because (2,2) is already \
+             confirmed — this bag needs 2 real hits explained, not 1"
+        );
+        assert!(!entry_b.coord_confirmed_cruiser_hit[1], "(2,7) isn't independently provable as confirmed from this data alone");
+    }
+
+    #[test]
     fn ai_confirms_a_cross2_hit_by_elimination_and_propagates_to_a_shared_coordinate() {
         // Mirrors `ai_confirms_a_cross3_hit_by_elimination_and_propagates_
         // to_a_shared_coordinate` one ship size down.
