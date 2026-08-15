@@ -1111,6 +1111,21 @@ impl AiPlayer {
         out
     }
 
+    /// Every coordinate individually confirmed a real Cruiser hit by
+    /// `derive_confirmed_cruiser_hits_by_elimination`'s bag arithmetic,
+    /// across every Cross-3 entry — independent of whether the FULL
+    /// 2-Cruiser layout is known. Any candidate window-pair whose union
+    /// doesn't contain one of these is provably wrong (that cell is
+    /// definitely part of SOME real Cruiser, not just possibly one), not
+    /// merely "less likely" — see its use in
+    /// `consistent_cruiser_candidates_uncached`.
+    fn cells_confirmed_individually_cruiser(&self) -> std::collections::HashSet<(usize, usize)> {
+        self.cross3_entries
+            .iter()
+            .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_cruiser_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
+            .collect()
+    }
+
     /// Every distinct pair of non-overlapping Cruiser windows currently
     /// consistent with the full salvo history — one entry per hypothesis
     /// "these 2 windows, and nothing else, are the real Cruisers". Shared
@@ -1118,11 +1133,16 @@ impl AiPlayer {
     /// `cruiser_disambiguation_shots` (which reasons about the individual
     /// hypotheses directly, to find a shot that best tells them apart).
     ///
-    /// Memoized in `cruiser_candidates_cache`, keyed by `salvo_history.len()`
-    /// — this list depends on nothing else, and is expensive enough
-    /// (`consistent_frigate_candidates` one size down even more so) that
-    /// recomputing it on every one of the several independent JSON
-    /// accessors that call it per game state is wasteful.
+    /// Memoized in `cruiser_candidates_cache`, keyed by `salvo_history.len()`.
+    /// This list also depends on `cells_confirmed_individually_cruiser`
+    /// (see `consistent_cruiser_candidates_uncached`), but that never
+    /// invalidates the cache on its own: every path that can newly confirm
+    /// a cell either extends `salvo_history` first (`apply_salvo`, which
+    /// changes the cache key itself) or explicitly clears this cache
+    /// already for its own reasons (`update_fsm_and_resolve`). Expensive
+    /// enough (`consistent_frigate_candidates` one size down even more so)
+    /// that recomputing it on every one of the several independent JSON
+    /// accessors that call it per game state would otherwise be wasteful.
     fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.cruiser_candidates_cache.borrow().as_ref() {
@@ -1137,6 +1157,7 @@ impl AiPlayer {
 
     fn consistent_cruiser_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let confirmed_battleship = self.cells_confirmed_battleship();
+        let confirmed_cruiser_cells = self.cells_confirmed_individually_cruiser();
         let windows: Vec<[(usize, usize); 3]> = Self::all_cruiser_windows()
             .into_iter()
             .filter(|w| w.iter().all(|&(r, c)| !confirmed_battleship[r][c]))
@@ -1148,12 +1169,28 @@ impl AiPlayer {
                     continue;
                 }
                 let union: std::collections::HashSet<(usize, usize)> = windows[i].iter().chain(windows[j].iter()).copied().collect();
-                if Self::consistent_with_salvo_history(&union, &self.salvo_history, 3) {
+                // A hypothesis whose union doesn't cover every
+                // individually-confirmed Cruiser cell is provably wrong,
+                // not just less likely — the same "must include every
+                // confirmed cell" pruning `prune_candidates_not_through_
+                // confirmed` already does for Battleship's own window
+                // search, one size up.
+                if confirmed_cruiser_cells.iter().all(|c| union.contains(c)) && Self::consistent_with_salvo_history(&union, &self.salvo_history, 3) {
                     out.push(union);
                 }
             }
         }
         out
+    }
+
+    /// Every coordinate individually confirmed a real Frigate hit by
+    /// `derive_confirmed_frigate_hits_by_elimination`'s bag arithmetic —
+    /// mirrors `cells_confirmed_individually_cruiser` one size down.
+    fn cells_confirmed_individually_frigate(&self) -> std::collections::HashSet<(usize, usize)> {
+        self.cross2_entries
+            .iter()
+            .flat_map(|e| e.coords.iter().zip(e.coord_confirmed_frigate_hit.iter()).filter(|(_, &c)| c).map(|(&coord, _)| coord))
+            .collect()
     }
 
     /// Every distinct TRIPLE of non-overlapping Frigate windows (3
@@ -1164,7 +1201,9 @@ impl AiPlayer {
     /// drastically) before the O(n^3) search. Before any salvo, though,
     /// there's nothing yet to narrow with — memoized in
     /// `frigate_candidates_cache` for the same reason as
-    /// `consistent_cruiser_candidates`.
+    /// `consistent_cruiser_candidates`, including the same "depends on
+    /// `cells_confirmed_individually_frigate` too, but that never
+    /// invalidates the cache on its own" reasoning.
     fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.frigate_candidates_cache.borrow().as_ref() {
@@ -1182,6 +1221,7 @@ impl AiPlayer {
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
         let confirmed_battleship = self.cells_confirmed_battleship();
         let cruiser_exclusion = self.cells_confirmed_cruiser_or_adjacent();
+        let confirmed_frigate_cells = self.cells_confirmed_individually_frigate();
         let candidates: Vec<[(usize, usize); 2]> = windows
             .into_iter()
             .filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c] && !cruiser_exclusion[r][c]))
@@ -1199,6 +1239,12 @@ impl AiPlayer {
                         continue;
                     }
                     let union: std::collections::HashSet<(usize, usize)> = candidates[i].iter().chain(candidates[j].iter()).chain(candidates[k].iter()).copied().collect();
+                    // Same "must include every individually-confirmed
+                    // cell" pruning as the Cruiser side — a hypothesis
+                    // whose union misses one is provably wrong.
+                    if !confirmed_frigate_cells.iter().all(|c| union.contains(c)) {
+                        continue;
+                    }
                     if Self::consistent_with_salvo_history(&union, &self.salvo_history, 2) {
                         out.push(union);
                     }

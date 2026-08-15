@@ -2432,6 +2432,119 @@ mod tests {
     }
 
     #[test]
+    fn ai_confirmed_cruiser_cell_forces_100_percent_heatmap_and_excludes_hypotheses_missing_it() {
+        // Regression/feature test for `cells_confirmed_individually_
+        // cruiser`'s use in `consistent_cruiser_candidates_uncached`: a
+        // window-pair hypothesis whose union doesn't cover an
+        // individually-confirmed Cruiser cell is provably wrong, not just
+        // "less likely" — mirrors the same "must include every confirmed
+        // cell" pruning `prune_candidates_not_through_confirmed` already
+        // does for Battleship, one size up.
+        let mut ai = AiPlayer::new();
+
+        // (2,2) confirmed via its own salvo's elimination (2 outer-ring decoys).
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
+        assert!(ai.cross3_entries()[0].coord_confirmed_cruiser_hit[0], "sanity: (2,2) confirmed");
+
+        // (2,2) refired alongside 2 ordinary INNER cells. Looked at in
+        // isolation, this salvo's own aggregate bag count (one "3") is
+        // just as well "explained" by (5,5) or (5,6) as by (2,2) — the
+        // plain aggregate check has no way to know (2,2) is the one
+        // that's actually cross-confirmed. Only the individually-confirmed
+        // requirement can tell them apart.
+        ai.apply_salvo([(2, 2), (5, 5), (5, 6)], [3, 0, 0]);
+
+        let heatmap = ai.cruiser_heatmap();
+        assert_eq!(heatmap[2 - 1][2 - 1], 1.0, "(2,2) is individually confirmed — must show 100% across every surviving hypothesis");
+        assert_eq!(heatmap[5 - 1][5 - 1], 0.0, "(5,5) 'explaining' the 2nd salvo's 3 instead of the confirmed (2,2) is provably wrong — must show 0%");
+        assert_eq!(heatmap[5 - 1][6 - 1], 0.0, "(5,6) 'explaining' the 2nd salvo's 3 instead of the confirmed (2,2) is provably wrong — must show 0%");
+    }
+
+    #[test]
+    fn ai_consistent_cruiser_candidates_excludes_hypotheses_through_an_adjacency_ruled_out_never_fired_cell() {
+        // Stronger regression test than the "explains via a decoy already
+        // in the salvo" version above — this one specifically targets
+        // cells ruled out via ADJACENCY elimination (never individually
+        // fired, so entirely absent from `salvo_history`), which the
+        // plain aggregate salvo-history check has no way to know about at
+        // all — it only ever sees what's actually IN the fired-coordinate
+        // bags. Verified against the pre-fix commit directly: without
+        // `cells_confirmed_individually_cruiser`'s filter, this exact
+        // scenario produced a spurious 39%/35%/26% confidence split
+        // across the 3 cells below, instead of the correct 100%/0%/0%.
+        let mut ai = AiPlayer::new();
+
+        // Confirm a Frigate at (7,7): 2 outer-ring decoys ruled out immediately.
+        ai.apply_salvo([(7, 7), (0, 0), (0, 9)], [2, 0, 0]);
+        assert!(ai.cross2_entries()[0].coord_confirmed_frigate_hit[0], "sanity: (7,7) confirmed Frigate");
+
+        // Its per-cell adjacency elimination kills size-3 at (6,6) and
+        // (6,8) — 2 of its 8 neighbours — WITHOUT either ever being
+        // individually fired.
+        let (_, _, combined3) = ai.alive_grids(3);
+        assert_eq!(combined3[6 - 1][6 - 1], 0, "sanity: (6,6) dead for Cruiser via adjacency, never fired");
+        assert_eq!(combined3[6 - 1][8 - 1], 0, "sanity: (6,8) dead for Cruiser via adjacency, never fired");
+
+        // A cross-3 salvo touching those 2 already-dead-but-never-fired
+        // cells plus one genuinely open cell: "only 1 open" confirms (3,3).
+        ai.apply_salvo([(3, 3), (6, 6), (6, 8)], [3, 0, 0]);
+        assert_eq!(ai.cross3_entries().last().unwrap().coord_confirmed_cruiser_hit, [true, false, false]);
+
+        let heatmap = ai.cruiser_heatmap();
+        assert_eq!(heatmap[3 - 1][3 - 1], 1.0, "(3,3) is the only coordinate that could possibly explain this salvo's 3 — must show 100%");
+        assert_eq!(
+            heatmap[6 - 1][6 - 1],
+            0.0,
+            "(6,6) was already proven impossible via adjacency before this salvo even fired — must show 0%, not partial confidence from a hypothesis merely 'consistent' with raw salvo history alone"
+        );
+        assert_eq!(
+            heatmap[6 - 1][8 - 1],
+            0.0,
+            "(6,8) was already proven impossible via adjacency before this salvo even fired — must show 0%, not partial confidence from a hypothesis merely 'consistent' with raw salvo history alone"
+        );
+    }
+
+    #[test]
+    fn ai_consistent_frigate_candidates_excludes_hypotheses_through_an_adjacency_ruled_out_never_fired_cell() {
+        // Mirrors `ai_consistent_cruiser_candidates_excludes_hypotheses_
+        // through_an_adjacency_ruled_out_never_fired_cell` one size down —
+        // uses a confirmed Cruiser cell's adjacency elimination instead of
+        // a confirmed Frigate's.
+        let mut ai = AiPlayer::new();
+
+        ai.apply_salvo([(7, 7), (0, 0), (0, 9)], [3, 0, 0]);
+        assert!(ai.cross3_entries()[0].coord_confirmed_cruiser_hit[0], "sanity: (7,7) confirmed Cruiser");
+
+        let (_, _, combined2) = ai.alive_grids(2);
+        assert_eq!(combined2[6 - 1][6 - 1], 0, "sanity: (6,6) dead for Frigate via adjacency, never fired");
+        assert_eq!(combined2[6 - 1][8 - 1], 0, "sanity: (6,8) dead for Frigate via adjacency, never fired");
+
+        ai.apply_salvo([(3, 3), (6, 6), (6, 8)], [2, 0, 0]);
+        assert_eq!(ai.cross2_entries().last().unwrap().coord_confirmed_frigate_hit, [true, false, false]);
+
+        let heatmap = ai.frigate_heatmap();
+        assert_eq!(heatmap[3 - 1][3 - 1], 1.0, "(3,3) is the only coordinate that could possibly explain this salvo's 2 — must show 100%");
+        assert_eq!(heatmap[6 - 1][6 - 1], 0.0, "(6,6) was already proven impossible via adjacency before this salvo even fired — must show 0%");
+        assert_eq!(heatmap[6 - 1][8 - 1], 0.0, "(6,8) was already proven impossible via adjacency before this salvo even fired — must show 0%");
+    }
+
+    #[test]
+    fn ai_confirmed_frigate_cell_forces_100_percent_heatmap_and_excludes_hypotheses_missing_it() {
+        // Mirrors `ai_confirmed_cruiser_cell_forces_100_percent_heatmap_
+        // and_excludes_hypotheses_missing_it` one size down.
+        let mut ai = AiPlayer::new();
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [2, 0, 0]);
+        assert!(ai.cross2_entries()[0].coord_confirmed_frigate_hit[0], "sanity: (2,2) confirmed");
+
+        ai.apply_salvo([(2, 2), (5, 5), (5, 6)], [2, 0, 0]);
+
+        let heatmap = ai.frigate_heatmap();
+        assert_eq!(heatmap[2 - 1][2 - 1], 1.0, "(2,2) is individually confirmed — must show 100% across every surviving hypothesis");
+        assert_eq!(heatmap[5 - 1][5 - 1], 0.0, "(5,5) 'explaining' the 2nd salvo's 2 instead of the confirmed (2,2) is provably wrong — must show 0%");
+        assert_eq!(heatmap[5 - 1][6 - 1], 0.0, "(5,6) 'explaining' the 2nd salvo's 2 instead of the confirmed (2,2) is provably wrong — must show 0%");
+    }
+
+    #[test]
     fn ai_cruiser_heatmap_shows_certainty_once_both_cruisers_are_fully_pinned() {
         let mut ai = AiPlayer::new();
         // Firing a straight-3 run directly, all 3 cells coming back "3",

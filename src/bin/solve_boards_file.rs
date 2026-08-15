@@ -250,6 +250,19 @@ fn solve_one(game: &mut Game, cap: usize) -> Option<usize> {
         let mut parsed: Vec<usize> = Vec::new();
         if game.ai_target_size() <= 1 {
             let _locked = game.update_fsm_and_resolve();
+            // update_fsm_and_resolve can, on its own, flip a game that was
+            // already won-but-unresolved into fully resolved (locking in a
+            // layout can immediately settle a disambiguation that was
+            // previously stuck) — check again right away. Without this,
+            // the fire() call below would get rejected with "game already
+            // won" (Game::fire's own guard, correctly refusing to fire on
+            // an already-resolved game), which the error-handling further
+            // down would misread as a genuine dead end and wrongly report
+            // this game as unresolved despite it actually being done.
+            cleared = game.is_won() && is_resolved(game);
+            if cleared {
+                break;
+            }
             parsed = serde_json::from_str(&game.ai_suggest_disambiguation_refire()).unwrap_or_default();
             if parsed.len() != 3 {
                 parsed = serde_json::from_str(&game.ai_suggest_disambiguation_last_resort()).unwrap_or_default();
