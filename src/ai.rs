@@ -719,10 +719,16 @@ impl AiPlayer {
     ///   the 6 real cells either), so there's no separate neighbour-only
     ///   size-3 pass below — it would be pure redundant idempotent work.
     /// - Every cell adjacent to a real Cruiser cell (including diagonally)
-    ///   can never hold a Frigate either — eliminate size 2 there. THIS
-    ///   one genuinely needs the neighbour-only pass: unlike size 3, there
-    ///   is no broader "every non-Cruiser-cell loses size 2" step, since
-    ///   plenty of size-2-eligible cells exist far from any Cruiser.
+    ///   can never hold a Frigate OR a Battleship either — eliminate size
+    ///   2 and size 4 there. THIS genuinely needs the neighbour-only pass:
+    ///   unlike size 3, there's no broader "every non-Cruiser-cell loses
+    ///   size 2/4" step, since plenty of eligible cells for both exist far
+    ///   from any Cruiser. Safe to eliminate size 4 (unlike size 3 or 2 at
+    ///   a single unconfirmed cell — see `apply_adjacency_elimination_
+    ///   around`) because the full 6-cell layout is known here, so a
+    ///   neighbour is provably NOT one of the Cruisers' own cells, and
+    ///   there's only 1 Battleship anyway — no risk of mistaking a ship's
+    ///   own sibling cell for a rule violation.
     ///
     /// Doesn't itself refresh cross-3/cross-2 entries or clear the
     /// candidate caches — `update_fsm_and_resolve` (the only caller) does
@@ -762,6 +768,7 @@ impl AiPlayer {
                         continue; // part of a Cruiser itself, not a neighbour
                     }
                     self.eliminate_size_at(nr, nc, 2);
+                    self.eliminate_size_at(nr, nc, 4);
                 }
             }
         }
@@ -769,16 +776,17 @@ impl AiPlayer {
     }
 
     /// Mirrors `lock_in_cruiser_layout` one size down, using
-    /// `frigate_identified_cells_refined`. Unlike the Cruiser side, BOTH
-    /// eliminations here need an explicit neighbour-only pass: knowing all
+    /// `frigate_identified_cells_refined`. Unlike the Cruiser side, EVERY
+    /// elimination here needs an explicit neighbour-only pass: knowing all
     /// 6 real Frigate cells only proves size 2 is dead everywhere else
     /// (the broad, non-neighbour-specific step, mirroring Cruiser's own),
-    /// but says nothing on its own about size 3 anywhere — Frigates being
-    /// smaller than Cruisers, "not a Frigate cell" is a much weaker
-    /// statement than "not a Cruiser cell" was on the Cruiser side, so the
-    /// size-3 exclusion has to come specifically from adjacency (no
-    /// Cruiser may sit next to a confirmed Frigate), not from a broader
-    /// "everywhere but these 6 cells" sweep the way it did one size up.
+    /// but says nothing on its own about size 3 or size 4 anywhere —
+    /// Frigates being smaller than Cruisers, "not a Frigate cell" is a
+    /// much weaker statement than "not a Cruiser cell" was on the Cruiser
+    /// side, so the size-3/size-4 exclusion has to come specifically from
+    /// adjacency (no Cruiser or Battleship may sit next to a confirmed
+    /// Frigate), not from a broader "everywhere but these 6 cells" sweep
+    /// the way it did one size up.
     fn lock_in_frigate_layout(&mut self) -> bool {
         if self.frigate_layout_locked.is_some() {
             return false;
@@ -815,6 +823,7 @@ impl AiPlayer {
                     }
                     self.eliminate_size_at(nr, nc, 3);
                     self.eliminate_size_at(nr, nc, 2);
+                    self.eliminate_size_at(nr, nc, 4);
                 }
             }
         }
@@ -1912,6 +1921,12 @@ impl AiPlayer {
     fn derive_confirmed_cruiser_hits_by_elimination(&mut self) {
         loop {
             let mut changed = false;
+            // Every coordinate whose `coord_confirmed_cruiser_hit` flips to
+            // true THIS round (either rule below) — not just re-derived
+            // from an earlier round. See the adjacency-elimination pass at
+            // the end of this iteration for why this is tracked separately
+            // from `newly_ruled_out`.
+            let mut newly_confirmed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
 
             // Rule 1: exactly N remaining open coordinates, for a bag
             // holding N "3"s, must all be real.
@@ -1926,6 +1941,7 @@ impl AiPlayer {
                         if !entry.coord_confirmed_cruiser_hit[i] {
                             entry.coord_confirmed_cruiser_hit[i] = true;
                             changed = true;
+                            newly_confirmed.insert(entry.coords[i]);
                         }
                     }
                 }
@@ -1949,6 +1965,7 @@ impl AiPlayer {
                     if !entry.coord_confirmed_cruiser_hit[i] && confirmed_coords.contains(&entry.coords[i]) {
                         entry.coord_confirmed_cruiser_hit[i] = true;
                         changed = true;
+                        newly_confirmed.insert(entry.coords[i]);
                     }
                 }
             }
@@ -1984,6 +2001,34 @@ impl AiPlayer {
 
             for (row, col) in newly_ruled_out {
                 self.eliminate_size_at(row, col, 3);
+            }
+
+            // A cell just confirmed a genuine Cruiser hit forbids any OTHER
+            // ship from being Chebyshev-adjacent to it — same rule
+            // `try_place` enforces, applied around a single confirmed cell
+            // rather than waiting for the whole 2-Cruiser layout to lock
+            // via `lock_in_cruiser_layout` (which may never happen; a
+            // permanently ambiguous layout shouldn't cost this deduction
+            // too). Also explicitly strips size 2 at the confirmed cell
+            // itself — unlike the neighbours, the cell's own ordinary
+            // `apply_hit` never does this on its own: its bag's bound was
+            // exactly 3 (not >2), so only sizes >3 got stripped there.
+            //
+            // `apply_adjacency_elimination_around` is passed `3` as this
+            // cell's own size specifically so it DOESN'T also eliminate
+            // size 3 at the neighbours — a single confirmed cell, on its
+            // own, doesn't yet know where the REST of its own Cruiser is;
+            // a straight-line neighbour could easily be that very cell,
+            // which is not a rule violation at all. Only eliminating every
+            // OTHER size is safe without the full layout (contrast
+            // `lock_in_cruiser_layout`, which DOES know all 6 real cells
+            // and so can safely eliminate size 3 too, explicitly excluding
+            // them from that pass).
+            for (row, col) in &newly_confirmed {
+                self.eliminate_size_at(*row, *col, 2);
+            }
+            for (row, col) in newly_confirmed {
+                self.apply_adjacency_elimination_around(row, col, 3);
             }
 
             if !changed {
@@ -2064,6 +2109,9 @@ impl AiPlayer {
     fn derive_confirmed_frigate_hits_by_elimination(&mut self) {
         loop {
             let mut changed = false;
+            // See `derive_confirmed_cruiser_hits_by_elimination`'s identical
+            // comment on why this is tracked separately from `newly_ruled_out`.
+            let mut newly_confirmed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
 
             for entry in &mut self.cross2_entries {
                 let n = entry.values.iter().filter(|&&v| v == 2).count();
@@ -2076,6 +2124,7 @@ impl AiPlayer {
                         if !entry.coord_confirmed_frigate_hit[i] {
                             entry.coord_confirmed_frigate_hit[i] = true;
                             changed = true;
+                            newly_confirmed.insert(entry.coords[i]);
                         }
                     }
                 }
@@ -2095,6 +2144,7 @@ impl AiPlayer {
                     if !entry.coord_confirmed_frigate_hit[i] && confirmed_coords.contains(&entry.coords[i]) {
                         entry.coord_confirmed_frigate_hit[i] = true;
                         changed = true;
+                        newly_confirmed.insert(entry.coords[i]);
                     }
                 }
             }
@@ -2125,8 +2175,61 @@ impl AiPlayer {
                 self.eliminate_size_at(row, col, 2);
             }
 
+            // A cell just confirmed a genuine Frigate hit forbids any OTHER
+            // ship from being Chebyshev-adjacent to it — mirrors
+            // `derive_confirmed_cruiser_hits_by_elimination`'s identical
+            // step one size up, including passing `2` as this cell's own
+            // size so size 2 itself is left untouched at the neighbours
+            // (same reasoning: a straight-line neighbour could easily be
+            // this very Frigate's own other cell). No extra own-cell
+            // elimination needed here, unlike the Cruiser side: this
+            // cell's own ordinary `apply_hit` already had bound == 2,
+            // which strips every size >2 (3 and 4) there on its own.
+            for (row, col) in newly_confirmed {
+                self.apply_adjacency_elimination_around(row, col, 2);
+            }
+
             if !changed {
                 break;
+            }
+        }
+    }
+
+    /// Eliminates every ship size EXCEPT `own_size` at every cell
+    /// orthogonally or diagonally adjacent to (row, col) — the same "no
+    /// OTHER ship may be Chebyshev-adjacent" rule `try_place` enforces,
+    /// applied around a single confirmed ship cell rather than a
+    /// fully-known ship's whole layout (contrast `lock_in_cruiser_layout`/
+    /// `lock_in_frigate_layout`, which know the complete 6-cell layout and
+    /// so can safely eliminate that class's own size too, explicitly
+    /// excluding the ship's own cells from that pass).
+    ///
+    /// Deliberately does NOT eliminate `own_size` itself: a cell confirmed
+    /// as (for example) a Cruiser hit doesn't by itself prove which of its
+    /// neighbours are or aren't the SAME Cruiser's own other cells — a
+    /// straight-line neighbour could easily be exactly that, which isn't a
+    /// rule violation at all (2 cells of the SAME ship are of course
+    /// adjacent to each other). Every OTHER size, though, is always safe
+    /// to eliminate regardless: whether a neighbour turns out to be part
+    /// of the SAME ship, water, or (impossibly) a different ship, it's
+    /// never a DIFFERENT-sized ship in any of those cases.
+    fn apply_adjacency_elimination_around(&mut self, row: usize, col: usize, own_size: usize) {
+        for dr in -1isize..=1 {
+            for dc in -1isize..=1 {
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
+                let nr = row as isize + dr;
+                let nc = col as isize + dc;
+                if !(INNER_LO as isize..=INNER_HI as isize).contains(&nr) || !(INNER_LO as isize..=INNER_HI as isize).contains(&nc) {
+                    continue;
+                }
+                let (nr, nc) = (nr as usize, nc as usize);
+                for &size in &[4usize, 3, 2] {
+                    if size != own_size {
+                        self.eliminate_size_at(nr, nc, size);
+                    }
+                }
             }
         }
     }

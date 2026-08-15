@@ -2231,6 +2231,70 @@ mod tests {
     }
 
     #[test]
+    fn ai_confirmed_cruiser_cell_eliminates_other_sizes_but_not_its_own_at_neighbours() {
+        // Regression test for a bug caught during review, before it ever
+        // shipped: a first draft of this adjacency elimination eliminated
+        // size 3 at EVERY neighbour of a newly-confirmed Cruiser cell,
+        // including straight-line neighbours — but a single confirmed
+        // cell, on its own, has no idea where the REST of its own Cruiser
+        // is. A straight-line neighbour could easily be that very cell,
+        // which isn't a rule violation at all (2 cells of the SAME ship
+        // are of course adjacent). Only eliminating every OTHER size is
+        // safe without knowing the full layout — see `AiPlayer::
+        // apply_adjacency_elimination_around`.
+        let mut ai = AiPlayer::new();
+        let (_, _, baseline3) = ai.alive_grids(3);
+        assert!(baseline3[2 - 1][3 - 1] > 0, "sanity: (2,3) starts with alive Cruiser room");
+
+        // (2,2) confirmed via its own salvo's elimination (2 outer-ring decoys).
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [3, 0, 0]);
+        assert!(ai.cross3_entries()[0].coord_confirmed_cruiser_hit[0], "sanity: (2,2) confirmed");
+
+        let (_, _, combined3) = ai.alive_grids(3);
+        let (_, _, combined2) = ai.alive_grids(2);
+        let (_, _, combined4) = ai.alive_grids(4);
+
+        // (2,3): straight-line neighbour of (2,2) — could easily be this
+        // SAME Cruiser's own next cell (not yet individually confirmed).
+        assert!(
+            combined3[2 - 1][3 - 1] > 0,
+            "(2,3) could be the SAME Cruiser's own next cell — size 3 must NOT be eliminated there from a single confirmed neighbour alone"
+        );
+        // But a Frigate or Battleship there is genuinely impossible now,
+        // regardless of whether (2,3) turns out to be Cruiser or water.
+        assert_eq!(combined2[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Cruiser cell, must show 0 alive Frigate room");
+        assert_eq!(combined4[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Cruiser cell, must show 0 alive Battleship room");
+
+        // (2,2) itself: size 2 explicitly stripped as a one-off own-cell
+        // cleanup — ordinary `apply_hit` didn't do this on its own, since
+        // its bag's bound was exactly 3, not >2.
+        assert_eq!(combined2[2 - 1][2 - 1], 0, "(2,2) itself can't also be a Frigate");
+    }
+
+    #[test]
+    fn ai_confirmed_frigate_cell_eliminates_other_sizes_but_not_its_own_at_neighbours() {
+        // Mirrors `ai_confirmed_cruiser_cell_eliminates_other_sizes_but_
+        // not_its_own_at_neighbours` one size down.
+        let mut ai = AiPlayer::new();
+        let (_, _, baseline2) = ai.alive_grids(2);
+        assert!(baseline2[2 - 1][3 - 1] > 0, "sanity: (2,3) starts with alive Frigate room");
+
+        ai.apply_salvo([(2, 2), (0, 0), (0, 9)], [2, 0, 0]);
+        assert!(ai.cross2_entries()[0].coord_confirmed_frigate_hit[0], "sanity: (2,2) confirmed");
+
+        let (_, _, combined3) = ai.alive_grids(3);
+        let (_, _, combined2) = ai.alive_grids(2);
+        let (_, _, combined4) = ai.alive_grids(4);
+
+        assert!(
+            combined2[2 - 1][3 - 1] > 0,
+            "(2,3) could be the SAME Frigate's own other cell — size 2 must NOT be eliminated there from a single confirmed neighbour alone"
+        );
+        assert_eq!(combined3[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Frigate cell, must show 0 alive Cruiser room");
+        assert_eq!(combined4[2 - 1][3 - 1], 0, "(2,3) is adjacent to a confirmed Frigate cell, must show 0 alive Battleship room");
+    }
+
+    #[test]
     fn ai_confirms_a_cross2_hit_by_elimination_and_propagates_to_a_shared_coordinate() {
         // Mirrors `ai_confirms_a_cross3_hit_by_elimination_and_propagates_
         // to_a_shared_coordinate` one ship size down.
