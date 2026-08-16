@@ -2788,6 +2788,25 @@ mod tests {
         // possible ONLY as a Frigate, fired together, resolves both by
         // elimination — strictly better than the general minimax search's
         // worst-case narrowing.
+        //
+        // Deliberately checks the PROPERTY (anchor + a genuine cruiser-
+        // only cell + a genuine frigate-only cell, wherever they land)
+        // rather than hardcoding which exact cells `anchored_isolation_
+        // shot` should pick. An earlier version of this test hardcoded 2
+        // specific "ambiguous" cells fed via single 3-cell salvos — but
+        // with the rest of the board left wide open (no other salvo
+        // anywhere), a 3-cell "exactly 1 of these is real" salvo has NO
+        // valid window entirely within itself (that would need all 3 to
+        // be real, contradicting the bag's single hit) — its only source
+        // of alive room is some entirely different, perpendicular window
+        // extending from one fired cell into UNFIRED territory. Trying to
+        // pin that down to 2 SPECIFIC hand-picked cells turned out
+        // extremely sensitive to incidental FSM interactions from the
+        // Battleship's own decoy cells and adjacency elimination (both
+        // pre-existing mechanisms, not new to this session) — genuinely
+        // hard to get right by construction, and not really what this
+        // test is meant to be about. Checking the functional property
+        // instead sidesteps that fragility entirely.
         let mut ai = AiPlayer::new();
 
         // Confirm the Battleship at (4,3)-(4,4)-(4,5)-(4,6).
@@ -2795,27 +2814,49 @@ mod tests {
         ai.apply_salvo([(4, 6), (8, 7), (8, 8)], [4, 0, 0]);
 
         // Exactly one of these 3 is a real Cruiser hit; the lack of any
-        // "2" in this bag also proves none of them can be a Frigate.
-        ai.apply_salvo([(3, 2), (3, 3), (3, 4)], [3, 0, 0]);
+        // "2" in this bag also proves none of them can be a Frigate. Row 1
+        // cols 6-8 deliberately — not row/col-adjacent to the confirmed
+        // Battleship (row 4) or its decoy cells (1,1)/(2,2): a Cruiser
+        // genuinely adjacent to the Battleship would be a contradiction
+        // (no 2 ships may be adjacent), which `alive_value`-aware window
+        // generation now correctly recognizes and excludes outright — with
+        // ALL 3 candidate coordinates excluded that way, no window could
+        // ever satisfy this salvo's bag, collapsing the WHOLE Cruiser
+        // candidate list to empty rather than just those 3 cells. Sharing
+        // a row/column with an eliminated decoy cell (not adjacency, just
+        // the same line) also measurably changes that whole line's FSM
+        // state, which is why cols 1-5 are avoided too, not just row 3-5.
+        ai.apply_salvo([(1, 6), (1, 7), (1, 8)], [3, 0, 0]);
         // Exactly one of these 3 is a real Frigate hit; the lack of any
         // "3" proves none of them can be a Cruiser.
         ai.apply_salvo([(6, 2), (6, 3), (6, 4)], [2, 0, 0]);
 
         let confirmed_battleship: std::collections::HashSet<(usize, usize)> = [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect();
-        let cruiser_only: std::collections::HashSet<(usize, usize)> = [(3, 2), (3, 3), (3, 4)].into_iter().collect();
-        let frigate_only: std::collections::HashSet<(usize, usize)> = [(6, 2), (6, 3), (6, 4)].into_iter().collect();
 
         ai.mark_sunk(4);
         ai.mark_sunk(3);
         ai.mark_sunk(3);
 
+        let cruiser_heatmap = ai.cruiser_heatmap();
+        let frigate_heatmap = ai.frigate_heatmap();
+        let at = |grid: &[Vec<f64>], (r, c): (usize, usize)| grid[r - 1][c - 1];
+
         let shots = ai.choose_shots();
         let anchor_count = shots.iter().filter(|c| confirmed_battleship.contains(c)).count();
-        let cruiser_count = shots.iter().filter(|c| cruiser_only.contains(c)).count();
-        let frigate_count = shots.iter().filter(|c| frigate_only.contains(c)).count();
-        assert_eq!(anchor_count, 1, "exactly one shot must be the known Battleship anchor: {:?}", shots);
-        assert_eq!(cruiser_count, 1, "exactly one shot must be a proven cruiser-only candidate: {:?}", shots);
-        assert_eq!(frigate_count, 1, "exactly one shot must be a proven frigate-only candidate: {:?}", shots);
+        assert_eq!(anchor_count, 1, "exactly one shot must be the known Battleship anchor: {shots:?}");
+
+        let non_anchor: Vec<(usize, usize)> = shots.iter().copied().filter(|c| !confirmed_battleship.contains(c)).collect();
+        assert_eq!(non_anchor.len(), 2, "sanity: exactly 2 non-anchor shots: {shots:?}");
+        let cruiser_only_count = non_anchor
+            .iter()
+            .filter(|&&c| (0.0..1.0).contains(&at(&cruiser_heatmap, c)) && at(&frigate_heatmap, c) == 0.0)
+            .count();
+        let frigate_only_count = non_anchor
+            .iter()
+            .filter(|&&c| (0.0..1.0).contains(&at(&frigate_heatmap, c)) && at(&cruiser_heatmap, c) == 0.0)
+            .count();
+        assert_eq!(cruiser_only_count, 1, "exactly one non-anchor shot must be a proven cruiser-only candidate: {shots:?}");
+        assert_eq!(frigate_only_count, 1, "exactly one non-anchor shot must be a proven frigate-only candidate: {shots:?}");
     }
 
     /// 4 mutually far-apart, never-overlapping straight-3 runs. With the
@@ -3146,16 +3187,27 @@ mod tests {
     #[test]
     fn ai_cross_reasoning_resolves_a_cruiser_ambiguity_the_cruiser_heatmap_cannot_resolve_alone() {
         // One Cruiser fully confirmed; the second is ambiguous between 2
-        // well-separated windows (Option A, Option B) as far as the Cruiser
-        // heatmap alone is concerned. But all 3 Frigates are ALSO already
-        // fully confirmed, and one of them sits directly against Option A —
-        // information the Cruiser heatmap never looks at, since it only
-        // ever cross-checks Cruiser windows against other Cruiser windows
-        // (see `AiPlayer::consistent_cruiser_candidates`). Cross-reasoning
-        // against the Frigate candidates (see `cross_reasoned_cruiser_
-        // candidates`) should rule Option A out and resolve the Cruiser
-        // completely, exactly like the manual reasoning this feature is
-        // named for.
+        // well-separated windows (Option A, Option B) — but all 3 Frigates
+        // are ALSO already fully confirmed, and one of them sits directly
+        // against Option A.
+        //
+        // Historical note: this test's name and original framing were
+        // about `consistent_cruiser_candidates` (the RAW list) staying
+        // ambiguous here, with ONLY cross-reasoning against the Frigate
+        // candidates able to resolve it. That's no longer true as of the
+        // session that added `alive_value`-aware window generation to
+        // `consistent_cruiser_candidates_uncached`: a confirmed Frigate's
+        // own per-cell adjacency elimination (see `apply_adjacency_
+        // elimination_around`) now zeroes Option A's alive Cruiser room
+        // directly, so the RAW list resolves this correctly on its own,
+        // before cross-reasoning ever runs. That's a strict improvement,
+        // not a regression — it just means THIS scenario no longer
+        // isolates cross-reasoning's unique value the way it originally
+        // did. What's still worth asserting: the final answer is correct,
+        // and the cross-reasoning-specific functions (`cruiser_
+        // identified_cells_refined`, `cruiser_heatmap_refined`) continue
+        // to report it correctly too, whether or not they were the ones
+        // that actually did the narrowing this time.
         let mut ai = AiPlayer::new();
         ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed
         ai.apply_salvo([(6, 3), (6, 4), (0, 0)], [2, 2, 0]); // Frigate: confirmed, touches Option A
@@ -3163,35 +3215,38 @@ mod tests {
         ai.apply_salvo([(8, 7), (8, 8), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
         flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8)]);
 
-        assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the Cruiser heatmap alone must still be ambiguous");
-        let heatmap = ai.cruiser_heatmap();
-        assert!((0.0..1.0).contains(&heatmap[4][1]), "sanity: Option A ((5,2), row index 4, col index 1) must be a live but uncertain Cruiser candidate: {heatmap:?}");
-        assert!((0.0..1.0).contains(&heatmap[4][5]), "sanity: Option B ((5,6), row index 4, col index 5) must be a live but uncertain Cruiser candidate: {heatmap:?}");
-
         let refined_cells: std::collections::HashSet<(usize, usize)> = ai.cruiser_identified_cells_refined().into_iter().collect();
         assert_eq!(
             refined_cells,
             [(2, 2), (2, 3), (2, 4), (5, 6), (5, 7), (5, 8)].into_iter().collect(),
-            "cross-reasoning must resolve the Cruiser to Option B, since Option A collides with a confirmed Frigate"
+            "must resolve the Cruiser to Option B, since Option A collides with a confirmed Frigate"
         );
 
         let refined_heatmap = ai.cruiser_heatmap_refined();
-        assert_eq!(refined_heatmap[4][1], 0.0, "Option A must drop to 0 once cross-reasoned against the confirmed Frigate touching it");
-        assert_eq!(refined_heatmap[4][5], 1.0, "Option B must rise to certainty, being the only Cruiser hypothesis left standing");
+        assert_eq!(refined_heatmap[4][1], 0.0, "Option A must show 0 — it collides with the confirmed Frigate touching it");
+        assert_eq!(refined_heatmap[4][5], 1.0, "Option B must show certainty, being the only Cruiser hypothesis left standing");
     }
 
     #[test]
     fn ai_cross_reasoning_narrows_a_frigate_ambiguity_using_a_still_ambiguous_cruiser() {
         // Mirror direction of `ai_cross_reasoning_resolves_a_cruiser_
-        // ambiguity_the_cruiser_heatmap_cannot_resolve_alone`: here the
-        // Cruiser itself is STILL ambiguous (Option CA vs Option CB, same
-        // as that test), but one Cruiser window — the already-confirmed
-        // Cruiser 1 — is common to EVERY remaining Cruiser hypothesis. A
-        // Frigate option that collides with Cruiser 1 therefore collides
-        // with every Cruiser hypothesis there is, even though the Cruiser
-        // itself never narrows to one answer — cross-reasoning should
-        // still drop that Frigate option to 0, exactly as if the Cruiser
-        // were fully identified.
+        // ambiguity_the_cruiser_heatmap_cannot_resolve_alone`: the Cruiser
+        // itself is STILL genuinely ambiguous here (Option CA vs Option
+        // CB — neither is adjacent to anything confirmed, so this part is
+        // untouched by the note below), but one Cruiser window — the
+        // already-confirmed Cruiser 1 — is common to EVERY remaining
+        // Cruiser hypothesis.
+        //
+        // Historical note (see `ai_cross_reasoning_resolves_a_cruiser_
+        // ambiguity_the_cruiser_heatmap_cannot_resolve_alone`'s identical
+        // note): Option FA sits directly adjacent to the individually-
+        // confirmed Cruiser 1, so as of `alive_value`-aware window
+        // generation, its own per-cell adjacency elimination already
+        // zeroes Option FA's raw Frigate room directly — the RAW Frigate
+        // list resolves this correctly on its own now, without needing
+        // cross-reasoning against the (still-ambiguous) Cruiser hypothesis
+        // set at all. Still worth asserting: the final answer stays
+        // correct through the cross-reasoning-specific accessor too.
         let mut ai = AiPlayer::new();
         ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed, common to every hypothesis
         ai.apply_salvo([(8, 1), (8, 2), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
@@ -3199,27 +3254,25 @@ mod tests {
         flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8), (3, 2), (3, 3), (1, 6), (1, 7)]);
 
         assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the Cruiser must still be ambiguous (Option CA vs Option CB)");
-        assert!(ai.frigate_identified_cells().is_empty(), "sanity: the Frigate heatmap alone must still be ambiguous too");
-        let heatmap = ai.frigate_heatmap();
-        assert!(heatmap[2][1] > 0.0, "sanity: Option FA ((3,2), touching Cruiser 1) must be a live Frigate candidate before cross-reasoning: {heatmap:?}");
-        assert!(heatmap[0][5] > 0.0, "sanity: Option FB ((1,6), touching nothing) must be a live Frigate candidate before cross-reasoning: {heatmap:?}");
 
         let refined_heatmap = ai.frigate_heatmap_refined();
-        assert_eq!(refined_heatmap[2][1], 0.0, "Option FA must drop to 0: it collides with Cruiser 1, which is common to every remaining Cruiser hypothesis, ambiguous or not");
+        assert_eq!(refined_heatmap[2][1], 0.0, "Option FA must show 0: it collides with Cruiser 1, which is common to every remaining Cruiser hypothesis, ambiguous or not");
         assert!(refined_heatmap[0][5] > 0.0, "Option FB touches neither Cruiser hypothesis, so it must remain a live candidate");
     }
 
     #[test]
     fn update_fsm_and_resolve_locks_in_a_cross_reasoned_cruiser_layout_the_raw_candidates_alone_missed() {
-        // Same ambiguity as `ai_cross_reasoning_resolves_a_cruiser_ambiguity_
-        // the_cruiser_heatmap_cannot_resolve_alone`: the RAW Cruiser
-        // candidate list never collapses to 1 hypothesis on its own (Option
-        // A stays a live alternative forever, as far as `consistent_cruiser_
-        // candidates` alone is concerned) — only cross-reasoning against the
-        // confirmed Frigates narrows it to Option B. The old, always-
-        // automatic elimination this replaced only ever checked the raw
-        // list, so it could never have fired here at all; `update_fsm_and_
-        // resolve` must be able to lock this in anyway.
+        // Same scenario as `ai_cross_reasoning_resolves_a_cruiser_ambiguity_
+        // the_cruiser_heatmap_cannot_resolve_alone` (see that test's note
+        // on why the RAW Cruiser candidate list now resolves this on its
+        // own, as of `alive_value`-aware window generation — Option A sits
+        // adjacent to a confirmed Frigate, which its own per-cell adjacency
+        // elimination already rules out directly). What this test actually
+        // verifies — that `update_fsm_and_resolve` correctly locks in
+        // whatever `cruiser_identified_cells_refined` reports, regardless
+        // of whether the underlying narrowing came from cross-reasoning or
+        // (as here) the raw list already being smart enough on its own —
+        // still holds.
         let mut ai = AiPlayer::new();
         ai.apply_salvo([(2, 2), (2, 3), (2, 4)], [3, 3, 3]); // Cruiser 1: confirmed
         ai.apply_salvo([(6, 3), (6, 4), (0, 0)], [2, 2, 0]); // Frigate: confirmed, touches Option A
@@ -3227,12 +3280,7 @@ mod tests {
         ai.apply_salvo([(8, 7), (8, 8), (0, 0)], [2, 2, 0]); // Frigate: confirmed, elsewhere
         flood_inner_misses_except(&mut ai, &[(5, 2), (5, 3), (5, 4), (5, 6), (5, 7), (5, 8)]);
 
-        assert!(ai.cruiser_identified_cells().is_empty(), "sanity: the un-cross-reasoned identification must still be empty");
-        let heatmap = ai.cruiser_heatmap();
-        assert!((0.0..1.0).contains(&heatmap[4][1]), "sanity: Option A must still be a live but uncertain RAW candidate: {heatmap:?}");
-        assert!((0.0..1.0).contains(&heatmap[4][5]), "sanity: Option B must still be a live but uncertain RAW candidate: {heatmap:?}");
-
-        assert!(ai.update_fsm_and_resolve(), "cross-reasoning has already resolved this to Option B, must lock in");
+        assert!(ai.update_fsm_and_resolve(), "the Cruiser layout is already identified (however it got there), must lock in");
         assert!(!ai.update_fsm_and_resolve(), "must be idempotent — nothing left to lock in a second time");
 
         // Option B ((5,6),(5,7),(5,8)) is now locked in — every OTHER row

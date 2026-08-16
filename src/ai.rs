@@ -1160,7 +1160,15 @@ impl AiPlayer {
         let confirmed_cruiser_cells = self.cells_confirmed_individually_cruiser();
         let windows: Vec<[(usize, usize); 3]> = Self::all_cruiser_windows()
             .into_iter()
-            .filter(|w| w.iter().all(|&(r, c)| !confirmed_battleship[r][c]))
+            // `alive_value(_, _, 3) == 0` is the FSM's live, comprehensive
+            // "provably not a Cruiser cell" signal — unlike the aggregate
+            // salvo-history check below, it also sees cells eliminated via
+            // adjacency/propagation that were never individually fired
+            // (invisible to salvo_history entirely). Without this, a
+            // window through such a cell could still survive purely
+            // because nothing in the raw fired-coordinate bags happens to
+            // contradict it.
+            .filter(|w| w.iter().all(|&(r, c)| !confirmed_battleship[r][c] && self.alive_value(r, c, 3) > 0))
             .collect();
         let mut out = Vec::new();
         for i in 0..windows.len() {
@@ -1224,7 +1232,16 @@ impl AiPlayer {
         let confirmed_frigate_cells = self.cells_confirmed_individually_frigate();
         let candidates: Vec<[(usize, usize); 2]> = windows
             .into_iter()
-            .filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c] && !cruiser_exclusion[r][c]))
+            // `alive_value(_, _, 2) == 0` is the FSM's live, comprehensive
+            // "provably not a Frigate cell" signal — a strict superset of
+            // `possible` (which only sees cells that were directly fired):
+            // it also catches cells eliminated via adjacency/propagation
+            // that were never individually fired at all, invisible to
+            // `possible` entirely. `possible` is kept alongside it rather
+            // than replaced — redundant given the superset relationship,
+            // but harmless, and this is exactly the kind of code where
+            // "definitely still correct" beats "slightly less redundant".
+            .filter(|w| w.iter().all(|&(r, c)| possible[r][c] && !confirmed_battleship[r][c] && !cruiser_exclusion[r][c] && self.alive_value(r, c, 2) > 0))
             .collect();
 
         let mut out = Vec::new();
