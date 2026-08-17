@@ -30,7 +30,7 @@ set -uo pipefail
 # --- Configuration — adjust these for your VPS layout -----------------
 DATA_DIR="${DATA_DIR:-$HOME}"                       # where deel_NNNN.csv files live
 OUT_DIR="${OUT_DIR:-$DATA_DIR}"                     # where per-file results/error logs go — same dir as the input by default
-SPECIAL_DIR="${SPECIAL_DIR:-$OUT_DIR/special_cases}" # where the 6 salvos_NN.jsonl files accumulate
+SPECIAL_DIR="${SPECIAL_DIR:-$OUT_DIR/special_cases}" # where the 7 salvos_NN.jsonl files accumulate
 BINARY="${BINARY:-$HOME/solve_boards_file}"
 THREADS="${THREADS:-$(nproc)}"
 START="${START:-1}"

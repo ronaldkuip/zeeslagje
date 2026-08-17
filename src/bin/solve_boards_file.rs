@@ -48,10 +48,10 @@ use zeeslag::{BoardLayout, Cell, Game, Ship};
 const CAP: usize = 30;
 
 /// The "interesting" salvo counts worth saving a full board layout for:
-/// unusually fast solves (9-11) and unusually slow ones (24-26), both
+/// unusually fast solves (8-11) and unusually slow ones (24-26), both
 /// tails of the histogram far from the typical 16-22 range. See
 /// `solve_boards_file`'s module doc for the output format/location.
-const SPECIAL_SALVO_COUNTS: [usize; 6] = [9, 10, 11, 24, 25, 26];
+const SPECIAL_SALVO_COUNTS: [usize; 7] = [8, 9, 10, 11, 24, 25, 26];
 
 /// Mirrors serve.py's `fast_solves.jsonl` record shape exactly, so tooling
 /// that already reads that file can read these too.
