@@ -231,6 +231,19 @@ pub struct AiPlayer {
     /// per real game state and reused everywhere else.
     cruiser_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
     frigate_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
+    /// Memoized `jointly_consistent_hypothesis_pairs`, same `salvo_history.
+    /// len()` key as `cruiser_candidates_cache`/`frigate_candidates_cache`.
+    /// This one was the actual gap: every caller of the cross-reasoned
+    /// lists (`cross_reasoned_cruiser_candidates`, `cross_reasoned_frigate_
+    /// candidates` — in turn used by the refined heatmaps, the refined
+    /// identified-cell checks, and `resolution_status_json`) independently
+    /// recomputed the full O(cruiser_len * frigate_len) pairwise adjacency
+    /// check from scratch, even within a single call (the cruiser-view and
+    /// frigate-view calls redo the exact same pairs list). Cleared
+    /// alongside the other two at both invalidation points in
+    /// `update_fsm_and_resolve` — those clear on a lock-in event that
+    /// doesn't change `salvo_history.len()`, so keying alone isn't enough.
+    joint_pairs_cache: RefCell<Option<(usize, Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)>)>>,
 }
 
 const INNER_LO: usize = 1;
@@ -268,6 +281,7 @@ impl AiPlayer {
             salvo_history: Vec::new(),
             cruiser_candidates_cache: RefCell::new(None),
             frigate_candidates_cache: RefCell::new(None),
+            joint_pairs_cache: RefCell::new(None),
         }
     }
 
@@ -692,6 +706,7 @@ impl AiPlayer {
             // pre-lock candidate list cached under the same salvo count.
             *self.cruiser_candidates_cache.borrow_mut() = None;
             *self.frigate_candidates_cache.borrow_mut() = None;
+            *self.joint_pairs_cache.borrow_mut() = None;
         }
 
         let frigate_locked = self.lock_in_frigate_layout();
@@ -701,6 +716,7 @@ impl AiPlayer {
             self.refresh_cross2_entry_flags();
             *self.cruiser_candidates_cache.borrow_mut() = None;
             *self.frigate_candidates_cache.borrow_mut() = None;
+            *self.joint_pairs_cache.borrow_mut() = None;
         }
         cruiser_locked || frigate_locked
     }
@@ -1309,7 +1325,30 @@ impl AiPlayer {
     /// bailing out early above this budget costs nothing real — same as the
     /// callers' existing "pairs.is_empty() -> fall back to the un-cross-
     /// checked list" handling.
+    /// Memoized by `salvo_history.len()` in `joint_pairs_cache` — every
+    /// caller of the cross-reasoned lists hits this, and without caching it
+    /// was being recomputed from scratch on each one, including twice over
+    /// within a single `resolution_status_json`/`is_fully_resolved` check
+    /// (once via the cruiser-refined path, once via the frigate-refined
+    /// path — both redo this exact same pairs list independently). See
+    /// `jointly_consistent_hypothesis_pairs_uncached` for the actual O(n^2)
+    /// work; this wrapper mirrors `consistent_cruiser_candidates`'s own
+    /// cache exactly, including relying on `update_fsm_and_resolve` to
+    /// clear it on a lock-in event that leaves `salvo_history.len()`
+    /// unchanged.
     fn jointly_consistent_hypothesis_pairs(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
+        let key = self.salvo_history.len();
+        if let Some((cached_key, cached)) = self.joint_pairs_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return cached.clone();
+            }
+        }
+        let computed = self.jointly_consistent_hypothesis_pairs_uncached();
+        *self.joint_pairs_cache.borrow_mut() = Some((key, computed.clone()));
+        computed
+    }
+
+    fn jointly_consistent_hypothesis_pairs_uncached(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
         const CROSS_REASONING_PAIR_BUDGET: usize = 100_000;
         let cruiser = self.consistent_cruiser_candidates();
         let frigate = self.consistent_frigate_candidates();
