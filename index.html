@@ -250,6 +250,18 @@
   }
   .cell.cruiser-identified .heat-half{ display:none; }
 
+  /* A Frigate cell whose fraction has narrowed to n/n (every remaining
+     consistent hypothesis agrees this cell is occupied) — same idea as
+     `.cruiser-identified`, one size down. The "n/n" label becomes
+     redundant once it's always n/n, so it's dropped in favour of a solid
+     fill (see `refreshHeatmaps`). */
+  .cell.frigate-certain{
+    background:#B15FE0 !important;
+    border-color:#B15FE0;
+  }
+  .cell.frigate-certain .heat-half{ display:none; }
+  .cell.frigate-certain .heat-frac-frigate{ display:none; }
+
   /* A Cruiser reading below 100% always implies some OTHER, much-less-likely
      placement is still technically possible somewhere — this cell is one of
      those low-probability alternatives (see `refreshHeatmaps`'s <80%
@@ -756,6 +768,7 @@
           <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half, fraction shown in white)</span>
           <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half, fraction shown in white)</span>
           <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser layout confirmed</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate cell confirmed (n/n)</span>
           <span class="legend-item"><span class="legend-swatch" style="border:3px solid #FF3DA6; background:transparent"></span>Cruiser: much less likely alternative</span>
         </div>
       </section>
@@ -1277,7 +1290,14 @@
         el.classList.toggle('cruiser-alt-candidate', cProb > 0 && cProb < 0.80);
         if (frigateFracEl){
           const [num, denom] = frigateFracGrid ? frigateFracGrid[i][j] : [0, 0];
-          const text = denom > 0 && num > 0 ? `${num}/${denom}` : '';
+          // n/n (every remaining consistent hypothesis agrees) is as
+          // certain as the Frigate heatmap gets — the fraction label is
+          // redundant at that point, so swap it for a solid fill instead
+          // (see .frigate-certain), the same treatment Cruiser cells get
+          // via .cruiser-identified once THEIR layout is fully pinned down.
+          const certain = denom > 0 && num === denom;
+          el.classList.toggle('frigate-certain', certain);
+          const text = denom > 0 && num > 0 && !certain ? `${num}/${denom}` : '';
           frigateFracEl.textContent = text;
           fitFracFontSize(frigateFracEl, text);
         }
