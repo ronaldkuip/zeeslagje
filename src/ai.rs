@@ -3115,6 +3115,39 @@ impl AiPlayer {
         })
     }
 
+    /// Same idea as `best_cell_for_size`, but the score is a blend of the
+    /// size actually being hunted with a small tie-breaking contribution
+    /// from the next size down's current line state (`secondary`) — e.g.
+    /// while hunting Battleship, also weigh in how useful a cell still is
+    /// for Cruiser; while hunting Cruiser, weigh in Frigate. `PRIMARY_
+    /// WEIGHT` is far larger than either score's own natural range
+    /// (`VALUES_SIZE{4,3,2}` entries top out in the single digits), so
+    /// this can only ever break a tie in the primary size's own ranking —
+    /// it can never cause a cell that's worse for the size actually being
+    /// hunted to be preferred over one that's better for it. `secondary:
+    /// None` (Frigate hunting has no smaller size left to blend in)
+    /// reproduces `best_cell_for_size`'s plain score exactly.
+    fn best_cell_for_size_blended(
+        &self,
+        row_line: &[usize; 10],
+        col_line: &[usize; 10],
+        secondary: Option<(&[usize; 10], &[usize; 10], usize)>,
+        chosen_so_far: &[(usize, usize)],
+        forbid_candidates: bool,
+        require_candidates: bool,
+        allow_refired: bool,
+        size: usize,
+    ) -> (usize, usize) {
+        const PRIMARY_WEIGHT: u32 = 1000;
+        self.best_cell_by_score(chosen_so_far, forbid_candidates, require_candidates, allow_refired, |r, c| {
+            let primary = Self::size_cell_score(row_line, col_line, r, c, size);
+            match secondary {
+                Some((row2, col2, size2)) => primary * PRIMARY_WEIGHT + Self::size_cell_score(row2, col2, r, c, size2),
+                None => primary,
+            }
+        })
+    }
+
     /// Per-row and per-column FSM state for a given ship size (4, 3, or 2), one
     /// entry per line index 0..9. Exposed for the debug/inspector UI. Indices 0
     /// and 9 are outer-ring lines and don't correspond to any real placement —
@@ -3311,9 +3344,16 @@ impl AiPlayer {
         // allows, so these 2 shots aren't wasted only ever re-confirming
         // the same Battleship-candidate cells.
         let hunt_with_cruiser_fsm = size == 4 && identified.is_none() && self.battleship_cross_seen;
+        // Cruiser's current line state, kept up to date across every pick
+        // this call makes (see the hypothetical-miss refolding below) —
+        // computed whenever size 4 is being hunted at all (not just once
+        // `hunt_with_cruiser_fsm` kicks in), since it's also the "secondary"
+        // blended into the ordinary per-cell score below (see
+        // `best_cell_for_size_blended`), which applies from the very first
+        // Battleship shot, well before the cross-4 bag narrows anything.
         let mut row3: [usize; 10] = [0; 10];
         let mut col3: [usize; 10] = [0; 10];
-        if hunt_with_cruiser_fsm {
+        if size == 4 {
             for r in 0..10 {
                 row3[r] = Self::line_state_for_size(&self.row_state[r], 3);
             }
@@ -3321,7 +3361,18 @@ impl AiPlayer {
                 col3[c] = Self::line_state_for_size(&self.col_state[c], 3);
             }
         }
-
+        // Same idea, one size down: Frigate's line state, blended into
+        // Cruiser hunting's score.
+        let mut row2: [usize; 10] = [0; 10];
+        let mut col2: [usize; 10] = [0; 10];
+        if size == 3 {
+            for r in 0..10 {
+                row2[r] = Self::line_state_for_size(&self.row_state[r], 2);
+            }
+            for c in 0..10 {
+                col2[c] = Self::line_state_for_size(&self.col_state[c], 2);
+            }
+        }
         let allow_refired = self.is_refire_allowed(size);
 
         while chosen.len() < 3 {
@@ -3363,12 +3414,24 @@ impl AiPlayer {
             } else if hunt_with_cruiser_fsm && !is_first_pick {
                 self.best_cell_for_size(&row3, &col3, &exclude, forbid_candidates, false, allow_refired, 3)
             } else {
-                self.best_cell_for_size(&row_line, &col_line, &exclude, forbid_candidates, false, allow_refired, size)
+                // Blend in the next size down's current line state as a
+                // tie-breaker — see `best_cell_for_size_blended`. `None`
+                // for Frigate hunting (size 2), which has nothing smaller
+                // left to blend in; reproduces the plain unblended score.
+                let secondary: Option<(&[usize; 10], &[usize; 10], usize)> = match size {
+                    4 => Some((&row3, &col3, 3)),
+                    3 => Some((&row2, &col2, 2)),
+                    _ => None,
+                };
+                self.best_cell_for_size_blended(&row_line, &col_line, secondary, &exclude, forbid_candidates, false, allow_refired, size)
             };
 
             Self::apply_hypothetical_miss(&mut row_line, &mut col_line, next.0, next.1, size);
-            if hunt_with_cruiser_fsm {
+            if size == 4 {
                 Self::apply_hypothetical_miss(&mut row3, &mut col3, next.0, next.1, 3);
+            }
+            if size == 3 {
+                Self::apply_hypothetical_miss(&mut row2, &mut col2, next.0, next.1, 2);
             }
             chosen.push(next);
         }
