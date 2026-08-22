@@ -25,6 +25,7 @@ impl AiPlayer {
         }
         grid
     }
+
     /// Called the moment the (single) Battleship is confirmed sunk. The ship's own cells — whether that's
     /// the exact 4-cell layout if `battleship_identified` succeeded, or the
     /// still-broader candidate set if the ship sank via ordinary fire
@@ -66,6 +67,7 @@ impl AiPlayer {
             }
         }
     }
+
     /// Mark a "beam" in both directions through (row, col), reaching `reach` cells
     /// either way (clipped to the inner 8x8 — the only place a ship of size >= 2
     /// can be): every cell that could be part of a ship of length `reach + 1`
@@ -83,11 +85,13 @@ impl AiPlayer {
             }
         }
     }
+
     /// Mark a length-7 "beam" in both directions through (row, col) — every cell
     /// that could be part of a 4-length ship (Battleship) passing through it.
     fn mark_cross(mask: &mut [[bool; 10]; 10], row: usize, col: usize) {
         Self::mark_cross_reach(mask, row, col, 3);
     }
+
     /// Given a salvo whose result bag contained a 4, narrow the running Battleship
     /// candidate set: build the union of the 3 crosses centred on each fired
     /// coordinate (the true hit is one of them, we just don't know which), then
@@ -132,6 +136,7 @@ impl AiPlayer {
 
         self.prune_candidates_without_room();
     }
+
     /// Once at least one cell is confirmed a genuine Battleship hit (see
     /// `derive_confirmed_battleship_hits_by_elimination`), the real ship
     /// must be exactly one of the straight-4 windows passing through EVERY
@@ -179,6 +184,7 @@ impl AiPlayer {
             dead
         });
     }
+
     /// If at least 2 four-bearing salvos have happened, check whether exactly one
     /// straight 4-long placement (out of all 80 horizontal/vertical placements on
     /// the inner 8x8) still has every one of its cells marked possible in
@@ -203,6 +209,7 @@ impl AiPlayer {
             None
         }
     }
+
     /// Every valid straight-4 window still consistent with the current
     /// Battleship candidate mask (`battleship_candidates`) — the full list
     /// `battleship_identified` collapses down to a single result (or none)
@@ -234,6 +241,7 @@ impl AiPlayer {
         }
         windows
     }
+
     /// A coordinate present in SOME but not EVERY still-possible Battleship
     /// window — firing there teaches something (a miss rules out every
     /// window containing it; a hit rules out every window that does NOT),
@@ -294,6 +302,7 @@ impl AiPlayer {
         }
         None
     }
+
     /// True if (row, col) is the coordinate `choose_shots` deliberately
     /// picked via `battleship_discriminating_test_cell` — used by
     /// `Game::fire` to let that one specific refire through even when the
@@ -301,6 +310,7 @@ impl AiPlayer {
     pub fn is_battleship_discriminating_refire(&self, row: usize, col: usize) -> bool {
         self.fired[row][col] && self.battleship_discriminating_test_cell() == Some((row, col))
     }
+
     /// The Battleship's exact 4-cell layout, once `battleship_identified` has
     /// deduced it — for the UI to render solid rather than the tentative
     /// "candidate" outline. Empty until then.
@@ -310,6 +320,7 @@ impl AiPlayer {
             None => Vec::new(),
         }
     }
+
     /// The Battleship's exact 4-cell layout, permanently, once confirmed
     /// sunk (see `found_battleship`) — for the UI to keep rendering it even
     /// after the live candidate/identified state is cleared. Empty if the
@@ -321,6 +332,7 @@ impl AiPlayer {
             None => Vec::new(),
         }
     }
+
     /// Length of the maximal run of contiguous `true` cells in `mask`, along `row`,
     /// that includes `col` (inner 8x8 only).
     fn max_contiguous_run_horizontal(mask: &[[bool; 10]; 10], row: usize, col: usize) -> usize {
@@ -334,6 +346,7 @@ impl AiPlayer {
         }
         right - left + 1
     }
+
     /// Same as `max_contiguous_run_horizontal`, but along `col` instead of `row`.
     fn max_contiguous_run_vertical(mask: &[[bool; 10]; 10], row: usize, col: usize) -> usize {
         let mut top = row;
@@ -346,6 +359,7 @@ impl AiPlayer {
         }
         bottom - top + 1
     }
+
     /// A size-4 Battleship needs 4 consecutive candidate cells in a straight line to
     /// physically fit. Any candidate cell that isn't part of *some* horizontal or
     /// vertical run of at least 4 (measured against the current candidate mask
@@ -386,6 +400,7 @@ impl AiPlayer {
             }
         }
     }
+
     /// Shared plumbing for both narrowing passes above: run `find_dead` to collect
     /// cells that should no longer be Battleship candidates, clear them from
     /// `battleship_candidates` (which is what drives the yellow "cross candidate"
@@ -415,6 +430,7 @@ impl AiPlayer {
         }
         count
     }
+
     /// Cells the Battleship could still occupy, per the cross-deduction trick.
     /// Returns an empty vec until at least one salvo with a 4 has been seen —
     /// before that there's no real constraint to show.
