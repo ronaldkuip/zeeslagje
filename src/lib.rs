@@ -1,6 +1,7 @@
 mod fsm_tables;
 mod model;
 mod controller;
+mod view;
 
 pub use controller::game::Game;
 pub use model::fleet::{BoardLayout, Cell, GameState, ResolutionStatus, SalvoResult, Ship};

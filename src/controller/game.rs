@@ -466,107 +466,13 @@ impl Game {
     /// actually holds a Cruiser cell — for the UI to highlight, not for any
     /// deduction logic to use.
     pub fn cross3_debug_json(&self) -> String {
-        #[derive(Serialize)]
-        struct Cross3EntryDebug {
-            coords: Vec<usize>,
-            values: [usize; 3],
-            true_cruiser_coords: Vec<usize>,
-            ruled_out_coords: Vec<usize>,
-            confirmed_coords: Vec<usize>,
-        }
-        #[derive(Serialize)]
-        struct Cross3Debug {
-            entries: Vec<Cross3EntryDebug>,
-        }
-
-        let is_cruiser_cell = |r: usize, c: usize| {
-            matches!(self.state.board[r][c], Some(id) if self.state.ships[id].size == 3)
-        };
-
-        let entries: Vec<Cross3EntryDebug> = self
-            .ai
-            .cross3_entries()
-            .iter()
-            .map(|e| Cross3EntryDebug {
-                coords: e.coords.iter().map(|&(r, c)| r * 10 + c).collect(),
-                values: e.values,
-                true_cruiser_coords: e
-                    .coords
-                    .iter()
-                    .filter(|&&(r, c)| is_cruiser_cell(r, c))
-                    .map(|&(r, c)| r * 10 + c)
-                    .collect(),
-                ruled_out_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_ruled_out.iter())
-                    .filter(|(_, &ruled_out)| ruled_out)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-                confirmed_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_confirmed_cruiser_hit.iter())
-                    .filter(|(_, &confirmed)| confirmed)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-            })
-            .collect();
-
-        serde_json::to_string(&Cross3Debug { entries }).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&crate::view::json::cross3_debug(&self.state, self.ai.cross3_entries())).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Debug/inspector: every 2-bearing salvo seen so far — same shape as
     /// `cross3_debug_json`, one ship size down.
     pub fn cross2_debug_json(&self) -> String {
-        #[derive(Serialize)]
-        struct Cross2EntryDebug {
-            coords: Vec<usize>,
-            values: [usize; 3],
-            true_frigate_coords: Vec<usize>,
-            ruled_out_coords: Vec<usize>,
-            confirmed_coords: Vec<usize>,
-        }
-        #[derive(Serialize)]
-        struct Cross2Debug {
-            entries: Vec<Cross2EntryDebug>,
-        }
-
-        let is_frigate_cell = |r: usize, c: usize| {
-            matches!(self.state.board[r][c], Some(id) if self.state.ships[id].size == 2)
-        };
-
-        let entries: Vec<Cross2EntryDebug> = self
-            .ai
-            .cross2_entries()
-            .iter()
-            .map(|e| Cross2EntryDebug {
-                coords: e.coords.iter().map(|&(r, c)| r * 10 + c).collect(),
-                values: e.values,
-                true_frigate_coords: e
-                    .coords
-                    .iter()
-                    .filter(|&&(r, c)| is_frigate_cell(r, c))
-                    .map(|&(r, c)| r * 10 + c)
-                    .collect(),
-                ruled_out_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_ruled_out.iter())
-                    .filter(|(_, &ruled_out)| ruled_out)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-                confirmed_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_confirmed_frigate_hit.iter())
-                    .filter(|(_, &confirmed)| confirmed)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-            })
-            .collect();
-
-        serde_json::to_string(&Cross2Debug { entries }).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&crate::view::json::cross2_debug(&self.state, self.ai.cross2_entries())).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Debug/inspector: every 4-bearing salvo seen so far — its 3 coordinates,
@@ -575,43 +481,7 @@ impl Game {
     /// always empty (every coordinate starts, and stays, green) until the
     /// red-flagging rule for the Battleship's cross-4 salvos is defined.
     pub fn cross4_debug_json(&self) -> String {
-        #[derive(Serialize)]
-        struct Cross4EntryDebug {
-            coords: Vec<usize>,
-            values: [usize; 3],
-            ruled_out_coords: Vec<usize>,
-            confirmed_coords: Vec<usize>,
-        }
-        #[derive(Serialize)]
-        struct Cross4Debug {
-            entries: Vec<Cross4EntryDebug>,
-        }
-
-        let entries: Vec<Cross4EntryDebug> = self
-            .ai
-            .cross4_entries()
-            .iter()
-            .map(|e| Cross4EntryDebug {
-                coords: e.coords.iter().map(|&(r, c)| r * 10 + c).collect(),
-                values: e.values,
-                ruled_out_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_ruled_out.iter())
-                    .filter(|(_, &ruled_out)| ruled_out)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-                confirmed_coords: e
-                    .coords
-                    .iter()
-                    .zip(e.coord_confirmed_battleship_hit.iter())
-                    .filter(|(_, &confirmed)| confirmed)
-                    .map(|(&(r, c), _)| r * 10 + c)
-                    .collect(),
-            })
-            .collect();
-
-        serde_json::to_string(&Cross4Debug { entries }).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&crate::view::json::cross4_debug(self.ai.cross4_entries())).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Debug/inspector: the 3 "alive" grids for `size` (4, 3, or 2), each an
