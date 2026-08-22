@@ -943,4 +943,30 @@ impl AiPlayer {
             _ => 0,
         }
     }
+
+    /// Given a salvo whose result bag contained a 3, record the entry — the
+    /// true Cruiser hit is one of its 3 coordinates, we just don't know
+    /// which yet (see `Cross3Entry::coord_ruled_out`, refreshed every round
+    /// by `refresh_cross3_entry_flags`).
+    pub(crate) fn apply_cruiser_cross_tracking(&mut self, coords: [(usize, usize); 3], values: [usize; 3]) {
+        self.cross3_entries.push(Cross3Entry {
+            coords,
+            values,
+            coord_ruled_out: [false; 3],
+            coord_confirmed_cruiser_hit: [false; 3],
+        });
+    }
+
+    /// Given a salvo whose result bag contained a 2, record the entry — the
+    /// true Frigate hit is one of its 3 coordinates, we just don't know which
+    /// yet (see `Cross2Entry::coord_ruled_out`, refreshed every round by
+    /// `refresh_cross2_entry_flags`).
+    pub(crate) fn apply_frigate_cross_tracking(&mut self, coords: [(usize, usize); 3], values: [usize; 3]) {
+        self.cross2_entries.push(Cross2Entry {
+            coords,
+            values,
+            coord_ruled_out: [false; 3],
+            coord_confirmed_frigate_hit: [false; 3],
+        });
+    }
 }
