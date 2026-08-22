@@ -112,28 +112,25 @@ impl Game {
         battleship_identified && cruiser_identified && frigate_identified
     }
 
-    /// Fire a salvo of exactly 3 cells. Coordinates are flat indices: row * 10 + col.
-    /// Returns a JSON-serialised SalvoResult, or an error string.
-    ///
-    /// `won` (every real ship cell hit at least once) is deliberately NOT
-    /// enough on its own to stop firing — a disambiguation salvo's filler
-    /// cell can incidentally BE the very last unfound real cell, so `won`
-    /// can flip true mid-disambiguation, before the Cruiser/Frigate exact
-    /// layout is actually pinned down. Locking out all further firing at
-    /// that instant would permanently strand a resolvable ambiguity: the
-    /// refire/last-resort salvo needed to finish it would itself now be
-    /// rejected as "game already won", with no way to ever submit it. Only
-    /// once the layout is ALSO fully resolved (see `is_fully_resolved`) is
-    /// there genuinely nothing further to learn.
-    pub fn fire(&mut self, indices: &[usize]) -> String {
-        if self.state.won && self.is_fully_resolved() {
-            return r#"{"error":"game already won"}"#.to_string();
-        }
+    /// Validate a candidate salvo: exactly 3 flat indices, each in range,
+    /// each either unfired or covered by one of the refire exceptions
+    /// below (or by genuine board exhaustion), and no cell repeated
+    /// within the same salvo. Returns the parsed `(row, col)` coordinates
+    /// if legal, or the plain error message `fire` should wrap into its
+    /// `{"error": ...}` response otherwise. Pure — only reads
+    /// `self.state`/`self.ai`, no side effects. Extracted out of `fire`'s
+    /// own body verbatim (the refactor plan's last, most-careful Stage 7
+    /// step — `fire` is the single most load-bearing, most-tested method
+    /// in the crate, so only this clearly self-contained, side-effect-
+    /// free slice moves; the mutation/delta-computation/response-assembly
+    /// core stays exactly where it was, as one function — genuinely
+    /// Controller-shaped sequencing, not a layering violation).
+    fn validate_salvo(&self, indices: &[usize]) -> Result<[(usize, usize); 3], String> {
         if indices.len() != 3 {
-            return r#"{"error":"exactly 3 cells required"}"#.to_string();
+            return Err("exactly 3 cells required".to_string());
         }
 
-        // Validate: no duplicates, none already fired — unless the refire-allowed
+        // No duplicates, none already fired — unless the refire-allowed
         // toggle is currently on for whatever size the AI is hunting, in which
         // case an already-fired cell is permitted (but never a cell repeated
         // twice within this SAME salvo — that's a different, always-invalid case).
@@ -151,12 +148,11 @@ impl Game {
         let unfired_count: usize = self.state.fired.iter().flatten().filter(|&&f| !f).count();
         let board_exhausted = unfired_count < 3;
         let mut cells_to_fire: Vec<(usize, usize)> = Vec::new();
-        let mut extra_refire_cells: Vec<(usize, usize)> = Vec::new();
         for &idx in indices {
             let r = idx / 10;
             let c = idx % 10;
             if r > 9 || c > 9 {
-                return r#"{"error":"index out of range"}"#.to_string();
+                return Err("index out of range".to_string());
             }
             // The Battleship discriminating-cell refire (see
             // `AiPlayer::battleship_discriminating_test_cell`) is always let
@@ -179,8 +175,9 @@ impl Game {
             // the 2 refires above (which are always allowed whenever the
             // underlying strategy calls for them), this one is capped at
             // one bonus use per cell (see `disambiguation_extra_refire_
-            // used`), so it's tracked separately below to be marked spent
-            // only once the whole salvo actually goes through.
+            // used`) — `fire` re-derives this same flag afterward, once it
+            // knows the salvo is otherwise legal, to decide which cells to
+            // mark spent.
             let is_disambiguation_extra_refire = self.ai.is_disambiguation_extra_refire(r, c);
             // One tier further than the capped bonus refire above — see
             // `AiPlayer::is_last_resort_refire`: only ever true once the
@@ -189,16 +186,46 @@ impl Game {
             // doing useful work, only once it genuinely can't help anymore.
             let is_last_resort_refire = self.ai.is_last_resort_refire(r, c);
             if self.state.fired[r][c] && !refire_ok && !is_disambiguation_refire && !is_anchored_isolation_refire && !is_disambiguation_extra_refire && !is_last_resort_refire && !board_exhausted {
-                return r#"{"error":"cell already fired"}"#.to_string();
+                return Err("cell already fired".to_string());
             }
             if cells_to_fire.iter().any(|&(pr, pc)| pr == r && pc == c) {
-                return r#"{"error":"duplicate cell in salvo"}"#.to_string();
-            }
-            if is_disambiguation_extra_refire {
-                extra_refire_cells.push((r, c));
+                return Err("duplicate cell in salvo".to_string());
             }
             cells_to_fire.push((r, c));
         }
+
+        Ok([cells_to_fire[0], cells_to_fire[1], cells_to_fire[2]])
+    }
+
+    /// Fire a salvo of exactly 3 cells. Coordinates are flat indices: row * 10 + col.
+    /// Returns a JSON-serialised SalvoResult, or an error string.
+    ///
+    /// `won` (every real ship cell hit at least once) is deliberately NOT
+    /// enough on its own to stop firing — a disambiguation salvo's filler
+    /// cell can incidentally BE the very last unfound real cell, so `won`
+    /// can flip true mid-disambiguation, before the Cruiser/Frigate exact
+    /// layout is actually pinned down. Locking out all further firing at
+    /// that instant would permanently strand a resolvable ambiguity: the
+    /// refire/last-resort salvo needed to finish it would itself now be
+    /// rejected as "game already won", with no way to ever submit it. Only
+    /// once the layout is ALSO fully resolved (see `is_fully_resolved`) is
+    /// there genuinely nothing further to learn.
+    pub fn fire(&mut self, indices: &[usize]) -> String {
+        if self.state.won && self.is_fully_resolved() {
+            return r#"{"error":"game already won"}"#.to_string();
+        }
+        let cells_to_fire = match self.validate_salvo(indices) {
+            Ok(cells) => cells,
+            Err(msg) => return format!("{{\"error\":\"{msg}\"}}"),
+        };
+        // Re-derive which of the 3 validated cells need the capped
+        // "extra refire" bonus marked as spent — same query
+        // `validate_salvo` already ran per cell while checking
+        // eligibility; cheap enough (a handful of small-state lookups)
+        // to run again here rather than thread an extra return value
+        // through purely for this.
+        let extra_refire_cells: Vec<(usize, usize)> =
+            cells_to_fire.iter().copied().filter(|&(r, c)| self.ai.is_disambiguation_extra_refire(r, c)).collect();
 
         let mut results: Vec<usize> = Vec::new();
         let mut sunk_names: Vec<String> = Vec::new();
@@ -237,9 +264,8 @@ impl Game {
         let was_battleship_identified = !self.ai.battleship_identified_cells().is_empty();
         let before_ruled_out = self.ai.cross3_ruled_out_snapshot();
 
-        let coords_arr: [(usize, usize); 3] = [cells_to_fire[0], cells_to_fire[1], cells_to_fire[2]];
         let values_arr: [usize; 3] = [results[0], results[1], results[2]];
-        self.ai.apply_salvo(coords_arr, values_arr);
+        self.ai.apply_salvo(cells_to_fire, values_arr);
         for size in sunk_sizes {
             self.ai.mark_sunk(size);
         }
