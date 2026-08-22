@@ -491,6 +491,21 @@ impl AiPlayer {
         }
     }
 
+    /// Whether Battleship, Cruiser, and Frigate are each fully identified —
+    /// the exact same 3-flag computation `controller::game::Game`'s
+    /// `resolution_status_json` (which needs all 3 individual flags for its
+    /// JSON output) and `is_fully_resolved` (which only needs their AND)
+    /// used to duplicate independently. Centralized here — a Model-layer
+    /// query, since it reads only `AiPlayer` state — so both callers stay
+    /// in sync automatically instead of by convention. See the refactor
+    /// plan's "fake View methods" fix for `resolution_status_json`.
+    pub(crate) fn identification_flags(&self) -> (bool, bool, bool) {
+        let battleship_identified = !self.battleship_identified_cells().is_empty() || !self.found_battleship_cells().is_empty();
+        let cruiser_identified = !self.cruiser_identified_cells_refined().is_empty();
+        let frigate_identified = !self.frigate_identified_cells_refined().is_empty();
+        (battleship_identified, cruiser_identified, frigate_identified)
+    }
+
     /// Find the unfired, not-yet-chosen-this-salvo cell with the highest score
     /// under `score_fn` — shared search/fallback logic for both single-size
     /// scoring (`best_cell_for_size`) and the combined size-4 + size-3 scoring

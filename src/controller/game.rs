@@ -104,9 +104,7 @@ impl Game {
     /// can resolve a board neither heatmap resolves on its own. See
     /// `ResolutionStatus`.
     pub fn resolution_status_json(&self) -> String {
-        let battleship_identified = !self.ai.battleship_identified_cells().is_empty() || !self.ai.found_battleship_cells().is_empty();
-        let cruiser_identified = !self.ai.cruiser_identified_cells_refined().is_empty();
-        let frigate_identified = !self.ai.frigate_identified_cells_refined().is_empty();
+        let (battleship_identified, cruiser_identified, frigate_identified) = self.ai.identification_flags();
         let resolved = battleship_identified && cruiser_identified && frigate_identified;
         let status = ResolutionStatus {
             resolved,
@@ -125,9 +123,7 @@ impl Game {
     /// pub(crate), not bare-private, so src/tests.rs can call it directly
     /// (same visibility-widening reasoning as `Game`'s fields above).
     pub(crate) fn is_fully_resolved(&self) -> bool {
-        let battleship_identified = !self.ai.battleship_identified_cells().is_empty() || !self.ai.found_battleship_cells().is_empty();
-        let cruiser_identified = !self.ai.cruiser_identified_cells_refined().is_empty();
-        let frigate_identified = !self.ai.frigate_identified_cells_refined().is_empty();
+        let (battleship_identified, cruiser_identified, frigate_identified) = self.ai.identification_flags();
         battleship_identified && cruiser_identified && frigate_identified
     }
 
