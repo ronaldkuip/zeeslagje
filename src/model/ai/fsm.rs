@@ -361,6 +361,30 @@ impl AiPlayer {
         (horizontal, vertical, combined)
     }
 
+    /// Every inner cell where all 3 combined "alive" values (Battleship,
+    /// Cruiser, Frigate — see `alive_grids`) have dropped to zero: nothing
+    /// of size >=2 can occupy it any more, only a Submarine or nothing.
+    /// Board-coordinate `(row, col)` pairs (1-indexed, matching every other
+    /// `*_cells` accessor's convention), not flat indices — flattening is
+    /// the caller's job. A Model-layer derived fact (combines 3 already-
+    /// Model-owned grids), not a display-formatting concern, even though
+    /// its only current caller is `controller::game::fully_eliminated_
+    /// cells_json`. See the refactor plan's Stage 7 notes on this one.
+    pub(crate) fn fully_eliminated_cells(&self) -> Vec<(usize, usize)> {
+        let (_, _, combined4) = self.alive_grids(4);
+        let (_, _, combined3) = self.alive_grids(3);
+        let (_, _, combined2) = self.alive_grids(2);
+        let mut cells = Vec::new();
+        for r in 0..8 {
+            for c in 0..8 {
+                if combined4[r][c] == 0 && combined3[r][c] == 0 && combined2[r][c] == 0 {
+                    cells.push((r + 1, c + 1));
+                }
+            }
+        }
+        cells
+    }
+
     /// Re-check, for every cross-3 entry, whether each of its 3 ORIGINAL fired
     /// coordinates (not the derived bag — the actual salvo cells) could still
     /// possibly be the real Cruiser hit that produced that salvo's "3". A cell

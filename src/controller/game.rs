@@ -537,18 +537,7 @@ impl Game {
     /// nothing of size >=2 can occupy it any more, only a Submarine or
     /// nothing. Flat indices, for the main grid to outline distinctly.
     pub fn fully_eliminated_cells_json(&self) -> String {
-        let (_, _, combined4) = self.ai.alive_grids(4);
-        let (_, _, combined3) = self.ai.alive_grids(3);
-        let (_, _, combined2) = self.ai.alive_grids(2);
-        let mut cells: Vec<usize> = Vec::new();
-        for r in 0..8 {
-            for c in 0..8 {
-                if combined4[r][c] == 0 && combined3[r][c] == 0 && combined2[r][c] == 0 {
-                    // alive_grids is 0-indexed over the inner 8x8; board rows/cols are r+1/c+1.
-                    cells.push((r + 1) * 10 + (c + 1));
-                }
-            }
-        }
+        let cells: Vec<usize> = self.ai.fully_eliminated_cells().iter().map(|&(r, c)| r * 10 + c).collect();
         serde_json::to_string(&cells).unwrap_or_else(|_| "[]".to_string())
     }
 
