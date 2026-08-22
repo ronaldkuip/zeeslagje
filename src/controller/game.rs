@@ -75,22 +75,7 @@ impl Game {
             Ok(l) => l,
             Err(e) => return format!("{{\"error\":\"invalid board layout: {e}\"}}"),
         };
-        let total_hits: usize = layout.ships.iter().map(|s| s.size).sum();
-        let mut ships = layout.ships;
-        for ship in &mut ships {
-            ship.hits = 0;
-            ship.sunk = false;
-        }
-        self.state = GameState {
-            board: layout.board,
-            ships,
-            fired: vec![vec![false; 10]; 10],
-            log: Vec::new(),
-            turn: 1,
-            won: false,
-            total_hits,
-            hit_count: 0,
-        };
+        self.state = GameState::from_board_layout(layout);
         self.ai = AiPlayer::new();
         r#"{"ok":true}"#.to_string()
     }

@@ -120,6 +120,36 @@ pub struct GameState {
     pub hit_count: usize,
 }
 
+impl GameState {
+    /// Rebuild a fresh (never-fired, turn-1) `GameState` from a saved
+    /// `BoardLayout` — the placement-only save/replay format `board_
+    /// layout_json` produces. Any hits/sunk flags already on the layout's
+    /// ships are ignored; the result always starts completely fresh, same
+    /// as `generate_board`'s output. Moved out of `controller::game::
+    /// Game::load_board_layout_json` verbatim (Stage 7 of the refactor
+    /// plan) — this was real Model-layer reconstruction logic, not JSON
+    /// parsing/formatting, even though its only caller is that one
+    /// JSON-facing method.
+    pub(crate) fn from_board_layout(layout: BoardLayout) -> GameState {
+        let total_hits: usize = layout.ships.iter().map(|s| s.size).sum();
+        let mut ships = layout.ships;
+        for ship in &mut ships {
+            ship.hits = 0;
+            ship.sunk = false;
+        }
+        GameState {
+            board: layout.board,
+            ships,
+            fired: vec![vec![false; 10]; 10],
+            log: Vec::new(),
+            turn: 1,
+            won: false,
+            total_hits,
+            hit_count: 0,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Board generation
 // ---------------------------------------------------------------------------
