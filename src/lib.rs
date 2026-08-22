@@ -2,11 +2,11 @@ use wasm_bindgen::prelude::*;
 use serde::Serialize;
 
 mod fsm_tables;
-mod ai;
 mod model;
 
-use ai::AiPlayer;
-use model::fleet::{cell_to_str, generate_board, try_place, BoardLayout, Cell, GameState, ResolutionStatus, SalvoResult, Ship};
+use model::ai::AiPlayer;
+use model::fleet::{cell_to_str, generate_board, try_place};
+pub use model::fleet::{BoardLayout, Cell, GameState, ResolutionStatus, SalvoResult, Ship};
 
 // ---------------------------------------------------------------------------
 // WASM-exported Game struct
