@@ -20,7 +20,7 @@ mod hypothetical;
 const SHIP_SIZES: [usize; 3] = [4, 3, 2];
 
 #[derive(Clone, Copy, Debug)]
-struct LineState {
+pub(crate) struct LineState {
     s4: usize,
     s3: usize,
     s2: usize,

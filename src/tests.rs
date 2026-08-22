@@ -1,4 +1,6 @@
     use super::*;
+    use crate::model::ai::AiPlayer;
+    use crate::model::fleet::try_place;
 
 
     #[test]
