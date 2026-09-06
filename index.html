@@ -115,6 +115,34 @@
     .layout{grid-template-columns:1fr;}
   }
 
+  .chart-column{
+    display:flex;
+    flex-direction:column;
+    gap:28px;
+  }
+  /* The Salvo Log panel's height is set directly in JS (see
+     syncSalvoLogHeight) to match the sidebar's rendered height, not via
+     CSS grid/flex stretch — a stretched *auto* grid row would grow to fit
+     however tall the log-list's content wants to be (each new salvo entry
+     making the row, and so the whole sidebar, taller), which is exactly
+     the runaway growth this avoids by giving the panel a real, fixed
+     pixel height up front. box-sizing:border-box so that height already
+     includes the panel's own padding; .log-list (flex:1) then fills
+     whatever's left under the header and scrolls internally instead of
+     growing the panel further. */
+  .chart-column > .panel{
+    display:flex;
+    flex-direction:column;
+    box-sizing:border-box;
+    /* .panel's shared margin-bottom:18px (below) is how the sidebar
+       spaces its own plain block-stacked panels — chart-column already
+       spaces its two children via its own gap:28px, so that margin would
+       just add an extra, uncounted 18px past what syncSalvoLogHeight
+       accounts for, making this panel taller than the sidebar by exactly
+       that much. */
+    margin-bottom:0;
+  }
+
   /* ---------- Chart panel ---------- */
   .chart-card{
     background:linear-gradient(180deg, var(--deep-sea-2), var(--deep-sea));
@@ -467,12 +495,17 @@
     opacity:0.55;
   }
 
-  /* Log */
+  /* Log — fills whatever height its .panel gets set to in JS (see
+     syncSalvoLogHeight), scrolling internally once entries overflow that
+     fixed window rather than growing the panel. New entries are
+     prepended (see logList.prepend), so the most recent salvo is always
+     the one visible at the top without needing to scroll down for it. */
   .log-list{
     display:flex;
     flex-direction:column;
     gap:8px;
-    max-height:320px;
+    flex:1;
+    min-height:0;
     overflow-y:auto;
     padding-right:2px;
   }
@@ -504,22 +537,6 @@
     color:var(--paper-muted);
     font-style:italic;
   }
-
-  .saved-board-entry{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:8px;
-    font-family:'IBM Plex Mono', monospace;
-    font-size:12px;
-    border-left:2px solid var(--brass);
-    padding:5px 0 5px 10px;
-  }
-  .saved-board-entry .saved-board-summary{color:var(--ink); flex:1;}
-  .saved-board-entry .saved-board-summary .resolved{color:var(--flag-green); font-weight:600;}
-  .saved-board-entry .saved-board-summary .unresolved{color:var(--coral);}
-  .saved-board-entry button{flex-shrink:0;}
-  .saved-board-entry input[type="checkbox"]{flex-shrink:0;}
 
   .batch-histogram{
     display:flex;
@@ -750,31 +767,42 @@
 
   <div id="game" style="display:none;">
     <div class="layout">
-      <!-- Chart -->
-      <section class="chart-card">
-        <div class="grid-scale" id="gridScale">
-          <div class="corner"></div>
-          <!-- col labels injected -->
+      <!-- Chart + Salvo Log, kept in their own column so the log sits
+           right under the board instead of trailing at the bottom of
+           the (much taller) sidebar panel stack. -->
+      <div class="chart-column">
+        <section class="chart-card" id="chartCard">
+          <div class="grid-scale" id="gridScale">
+            <div class="corner"></div>
+            <!-- col labels injected -->
+          </div>
+          <div class="chart-footnote">
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--deep-water)"></span>outer ring — submarines only</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8×8 — all ships</span>
+            <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--cross-yellow); background:transparent"></span>Battleship cross candidate</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship identified</span>
+            <span class="legend-item"><span class="legend-swatch" style="border:3px solid var(--truth-blue); background:transparent"></span>No ship of size &ge;2 possible</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
+            <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half, fraction shown in white)</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half, fraction shown in white)</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser layout confirmed</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate cell confirmed (n/n)</span>
+            <span class="legend-item"><span class="legend-swatch" style="border:3px solid #FF3DA6; background:transparent"></span>Cruiser: much less likely alternative</span>
+          </div>
+        </section>
+
+        <div class="panel" id="salvoLogPanel">
+          <h2>Salvo Log</h2>
+          <div class="log-list" id="logList">
+            <div class="log-empty">No salvos fired yet.</div>
+          </div>
         </div>
-        <div class="chart-footnote">
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--deep-water)"></span>outer ring — submarines only</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--shallow-water)"></span>inner 8×8 — all ships</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:2px solid var(--cross-yellow); background:transparent"></span>Battleship cross candidate</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--cross-yellow)"></span>Battleship identified</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:3px solid var(--truth-blue); background:transparent"></span>No ship of size &ge;2 possible</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--muted)"></span>fired</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--brass-bright)"></span>your selection</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:1.5px dashed var(--teal); background:transparent"></span>AI advisory</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--coral-bright)"></span>Cruiser probability (left half, fraction shown in white)</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate probability (right half, fraction shown in white)</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:var(--flag-green)"></span>Cruiser layout confirmed</span>
-          <span class="legend-item"><span class="legend-swatch" style="background:#B15FE0"></span>Frigate cell confirmed (n/n)</span>
-          <span class="legend-item"><span class="legend-swatch" style="border:3px solid #FF3DA6; background:transparent"></span>Cruiser: much less likely alternative</span>
-        </div>
-      </section>
+      </div>
 
       <!-- Sidebar -->
-      <aside>
+      <aside id="sidebarAside">
         <div class="panel">
           <h2>AI Advisor</h2>
           <div class="advisory-readout" id="advisoryReadout"></div>
@@ -820,19 +848,6 @@
         </div>
 
         <div class="panel">
-          <h2>Saved Boards
-            <button class="btn btn-ghost" id="saveBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Save the current board layout and resolution status for later study">Save this board</button>
-          </h2>
-          <div class="fire-row" style="margin-bottom:8px;">
-            <label class="refire-toggle"><input type="checkbox" id="selectAllBoardsToggle"> Select/deselect all</label>
-            <button class="btn btn-ghost" id="deleteSelectedBoardsBtn" style="text-transform:none; letter-spacing:normal;" title="Delete the checked saved boards">Delete selected</button>
-          </div>
-          <div class="log-list" id="savedBoardsList" style="max-height:220px;">
-            <div class="log-empty">No boards saved yet.</div>
-          </div>
-        </div>
-
-        <div class="panel">
           <h2>Debug Tools</h2>
           <div class="fire-row">
             <button class="btn btn-ghost" id="fsmStatusBtn">FSM status</button>
@@ -842,27 +857,6 @@
             <button class="btn btn-ghost" id="cross3BagBtn">Cross-3 bags</button>
             <button class="btn btn-ghost" id="cross2BagBtn">Cross-2 bags</button>
             <button class="btn btn-ghost" id="cruiserAliveBtn">Ship alive grids</button>
-          </div>
-          <div class="refire-toggle-group">
-            <div class="modal-footnote" style="margin:10px 0 6px;">Let the AI advisory suggest already-fired cells while hunting:</div>
-            <label class="refire-toggle"><input type="checkbox" id="refireToggle4"> Battleship (4)</label>
-            <label class="refire-toggle"><input type="checkbox" id="refireToggle3"> Cruiser (3)</label>
-            <label class="refire-toggle"><input type="checkbox" id="refireToggle2"> Frigate (2)</label>
-          </div>
-          <div class="refire-toggle-group" style="margin-top:10px;">
-            <label class="refire-toggle"><input type="checkbox" id="freezeBeforeFrigatesToggle"> Don't drop evaluation level to 2 (Frigate) — freeze at 3 instead</label>
-          </div>
-          <div class="modal-footnote" style="margin:12px 0 6px;">"Heatmap fully evolved" — once the interesting coordinates are all already fired and nothing more can be learned:</div>
-          <div class="fire-row">
-            <button class="btn btn-ghost" id="updateFsmResolveBtn" title="Once the Cruisers' exact layout is cross-reasoning-identified, lock it into the ordinary FSM (no adjacent cells can hold a Frigate or another Cruiser), rework the Cross-3/Cross-2 bags against it, and re-evaluate the heatmap.">Update FSM and resolve</button>
-            <button class="btn btn-ghost" id="disambiguateRefireBtn" title="Find the best disambiguating salvo allowing one already-fired cell to be fired again (a one-time bonus per cell) — for when every discriminating coordinate is already spent.">Disambiguate (allow 1 refire)</button>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>Salvo Log</h2>
-          <div class="log-list" id="logList">
-            <div class="log-empty">No salvos fired yet.</div>
           </div>
         </div>
       </aside>
@@ -919,12 +913,11 @@
   const statusLine = document.getElementById('statusLine');
   const fleetStatus = document.getElementById('fleetStatus');
   const logList = document.getElementById('logList');
+  const chartCard = document.getElementById('chartCard');
+  const salvoLogPanel = document.getElementById('salvoLogPanel');
+  const sidebarAside = document.getElementById('sidebarAside');
   const resetBtn = document.getElementById('resetBtn');
   const restartSameBoardBtn = document.getElementById('restartSameBoardBtn');
-  const saveBoardBtn = document.getElementById('saveBoardBtn');
-  const savedBoardsList = document.getElementById('savedBoardsList');
-  const selectAllBoardsToggle = document.getElementById('selectAllBoardsToggle');
-  const deleteSelectedBoardsBtn = document.getElementById('deleteSelectedBoardsBtn');
   const fsmStatusBtn = document.getElementById('fsmStatusBtn');
   const revealShipsBtn = document.getElementById('revealShipsBtn');
   const evalLevelBtn = document.getElementById('evalLevelBtn');
@@ -932,14 +925,6 @@
   const cross3BagBtn = document.getElementById('cross3BagBtn');
   const cross2BagBtn = document.getElementById('cross2BagBtn');
   const cruiserAliveBtn = document.getElementById('cruiserAliveBtn');
-  const updateFsmResolveBtn = document.getElementById('updateFsmResolveBtn');
-  const disambiguateRefireBtn = document.getElementById('disambiguateRefireBtn');
-  const refireToggles = [
-    [document.getElementById('refireToggle4'), 4],
-    [document.getElementById('refireToggle3'), 3],
-    [document.getElementById('refireToggle2'), 2],
-  ];
-  const freezeBeforeFrigatesToggle = document.getElementById('freezeBeforeFrigatesToggle');
   const heatmapCruiserToggle = document.getElementById('heatmapCruiserToggle');
   const heatmapFrigateToggle = document.getElementById('heatmapFrigateToggle');
   const modalBackdrop = document.getElementById('modalBackdrop');
@@ -1154,48 +1139,6 @@
     if (!batchRunning){
       renderSuggested();
     }
-  }
-
-  // Manual "heatmap fully evolved" workflow, step 1: lock in the Cruisers'
-  // cross-reasoned layout (once cross-reasoning has actually resolved it),
-  // feed it into the ordinary FSM, rework the Cross-3/Cross-2 bags, and
-  // re-evaluate the heatmap. See Game::update_fsm_and_resolve.
-  function runUpdateFsmAndResolve(){
-    const locked = game.update_fsm_and_resolve();
-    statusLine.textContent = locked
-      ? 'Cruiser layout locked in — FSM, Cross-3/Cross-2 bags, and heatmap updated.'
-      : 'Nothing to lock in yet (already locked, or the Cruisers are not cross-reasoning-identified).';
-    refreshHeatmaps();
-    refreshCruiserIdentified();
-    refreshFleet();
-    refreshAdvisory();
-  }
-
-  // Manual "heatmap fully evolved" workflow, step 2: the best disambiguating
-  // salvo allowing one already-fired cell a one-time bonus refire, for when
-  // every discriminating coordinate is already spent (see Game::
-  // ai_suggest_disambiguation_refire). Populates the Fire Control slots,
-  // same as "Use these 3" — press Fire to actually submit it.
-  function runDisambiguateWithRefire(){
-    let indices = [];
-    try { indices = JSON.parse(game.ai_suggest_disambiguation_refire()); }
-    catch { indices = []; }
-    let message = 'Refire-based disambiguation salvo loaded — review and fire (may include an already-fired cell).';
-    if (indices.length === 0){
-      // Last-resort tier: for a "cluster of 3" tie whose discriminating
-      // cell(s) already spent their one-time bonus refire earlier —
-      // see AiPlayer::disambiguation_shots_last_resort.
-      try { indices = JSON.parse(game.ai_suggest_disambiguation_last_resort()); }
-      catch { indices = []; }
-      message = 'Last-resort disambiguation salvo loaded (a discriminating cell already spent its one-time refire earlier — this is a one-off exception) — review and fire.';
-    }
-    if (indices.length === 0){
-      statusLine.textContent = 'No refire-based disambiguating shot available right now.';
-      return;
-    }
-    selected = indices;
-    renderSelection();
-    statusLine.textContent = message;
   }
 
   function refreshBattleshipCross(){
@@ -1631,6 +1574,35 @@
       });
   }
 
+  // Sets the Salvo Log panel's height directly (not via CSS grid/flex
+  // stretch — see .chart-column > .panel's comment for why that grows
+  // unboundedly instead) so its own visible bottom edge lines up with the
+  // sidebar's last panel's visible bottom edge. New entries scroll inside
+  // this fixed window instead of growing the panel (see .log-list's
+  // flex/overflow-y). Re-run on resize since text reflow can change
+  // panel heights; skipped at/below the 880px breakpoint where .layout
+  // drops to a single column, so the panel just sizes itself naturally
+  // there instead of keeping a stale desktop height.
+  //
+  // Deliberately measures rendered bottom edges (getBoundingClientRect)
+  // rather than computing from aside's/chart-card's heights plus assumed
+  // margins/gaps — aside.offsetHeight includes the last sidebar panel's
+  // own trailing margin-bottom (invisible space below its visible edge,
+  // since a grid item doesn't let that margin collapse away), which threw
+  // an earlier version of this off by exactly that margin. Reading the
+  // actual edges sidesteps that box-model bookkeeping entirely.
+  function syncSalvoLogHeight(){
+    if (window.innerWidth <= 880){
+      salvoLogPanel.style.height = '';
+      return;
+    }
+    const gap = 28; // matches .chart-column's gap, chart-card → Salvo Log panel
+    const chartCardBottom = chartCard.getBoundingClientRect().bottom;
+    const sidebarBottom = sidebarAside.lastElementChild.getBoundingClientRect().bottom;
+    const target = sidebarBottom - chartCardBottom - gap;
+    salvoLogPanel.style.height = Math.max(target, 120) + 'px'; // floor in case the sidebar is ever shorter than the chart card
+  }
+
   function appendLogEntry(salvo){
     if (logList.querySelector('.log-empty')) logList.innerHTML = '';
     const entry = document.createElement('div');
@@ -1732,68 +1704,14 @@
     refreshAdvisory();
   }
 
-  // Largest probability anywhere in a Cruiser/Frigate odds grid (as a
-  // whole percentage), for a one-line summary in the saved-boards list.
-  // `grid` may be null/undefined (a resolved board has no odds at all).
-  function maxOddsPercent(grid){
-    if (!grid) return 0;
-    let max = 0;
-    for (const row of grid) for (const p of row) if (p > max) max = p;
-    return Math.round(max * 100);
-  }
-
-  // Saves the CURRENT board's ship layout plus its resolution status (see
-  // AiPlayer::cruiser_identified_cells/frigate_identified_cells) via the
-  // dev server's /save_board endpoint (see serve.py) — a plain browser
-  // can't write to disk directly. Silently reports failure if that
-  // endpoint isn't available (e.g. serving via plain `python -m
-  // http.server`). `refreshList=false` skips re-fetching and re-rendering
-  // the whole Saved Boards panel — a large Autorun Batch calls this once
-  // per game, and re-rendering an ever-growing list every single time is
-  // wasted work when the batch will call refreshSavedBoardsList() itself
-  // once at the end anyway.
-  // Returns the new saved id, or undefined on failure.
-  async function saveCurrentBoard(refreshList = true){
-    let board, resolution;
-    try {
-      board = JSON.parse(game.board_layout_json());
-      resolution = JSON.parse(game.resolution_status_json());
-    } catch {
-      statusLine.textContent = 'Could not read the current board — nothing saved.';
-      return undefined;
-    }
-    const payload = {
-      board,
-      resolved: resolution.resolved,
-      odds: resolution.resolved ? null : { cruiser: resolution.cruiser_odds, frigate: resolution.frigate_odds },
-    };
-    try {
-      const resp = await fetch('/save_board', { method: 'POST', body: JSON.stringify(payload) });
-      if (!resp.ok) throw new Error('save failed');
-      const { id } = await resp.json();
-      statusLine.textContent = `Board saved as #${id}.`;
-      if (refreshList){
-        await refreshSavedBoardsList();
-      }
-      return id;
-    } catch {
-      statusLine.textContent = 'Could not save the board — is the dev server (serve.py) running?';
-      return undefined;
-    }
-  }
-
   // Appends one line to the dev server's fast_solves.jsonl (see
   // serve.py's /save_fast_solve) for a game that resolved in exactly
-  // FAST_SOLVE_SALVOS salvos — a separate, append-only log rather than
-  // saveCurrentBoard's read-modify-write-the-whole-file scheme, since a
-  // large batch could produce far more of these than that scheme is
-  // sized for. Silently does nothing on failure (same reasoning as
-  // saveCurrentBoard) — never worth interrupting or slowing a batch over
-  // a single missed research sample. No status line update either: unlike
-  // saveCurrentBoard (a deliberate, one-off user action), this fires
-  // routinely and repeatedly during a large batch, and stomping the
-  // status line every time would just be noise over the batch's own
-  // progress text.
+  // FAST_SOLVE_SALVOS salvos — an append-only log, sized for a large
+  // batch to produce many of these. Silently does nothing on failure —
+  // never worth interrupting or slowing a batch over a single missed
+  // research sample. No status line update either: this fires routinely
+  // and repeatedly during a large batch, and stomping the status line
+  // every time would just be noise over the batch's own progress text.
   async function saveFastSolve(salvosTaken){
     let board;
     try {
@@ -1806,100 +1724,6 @@
     } catch {
       // no logging server available — ignore, same as logGameEnd
     }
-  }
-
-  // Fetches the full saved-boards list from the dev server and renders
-  // it. Leaves the list untouched (rather than clearing it) if the
-  // server isn't reachable, so a plain static server doesn't wipe out
-  // whatever was already shown.
-  async function refreshSavedBoardsList(){
-    let boards;
-    try {
-      const resp = await fetch('/saved_boards');
-      if (!resp.ok) return;
-      boards = await resp.json();
-    } catch {
-      return;
-    }
-
-    const ids = Object.keys(boards).map(Number).sort((a, b) => a - b);
-    if (ids.length === 0){
-      savedBoardsList.innerHTML = '<div class="log-empty">No boards saved yet.</div>';
-      return;
-    }
-    savedBoardsList.innerHTML = '';
-    selectAllBoardsToggle.checked = false;
-    ids.forEach(id => {
-      const entry = boards[String(id)];
-      const row = document.createElement('div');
-      row.className = 'saved-board-entry';
-
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.className = 'saved-board-checkbox';
-      checkbox.dataset.id = String(id);
-
-      const summary = document.createElement('span');
-      summary.className = 'saved-board-summary';
-      if (entry.resolved){
-        summary.innerHTML = `#${id} <span class="resolved">resolved</span>`;
-      } else {
-        const cruiserMax = maxOddsPercent(entry.odds && entry.odds.cruiser);
-        const frigateMax = maxOddsPercent(entry.odds && entry.odds.frigate);
-        summary.innerHTML = `#${id} <span class="unresolved">unresolved</span> (Cruiser &le;${cruiserMax}%, Frigate &le;${frigateMax}%)`;
-      }
-
-      const loadBtn = document.createElement('button');
-      loadBtn.className = 'btn btn-ghost';
-      loadBtn.style.textTransform = 'none';
-      loadBtn.style.letterSpacing = 'normal';
-      loadBtn.textContent = 'Load';
-      loadBtn.addEventListener('click', () => loadSavedBoard(entry));
-
-      row.appendChild(checkbox);
-      row.appendChild(summary);
-      row.appendChild(loadBtn);
-      savedBoardsList.appendChild(row);
-    });
-  }
-
-  // Deletes every currently-checked saved board via the dev server's
-  // /delete_boards endpoint (see serve.py) — same "no server available"
-  // fallback message as saveCurrentBoard.
-  async function deleteSelectedBoards(){
-    const ids = Array.from(savedBoardsList.querySelectorAll('.saved-board-checkbox:checked'))
-      .map(el => Number(el.dataset.id));
-    if (ids.length === 0){
-      statusLine.textContent = 'No saved boards selected to delete.';
-      return;
-    }
-    if (!confirm(`Delete ${ids.length} saved board${ids.length === 1 ? '' : 's'}? This cannot be undone.`)){
-      return;
-    }
-    try {
-      const resp = await fetch('/delete_boards', { method: 'POST', body: JSON.stringify({ ids }) });
-      if (!resp.ok) throw new Error('delete failed');
-      const { deleted } = await resp.json();
-      statusLine.textContent = `Deleted ${deleted.length} saved board${deleted.length === 1 ? '' : 's'}.`;
-    } catch {
-      statusLine.textContent = 'Could not delete the selected boards — is the dev server (serve.py) running?';
-      return;
-    }
-    await refreshSavedBoardsList();
-  }
-
-  // Reconstructs a fresh game on a previously-saved board layout (see
-  // Game::load_board_layout_json) — same idea as "Replay board", but for
-  // an externally saved layout rather than the current one.
-  function loadSavedBoard(entry){
-    const response = game.load_board_layout_json(JSON.stringify(entry.board));
-    let parsed;
-    try { parsed = JSON.parse(response); } catch { parsed = { error: 'unparseable response' }; }
-    if (parsed.error){
-      statusLine.textContent = `Could not load saved board: ${parsed.error}`;
-      return;
-    }
-    afterGameStateReset('Saved board loaded. Select 3 coordinates, or accept the AI\'s advisory.');
   }
 
   // Best-effort: appends one line to simpleresult.txt via the local dev
@@ -2064,7 +1888,7 @@
   let batchResolvedSum = 0;
   let batchResolvedMin = Infinity;
   let batchResolvedMax = -Infinity;
-  let batchUnresolvedIds = [];
+  let batchUnresolvedCount = 0;
 
   // How many salvos counts as a "fast solve" worth harvesting — see
   // saveFastSolve. Just a count kept live (batchFastSolveCount), not a
@@ -2088,10 +1912,8 @@
       const avg = (batchResolvedSum / batchResolvedCount).toFixed(2);
       parts.push(`Resolved — min salvos: ${batchResolvedMin}, average: ${avg}, max: ${batchResolvedMax} (n=${batchResolvedCount})`);
     }
-    if (batchUnresolvedIds.length > 0){
-      const shown = batchUnresolvedIds.slice(0, 20).map(id => `#${id}`).join(', ');
-      const more = batchUnresolvedIds.length > 20 ? ` (+${batchUnresolvedIds.length - 20} more)` : '';
-      parts.push(`Unresolved harvested: ${batchUnresolvedIds.length} saved as ${shown}${more}`);
+    if (batchUnresolvedCount > 0){
+      parts.push(`Unresolved: ${batchUnresolvedCount}`);
     }
     if (batchFastSolveCount > 0){
       parts.push(`Fast solves (${FAST_SOLVE_SALVOS} salvos): ${batchFastSolveCount} logged to fast_solves.jsonl`);
@@ -2132,13 +1954,12 @@
   // are forgotten immediately — this is meant to run large (the input
   // allows up to 1000000) hunting for the rare board an unresolved
   // disambiguation is genuinely unreachable on, so never stops early:
-  // whenever a game finishes unresolved, it's saved for later study and
-  // the batch moves straight on to the next game, all the way to n. Games
-  // resolved in exactly 10 salvos are ALSO harvested (see
-  // saveFastSolve/FAST_SOLVE_SALVOS below) — a separate, append-only log
-  // rather than the saved-boards JSON scheme, since at this scale a
-  // meaningful fraction of 1000000 games could land on exactly 10 and the
-  // existing scheme rewrites its entire file on every single save.
+  // whenever a game finishes unresolved, it's tallied and the batch moves
+  // straight on to the next game, all the way to n. Games resolved in
+  // exactly 10 salvos are ALSO harvested (see saveFastSolve/
+  // FAST_SOLVE_SALVOS below) — an append-only log, sized so a meaningful
+  // fraction of 1000000 games landing on exactly 10 is still cheap to
+  // record (one appended line each, not a rewrite of anything).
   async function runAutoPlayBatch(){
     if (autoPlayRunning || batchRunning) return;
     const n = parseInt(batchSizeInput.value, 10);
@@ -2158,7 +1979,7 @@
     batchResolvedSum = 0;
     batchResolvedMin = Infinity;
     batchResolvedMax = -Infinity;
-    batchUnresolvedIds = [];
+    batchUnresolvedCount = 0;
     batchFastSolveCount = 0;
     batchSalvoHistogram = new Array(31).fill(0);
     updateBatchStatsLine();
@@ -2198,14 +2019,9 @@
           }
         } else if (!resolved){
           // Not every ship layout — Battleship, both Cruisers, and all 3
-          // Frigates — was genuinely established and correct. Save it (skip
-          // the Saved Boards panel refresh here — see saveCurrentBoard's doc
-          // comment — done once, after the whole batch, instead) and keep
-          // going rather than stopping the batch.
-          const id = await saveCurrentBoard(false);
-          if (id !== undefined){
-            batchUnresolvedIds.push(id);
-          }
+          // Frigates — was genuinely established and correct. Just tally
+          // it and keep going rather than stopping the batch.
+          batchUnresolvedCount++;
         }
         updateBatchStatsLine();
 
@@ -2269,9 +2085,8 @@
     resetBtn.disabled = false;
     restartSameBoardBtn.disabled = false;
     statusLine.textContent = stopError
-      ? `Autorun batch stopped early at game ${currentGameIndex}/${n} (${batchUnresolvedIds.length} unresolved, ${batchFastSolveCount} fast solves saved so far): ${stopError.message || stopError}`
-      : `Autorun batch finished: ${n} games, ${batchUnresolvedIds.length} unresolved and ${batchFastSolveCount} fast solves (${FAST_SOLVE_SALVOS} salvos) saved for study.`;
-    await refreshSavedBoardsList();
+      ? `Autorun batch stopped early at game ${currentGameIndex}/${n} (${batchUnresolvedCount} unresolved, ${batchFastSolveCount} fast solves saved so far): ${stopError.message || stopError}`
+      : `Autorun batch finished: ${n} games, ${batchUnresolvedCount} unresolved and ${batchFastSolveCount} fast solves (${FAST_SOLVE_SALVOS} salvos) saved for study.`;
   }
 
   function countHits(){
@@ -2286,12 +2101,6 @@
   }
 
   function afterGameStateReset(message){
-    // Both game.reset() and game.restart_same_board() rebuild the AI from
-    // scratch (refire-allowed and the freeze-before-Frigates toggle both
-    // default to off) — reapply whatever the checkboxes currently show, so
-    // a debug preference survives either kind of restart.
-    refireToggles.forEach(([el, size]) => game.set_refire_allowed(size, el.checked));
-    game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
     selected = [];
     won = false;
     fleetClearedShown = false;
@@ -2321,6 +2130,7 @@
     refreshRefirableCells();
     refreshHeatmaps();
     refreshCruiserIdentified();
+    syncSalvoLogHeight();
     statusLine.textContent = message;
   }
 
@@ -2366,6 +2176,8 @@
     refreshHeatmaps();
     refreshCruiserIdentified();
     renderSelection();
+    syncSalvoLogHeight();
+    window.addEventListener('resize', syncSalvoLogHeight);
 
     fireBtn.addEventListener('click', doFire);
     clearBtn.addEventListener('click', () => { selected = []; renderSelection(); });
@@ -2377,12 +2189,6 @@
     autoPlayBatchBtn.addEventListener('click', runAutoPlayBatch);
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
-    saveBoardBtn.addEventListener('click', saveCurrentBoard);
-    selectAllBoardsToggle.addEventListener('change', () => {
-      savedBoardsList.querySelectorAll('.saved-board-checkbox').forEach(el => { el.checked = selectAllBoardsToggle.checked; });
-    });
-    deleteSelectedBoardsBtn.addEventListener('click', deleteSelectedBoards);
-    refreshSavedBoardsList();
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
     revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));
     evalLevelBtn.addEventListener('click', () => openModal('Evaluation Level', buildEvaluationLevelHtml()));
@@ -2390,17 +2196,6 @@
     cross3BagBtn.addEventListener('click', () => openModal('Cross-3 Bags', buildCross3BagHtml()));
     cross2BagBtn.addEventListener('click', () => openModal('Cross-2 Bags', buildCross2BagHtml()));
     cruiserAliveBtn.addEventListener('click', () => openModal('Ship Alive Grids', buildShipAliveGridsHtml()));
-    updateFsmResolveBtn.addEventListener('click', runUpdateFsmAndResolve);
-    disambiguateRefireBtn.addEventListener('click', runDisambiguateWithRefire);
-    refireToggles.forEach(([el, size]) => {
-      el.addEventListener('change', () => {
-        game.set_refire_allowed(size, el.checked);
-        refreshRefirableCells();
-      });
-    });
-    freezeBeforeFrigatesToggle.addEventListener('change', () => {
-      game.set_freeze_before_frigates(freezeBeforeFrigatesToggle.checked);
-    });
     heatmapCruiserToggle.addEventListener('change', refreshHeatmaps);
     heatmapFrigateToggle.addEventListener('change', refreshHeatmaps);
     modalClose.addEventListener('click', closeModal);
