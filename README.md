@@ -122,6 +122,26 @@ that class of problem, which the exhaustive search failed to beat in
 practice. See `best_cell_by_score` and `apply_hypothetical_miss` in
 `model/ai/heatmap_ops.rs` / `model/ai/hypothetical.rs`.
 
+**Frigate endgame lookahead.** Greedy construction has one blind spot:
+its hypothetical-miss folding can't see bag ambiguity. With "B4 plus
+either B3 or C4" left, a miss assumed at C4 makes B3 a certain hit, so
+greedy fires B3 and C4 together — and since exactly one of them is
+always the hit, the bag comes back identical either way, forcing an
+extra refire salvo later. So once the Battleship and both Cruisers are
+sunk and at most 1000 joint (Cruiser, Frigate) hypotheses remain, every
+candidate triple is scored by a one-step lookahead: group the surviving
+hypotheses by the bag each would produce, estimate the salvos still
+needed per group (remaining unfired Frigate cells, plus a penalty for
+groups left ambiguous — larger when only a refire could still separate
+them), and replace the greedy salvo only if some triple is strictly
+better. Measured on a fixed 20,000-board set: average salvos to solve
+dropped from 17.08 to 16.04, with every identified layout checked
+against ground truth. (Letting the same lookahead also override the
+minimax disambiguation salvos below was tried and came out slightly
+worse — a one-step estimate is too coarse to beat that search at pure
+information gathering.) See `frigate_endgame_salvo` in
+`model/ai/heatmap_ops.rs`.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that

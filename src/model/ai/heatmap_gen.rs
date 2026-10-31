@@ -372,7 +372,7 @@ impl AiPlayer {
     /// cache exactly, including relying on `update_fsm_and_resolve` to
     /// clear it on a lock-in event that leaves `salvo_history.len()`
     /// unchanged.
-    fn jointly_consistent_hypothesis_pairs(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
+    pub(crate) fn jointly_consistent_hypothesis_pairs(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.joint_pairs_cache.borrow().as_ref() {
             if *cached_key == key {

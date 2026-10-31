@@ -227,8 +227,8 @@ impl AiPlayer {
         }
         let anchor = anchor?;
 
-        let cruiser_grid = self.cruiser_heatmap();
-        let frigate_grid = self.frigate_heatmap();
+        let cruiser_grid = self.cruiser_heatmap_refined();
+        let frigate_grid = self.frigate_heatmap_refined();
 
         let mut cruiser_only = None;
         let mut frigate_only = None;
@@ -881,6 +881,133 @@ impl AiPlayer {
             chosen.push(next);
         }
 
-        [chosen[0], chosen[1], chosen[2]]
+        let greedy = [chosen[0], chosen[1], chosen[2]];
+        if size == 2 {
+            if let Some(better) = self.frigate_endgame_salvo(greedy) {
+                return better;
+            }
+        }
+        greedy
+    }
+
+    /// One-step lookahead for the Frigate endgame (Battleship and both
+    /// Cruisers sunk, few joint hypotheses left): scores a salvo by the
+    /// expected number of salvos still needed afterwards — to both pin the
+    /// layout down AND hit every remaining Frigate cell — averaged over
+    /// every surviving (Cruiser, Frigate) hypothesis pair, grouped by the
+    /// bag each would produce. Only replaces `greedy` if some salvo is
+    /// strictly better under that estimate.
+    ///
+    /// Exists because the greedy hunt's hypothetical-miss folding can't see
+    /// bag ambiguity: with "B4 + (B3 or C4)" left, a miss assumed at C4
+    /// makes B3 a certain hit, so greedy fires B3 and C4 together — which
+    /// always yields the same bag whichever is real (exactly one of them
+    /// hits), forcing an extra refire salvo afterwards. Firing just one of
+    /// them alongside other useful cells resolves it outright.
+    fn frigate_endgame_salvo(&self, greedy: [(usize, usize); 3]) -> Option<[(usize, usize); 3]> {
+        const MAX_HYPOTHESES: usize = 1000;
+        const MAX_POOL: usize = 30;
+
+        let pairs = self.jointly_consistent_hypothesis_pairs();
+        if pairs.len() <= 1 || pairs.len() > MAX_HYPOTHESES {
+            return None;
+        }
+        let bit = |(r, c): (usize, usize)| 1u128 << (r * 10 + c);
+        let mask = |cells: &std::collections::HashSet<(usize, usize)>| cells.iter().fold(0u128, |m, &cell| m | bit(cell));
+        let hyps: Vec<(u128, u128)> = pairs.iter().map(|(c, f)| (mask(c), mask(f))).collect();
+
+        let mut fired = 0u128;
+        for r in 0..10 {
+            for c in 0..10 {
+                if self.fired[r][c] {
+                    fired |= bit((r, c));
+                }
+            }
+        }
+        let any_cell = hyps.iter().fold(0u128, |m, &(c, f)| m | c | f);
+
+        let mut pool: Vec<(usize, usize)> = Vec::new();
+        let mut fillers = 0;
+        for r in 0..10 {
+            for c in 0..10 {
+                let b = bit((r, c));
+                if fired & b != 0 {
+                    continue;
+                }
+                if any_cell & b != 0 {
+                    pool.push((r, c));
+                } else if fillers < 2 {
+                    // Known-empty cells: let a salvo hold fewer than 3
+                    // informative cells (see `disambiguation_shots`'
+                    // padding comment for why that matters).
+                    pool.push((r, c));
+                    fillers += 1;
+                }
+            }
+        }
+        if pool.len() < 3 || pool.len() > MAX_POOL {
+            return None;
+        }
+
+        // Per-bag-outcome aggregates, enough to estimate what's left
+        // without materializing the groups themselves.
+        #[derive(Clone, Copy)]
+        struct Group { n: usize, rem_max: u32, or_c: u128, and_c: u128, or_f: u128, and_f: u128 }
+        let evaluate = |salvo: [(usize, usize); 3]| -> (f64, usize) {
+            let s = salvo.iter().fold(0u128, |m, &cell| m | bit(cell));
+            let fired_after = fired | s;
+            let mut groups = [Group { n: 0, rem_max: 0, or_c: 0, and_c: !0, or_f: 0, and_f: !0 }; 16];
+            for &(c, f) in &hyps {
+                let (c, f): (u128, u128) = (c, f);
+                let g = &mut groups[((s & c).count_ones() * 4 + (s & f).count_ones()) as usize];
+                g.n += 1;
+                g.rem_max = g.rem_max.max((f & !fired_after).count_ones());
+                g.or_c |= c;
+                g.and_c &= c;
+                g.or_f |= f;
+                g.and_f &= f;
+            }
+            let mut weighted = 0.0;
+            let mut worst = 0;
+            for g in groups.iter().filter(|g| g.n > 0) {
+                let hits_left = g.rem_max.div_ceil(3) as f64;
+                let estimate = if g.n == 1 {
+                    hits_left
+                } else if ((g.or_c ^ g.and_c) | (g.or_f ^ g.and_f)) & !fired_after == 0 {
+                    // Every cell these hypotheses disagree on is already
+                    // fired: only a refire can still separate them.
+                    hits_left + 1.0
+                } else {
+                    hits_left.max(1.0) + 0.5
+                };
+                weighted += estimate * g.n as f64;
+                worst = worst.max(g.n);
+            }
+            (weighted / hyps.len() as f64, worst)
+        };
+
+        let greedy_score = evaluate(greedy);
+        let mut best: Option<([(usize, usize); 3], (f64, usize))> = None;
+        for i in 0..pool.len() {
+            for j in (i + 1)..pool.len() {
+                for k in (j + 1)..pool.len() {
+                    let salvo = [pool[i], pool[j], pool[k]];
+                    let score = evaluate(salvo);
+                    let better = match &best {
+                        None => true,
+                        Some((_, (cost, worst))) => score.0 < cost - 1e-9 || ((score.0 - cost).abs() <= 1e-9 && score.1 < *worst),
+                    };
+                    if better {
+                        best = Some((salvo, score));
+                    }
+                }
+            }
+        }
+        let (salvo, (cost, worst)) = best?;
+        if cost < greedy_score.0 - 1e-9 || ((cost - greedy_score.0).abs() <= 1e-9 && worst < greedy_score.1) {
+            Some(salvo)
+        } else {
+            None
+        }
     }
 }
