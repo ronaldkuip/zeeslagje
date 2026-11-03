@@ -83,6 +83,15 @@ _fast_solve_lock = threading.Lock()
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        # Without this, browsers cache index.html/player.html/pkg/*
+        # heuristically (for a fraction of the file's age), so after a
+        # deploy, navigating between pages kept serving the old version.
+        # no-cache still allows caching but revalidates every time — a
+        # cheap 304 via Last-Modified when nothing changed.
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def _is_authenticated(self):
         header = self.headers.get("Authorization")
         if not header or not header.startswith("Basic "):
