@@ -453,6 +453,11 @@
     color:var(--ink);
   }
   .batch-input:disabled{opacity:0.5;}
+  .board-input{
+    flex:1;
+    min-width:0;
+    width:auto;
+  }
 
   .fire-row{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
   .selection-slots{
@@ -840,6 +845,10 @@
             <button class="btn btn-ghost" id="restartSameBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Clear all shots and AI deduction, but keep the exact same ship layout">Replay board</button>
             <button class="btn btn-ghost" id="resetBtn" style="text-transform:none; letter-spacing:normal;">New game</button>
           </div>
+          <div class="fire-row" style="margin-top:10px;">
+            <input type="text" id="boardInput" class="batch-input board-input" spellcheck="false" autocomplete="off" placeholder='Paste a board: {"board":{...},"salvos":N} or {"board":[...],"ships":[...]}' aria-label="Board layout JSON">
+            <button class="btn btn-ghost" id="loadBoardBtn" style="text-transform:none; letter-spacing:normal;" title="Start a fresh game on the pasted board layout">Load board</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -918,6 +927,8 @@
   const sidebarAside = document.getElementById('sidebarAside');
   const resetBtn = document.getElementById('resetBtn');
   const restartSameBoardBtn = document.getElementById('restartSameBoardBtn');
+  const boardInput = document.getElementById('boardInput');
+  const loadBoardBtn = document.getElementById('loadBoardBtn');
   const fsmStatusBtn = document.getElementById('fsmStatusBtn');
   const revealShipsBtn = document.getElementById('revealShipsBtn');
   const evalLevelBtn = document.getElementById('evalLevelBtn');
@@ -2136,6 +2147,7 @@
 
   function resetGame(){
     game.reset();
+    hitTotal.textContent = 20;
     afterGameStateReset('New chart laid out. Select 3 coordinates, or accept the AI\'s advisory.');
   }
 
@@ -2147,6 +2159,35 @@
     // random board to happen to reproduce the same situation.
     game.restart_same_board();
     afterGameStateReset('Same board restarted. Select 3 coordinates, or accept the AI\'s advisory.');
+  }
+
+  // Starts a fresh game on a pasted board layout (see
+  // Game::load_board_layout_json). Accepts a bare BoardLayout
+  // ({"board":[...],"ships":[...]}) or a special-case/fast-solve record
+  // wrapping one ({"board":{...},"salvos":N}, as in salvos_NN.jsonl).
+  // Those records leave out Submarines, so the hit total follows the
+  // pasted ships rather than the usual 20.
+  function loadPastedBoard(){
+    let parsed;
+    try {
+      parsed = JSON.parse(boardInput.value.trim());
+    } catch {
+      statusLine.textContent = 'Could not load board: the pasted text is not valid JSON.';
+      return;
+    }
+    const layout = parsed && parsed.board && !Array.isArray(parsed.board) ? parsed.board : parsed;
+    if (!layout || !Array.isArray(layout.board) || !Array.isArray(layout.ships)){
+      statusLine.textContent = 'Could not load board: expected {"board":[...],"ships":[...]}, optionally wrapped as {"board":{...},"salvos":N}.';
+      return;
+    }
+    const response = JSON.parse(game.load_board_layout_json(JSON.stringify(layout)));
+    if (response.error){
+      statusLine.textContent = `Could not load board: ${response.error}`;
+      return;
+    }
+    hitTotal.textContent = layout.ships.reduce((n, ship) => n + ship.cells.length, 0);
+    const note = typeof parsed.salvos === 'number' ? ` (solved in ${parsed.salvos} salvos in the batch run)` : '';
+    afterGameStateReset(`Pasted board loaded${note}. Select 3 coordinates, or accept the AI's advisory.`);
   }
 
   async function boot(){
@@ -2189,6 +2230,8 @@
     autoPlayBatchBtn.addEventListener('click', runAutoPlayBatch);
     resetBtn.addEventListener('click', resetGame);
     restartSameBoardBtn.addEventListener('click', restartSameBoard);
+    loadBoardBtn.addEventListener('click', loadPastedBoard);
+    boardInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadPastedBoard(); });
     fsmStatusBtn.addEventListener('click', () => openModal('FSM Status', buildFsmStatusHtml()));
     revealShipsBtn.addEventListener('click', () => openModal('Placed Ships (debug)', buildShipsHtml()));
     evalLevelBtn.addEventListener('click', () => openModal('Evaluation Level', buildEvaluationLevelHtml()));
