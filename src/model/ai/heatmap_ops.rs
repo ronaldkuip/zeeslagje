@@ -135,6 +135,16 @@ impl AiPlayer {
         }
 
         let mut pool = informative;
+        // The identified Battleship's unfired cells first (see
+        // `pending_battleship_cells`): as neutral as any filler — their
+        // value is known — but they have to be fired anyway, so a triple
+        // using them is preferred over an equally good one that doesn't.
+        let pending = self.pending_battleship_cells();
+        for &cell in &pending {
+            if !pool.contains(&cell) {
+                pool.push(cell);
+            }
+        }
         // Always pad in at least 2 filler cells, even when the informative
         // set alone is already >= 3 — never just enough to reach the bare
         // minimum of 3. Padding to exactly 3 total is a trap whenever
@@ -170,7 +180,7 @@ impl AiPlayer {
             return None;
         }
 
-        let mut best: Option<([(usize, usize); 3], usize)> = None;
+        let mut best: Option<([(usize, usize); 3], (usize, usize))> = None;
         for i in 0..pool.len() {
             for j in (i + 1)..pool.len() {
                 for k in (j + 1)..pool.len() {
@@ -186,8 +196,9 @@ impl AiPlayer {
                         buckets[hits] += 1;
                     }
                     let worst = *buckets.iter().max().unwrap();
-                    if best.as_ref().is_none_or(|(_, best_worst)| worst < *best_worst) {
-                        best = Some((salvo, worst));
+                    let owed = salvo.iter().filter(|cell| pending.contains(cell)).count();
+                    if best.as_ref().is_none_or(|(_, (best_worst, best_owed))| worst < *best_worst || (worst == *best_worst && owed > *best_owed)) {
+                        best = Some((salvo, (worst, owed)));
                     }
                 }
             }
@@ -651,7 +662,7 @@ impl AiPlayer {
     /// the debug UI.
     pub fn current_target_size(&self) -> usize {
         for &size in &SHIP_SIZES {
-            if !self.size_fully_found(size) {
+            if !self.size_found_for_hunting(size) {
                 if size == 2 && self.freeze_before_frigates {
                     return 3;
                 }
@@ -706,6 +717,10 @@ impl AiPlayer {
     /// (finishing the ship off directly), then falls back to the ordinary FSM search for
     /// any slots left over.
     pub fn choose_shots(&self) -> [(usize, usize); 3] {
+        self.with_pending_battleship_cells(self.choose_shots_before_battleship_anchors())
+    }
+
+    fn choose_shots_before_battleship_anchors(&self) -> [(usize, usize); 3] {
         // Cruiser and Frigate discovery (pinpointing exact cells, and so
         // also disambiguating between candidate layouts) are deliberately
         // not attempted — see `refresh_cross3_entry_flags`/
@@ -730,7 +745,7 @@ impl AiPlayer {
         // (a debug-only toggle for the ordinary hunting FSM) — this is a
         // separate, higher-priority activity that only ever fires once
         // there's nothing bigger left to actually hunt.
-        if self.size_fully_found(4) && self.size_fully_found(3) {
+        if self.size_found_for_hunting(4) && self.size_fully_found(3) {
             // Try the cheap, fully-conclusive cleanup shot first — see
             // `anchored_isolation_shot`. It can resolve a Cruiser cell and
             // a Frigate cell in a single salvo whenever the heatmaps
@@ -925,13 +940,20 @@ impl AiPlayer {
             }
         }
         let any_cell = hyps.iter().fold(0u128, |m, &(c, f)| m | c | f);
+        // An identified Battleship's still-unfired cells (see
+        // `pending_battleship_cells`): hits still owed, same as unhit
+        // Frigate cells, but with a value known in advance — they never
+        // split hypotheses, so the planner can slot them in wherever a
+        // salvo has room without losing information.
+        let pending = self.pending_battleship_cells();
+        let pending_mask = pending.iter().fold(0u128, |m, &cell| m | bit(cell));
 
-        let mut pool: Vec<(usize, usize)> = Vec::new();
+        let mut pool: Vec<(usize, usize)> = pending.clone();
         let mut fillers = 0;
         for r in 0..10 {
             for c in 0..10 {
                 let b = bit((r, c));
-                if fired & b != 0 {
+                if fired & b != 0 || pending_mask & b != 0 {
                     continue;
                 }
                 if any_cell & b != 0 {
@@ -970,7 +992,7 @@ impl AiPlayer {
             let mut weighted = 0.0;
             let mut worst = 0;
             for g in groups.iter().filter(|g| g.n > 0) {
-                let hits_left = g.rem_max.div_ceil(3) as f64;
+                let hits_left = (g.rem_max + (pending_mask & !fired_after).count_ones()).div_ceil(3) as f64;
                 let estimate = if g.n == 1 {
                     hits_left
                 } else if ((g.or_c ^ g.and_c) | (g.or_f ^ g.and_f)) & !fired_after == 0 {
@@ -1009,5 +1031,54 @@ impl AiPlayer {
         } else {
             None
         }
+    }
+
+    /// Whether `size` is done as far as HUNTING goes: fully sunk, or — for
+    /// the Battleship — its exact 4 cells already identified, even if some
+    /// are still unfired (see `pending_battleship_cells`).
+    pub(crate) fn size_found_for_hunting(&self, size: usize) -> bool {
+        self.size_fully_found(size) || (size == 4 && self.battleship_identified().is_some())
+    }
+
+    /// The identified Battleship's cells that still have to be fired to
+    /// sink it. Empty once sunk or while it isn't identified yet.
+    pub(crate) fn pending_battleship_cells(&self) -> Vec<(usize, usize)> {
+        if self.size_fully_found(4) {
+            return Vec::new();
+        }
+        match self.battleship_identified() {
+            Some(cells) => cells.into_iter().filter(|&(r, c)| !self.fired[r][c]).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Fires the identified Battleship's remaining cells only in slots
+    /// that would otherwise teach nothing about any ship of size >= 2:
+    /// known-empty filler, or a refire of an already-hit Battleship cell
+    /// used as an anchor. Their "4" is known in advance, so they anchor a
+    /// bag just as well as a miss — and they have to be fired eventually
+    /// anyway, so this saves the slots spent sinking it straight away.
+    fn with_pending_battleship_cells(&self, mut shots: [(usize, usize); 3]) -> [(usize, usize); 3] {
+        let mut pending: Vec<(usize, usize)> = self.pending_battleship_cells().into_iter().filter(|cell| !shots.contains(cell)).collect();
+        if pending.is_empty() {
+            return shots;
+        }
+        let battleship = self.battleship_identified().unwrap_or_default();
+        for slot in shots.iter_mut() {
+            let Some(&next) = pending.first() else { break };
+            let (r, c) = *slot;
+            let wasted = if battleship.contains(slot) {
+                self.fired[r][c]
+            } else {
+                // The outer ring can only ever hold Submarines.
+                let inner = (INNER_LO..=INNER_HI).contains(&r) && (INNER_LO..=INNER_HI).contains(&c);
+                !inner || (self.alive_value(r, c, 2) == 0 && self.alive_value(r, c, 3) == 0)
+            };
+            if wasted {
+                *slot = next;
+                pending.remove(0);
+            }
+        }
+        shots
     }
 }

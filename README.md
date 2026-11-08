@@ -142,6 +142,23 @@ worse — a one-step estimate is too coarse to beat that search at pure
 information gathering.) See `frigate_endgame_salvo` in
 `model/ai/heatmap_ops.rs`.
 
+**Deferred Battleship cells as anchors.** Once the Battleship's exact
+4 cells are identified, its still-unfired cells are no longer fired
+straight away: their value (4) is known in advance, so firing them
+teaches nothing — but they still have to be hit to sink it. Hunting
+moves on to the Cruisers with all 3 shots, and the owed cells are
+slotted into salvos only where they cost nothing: in place of a shot
+that would teach nothing anyway (known-empty filler, an outer-ring
+cell, a refire of an already-hit Battleship cell), as tie-breaking
+fillers in the minimax disambiguation search, and as hits still owed
+in the Frigate endgame lookahead — which is what keeps them from
+piling up into an extra Battleship-only salvo at the very end (without
+that, 455 of 1000 games ended that way and the average got worse).
+Measured on a fixed 50,000-board set: 16.07 → 15.99 average salvos,
+same compute, every identified layout (Battleship included) checked
+against ground truth. See `pending_battleship_cells` and
+`with_pending_battleship_cells` in `model/ai/heatmap_ops.rs`.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that

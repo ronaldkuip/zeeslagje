@@ -626,13 +626,17 @@
             [(4, 3), (4, 4), (4, 5), (4, 6)].into_iter().collect();
         assert_eq!(identified, expected);
 
-        // choose_shots should now finish the identified ship off directly:
         // (4,3) and (4,6) are already fired (they were this salvo's real hit
-        // cells), so both still-unfired cells of the run, (4,4) and (4,5),
-        // must be among the next 3 picks.
+        // cells), so (4,4) and (4,5) are still owed to sink it. They're
+        // deferred, not fired straight away: hunting moves on to the
+        // Cruisers with all 3 shots, and the owed cells only fill slots
+        // that would otherwise teach nothing (see
+        // `with_pending_battleship_cells`).
+        let pending: std::collections::HashSet<(usize, usize)> = ai.pending_battleship_cells().into_iter().collect();
+        assert_eq!(pending, [(4, 4), (4, 5)].into_iter().collect());
+        assert_eq!(ai.current_target_size(), 3);
         let shots = ai.choose_shots();
-        assert!(shots.contains(&(4, 4)));
-        assert!(shots.contains(&(4, 5)));
+        assert!(!shots.contains(&(4, 4)) && !shots.contains(&(4, 5)), "{shots:?} spends hunting slots on cells whose value is already known");
     }
 
     #[test]
