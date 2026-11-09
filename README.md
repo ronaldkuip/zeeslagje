@@ -157,7 +157,21 @@ that, 455 of 1000 games ended that way and the average got worse).
 Measured on a fixed 50,000-board set: 16.07 → 15.99 average salvos,
 same compute, every identified layout (Battleship included) checked
 against ground truth. See `pending_battleship_cells` and
-`with_pending_battleship_cells` in `model/ai/heatmap_ops.rs`.
+`with_pending_battleship_cells` in `model/ai/heatmap_ops.rs`. Over all
+34,537,411 production boards (run_006): 16.361 → 16.269, with boards
+needing 21+ salvos nearly halved (0.235% → 0.129%) and 6% less compute.
+
+**No bag-blind shot groups.** The greedy hunt's hypothetical-miss
+folding can pick shots whose combined hit count is the same in every
+surviving layout — e.g. both possible ends C4 and F4 of a Cruiser
+already hit at D4+E4: exactly one of them hits, but the unordered bag
+can't say which, so a refire is needed later anyway. While hunting
+Cruisers or Frigates, any group of 2–3 nearby shots that each vary
+across the surviving hypotheses but whose hit count never does gets
+its last-picked cell excluded and the salvo re-picked (at most 6
+times). Measured on the fixed 50,000/20,000-board sets: 15.986 →
+15.927 and 15.976 → 15.928, about 10–15% more compute. See
+`bag_blind_cell` in `model/ai/heatmap_ops.rs`.
 
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see

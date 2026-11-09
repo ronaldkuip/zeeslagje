@@ -721,6 +721,10 @@ impl AiPlayer {
     }
 
     fn choose_shots_before_battleship_anchors(&self) -> [(usize, usize); 3] {
+        self.choose_shots_avoiding(Vec::new())
+    }
+
+    fn choose_shots_avoiding(&self, avoid_as_filler: Vec<(usize, usize)>) -> [(usize, usize); 3] {
         // Cruiser and Frigate discovery (pinpointing exact cells, and so
         // also disambiguating between candidate layouts) are deliberately
         // not attempted — see `refresh_cross3_entry_flags`/
@@ -728,7 +732,6 @@ impl AiPlayer {
         // empty here; the loop below fills all 3 slots from the ordinary
         // FSM search.
         let mut chosen: Vec<(usize, usize)> = Vec::with_capacity(3);
-        let avoid_as_filler: Vec<(usize, usize)> = Vec::new();
 
         let size = self.current_target_size();
 
@@ -897,6 +900,15 @@ impl AiPlayer {
         }
 
         let greedy = [chosen[0], chosen[1], chosen[2]];
+        if size == 2 || size == 3 {
+            if let Some(redundant) = self.bag_blind_cell(&greedy, size) {
+                if avoid_as_filler.len() < 6 {
+                    let mut avoid = avoid_as_filler.clone();
+                    avoid.push(redundant);
+                    return self.choose_shots_avoiding(avoid);
+                }
+            }
+        }
         if size == 2 {
             if let Some(better) = self.frigate_endgame_salvo(greedy) {
                 return better;
@@ -1031,6 +1043,54 @@ impl AiPlayer {
         } else {
             None
         }
+    }
+
+    /// A cell of `salvo` the bag can't attribute: some subset of 2 or 3
+    /// salvo cells, each of which is a `size`-ship cell in some surviving
+    /// hypotheses but not all, whose combined hit count is nevertheless the
+    /// same in every hypothesis (e.g. both possible ends C4/F4 of a Cruiser
+    /// already hit at D4+E4). Firing them together guarantees hits but
+    /// says nothing about which cell scored, forcing a refire later — the
+    /// greedy hunt's hypothetical-miss folding can't see that (a miss
+    /// assumed at C4 makes F4 look like a sure hit). Returns the last such
+    /// cell in pick order, so the hunt can re-pick without it.
+    fn bag_blind_cell(&self, salvo: &[(usize, usize); 3], size: usize) -> Option<(usize, usize)> {
+        const MAX_HYPOTHESES: usize = 20_000;
+        let close = |a: (usize, usize), b: (usize, usize)| a.0.abs_diff(b.0).max(a.1.abs_diff(b.1)) <= size;
+        let mut subsets: Vec<Vec<usize>> = Vec::new();
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                if close(salvo[i], salvo[j]) {
+                    subsets.push(vec![i, j]);
+                }
+            }
+        }
+        if subsets.is_empty() {
+            return None;
+        }
+        if subsets.len() >= 2 {
+            subsets.push(vec![0, 1, 2]);
+        }
+        let hyps = if size == 3 { self.consistent_cruiser_candidates() } else { self.consistent_frigate_candidates() };
+        if hyps.len() < 2 || hyps.len() > MAX_HYPOTHESES {
+            return None;
+        }
+        let varies = |cell: &(usize, usize)| {
+            let n = hyps.iter().filter(|h| h.contains(cell)).count();
+            n > 0 && n < hyps.len()
+        };
+        let varying: Vec<bool> = salvo.iter().map(varies).collect();
+        for subset in subsets {
+            if !subset.iter().all(|&i| varying[i]) {
+                continue;
+            }
+            let count = |h: &std::collections::HashSet<(usize, usize)>| subset.iter().filter(|&&i| h.contains(&salvo[i])).count();
+            let first = count(&hyps[0]);
+            if hyps.iter().all(|h| count(h) == first) {
+                return Some(salvo[*subset.last().unwrap()]);
+            }
+        }
+        None
     }
 
     /// Whether `size` is done as far as HUNTING goes: fully sunk, or — for
