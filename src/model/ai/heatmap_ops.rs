@@ -775,6 +775,29 @@ impl AiPlayer {
             return self.choose_submarine_shots(chosen, &avoid_as_filler);
         }
 
+        // The hunted size's layout already pinned down to a single
+        // hypothesis: its unfired cells are certain hits, so fire them (and
+        // any identified Battleship's pending cells) before anything else.
+        // The line FSM below never sees this cross-salvo deduction and would
+        // otherwise keep probing cells it still thinks could hold the ship.
+        if size == 2 || size == 3 {
+            for cell in self.known_unfired_cells(size) {
+                if chosen.len() < 3 && !chosen.contains(&cell) {
+                    chosen.push(cell);
+                }
+            }
+            if !chosen.is_empty() {
+                for cell in self.pending_battleship_cells() {
+                    if chosen.len() < 3 && !chosen.contains(&cell) {
+                        chosen.push(cell);
+                    }
+                }
+            }
+            if chosen.len() == 3 {
+                return [chosen[0], chosen[1], chosen[2]];
+            }
+        }
+
         let mut row_line: [usize; 10] = [0; 10];
         let mut col_line: [usize; 10] = [0; 10];
         for r in 0..10 {
@@ -1091,6 +1114,29 @@ impl AiPlayer {
             }
         }
         None
+    }
+
+    /// Unfired cells of `size`'s ships when the layout for that size is down
+    /// to a single hypothesis; empty otherwise (or when the hypothesis list
+    /// is too large to be worth checking). Frigates use the cross-reasoned
+    /// list — cheap by then, since the Cruisers are sunk. Cruisers only use
+    /// the raw list: cross-checking it against every Frigate hypothesis
+    /// mid-hunt would mean enumerating Frigate triples while the Frigates are
+    /// still wide open, roughly quadrupling solve time for ~0.1 salvo.
+    fn known_unfired_cells(&self, size: usize) -> Vec<(usize, usize)> {
+        const MAX_HYPOTHESES: usize = 20_000;
+        let raw = if size == 3 { self.consistent_cruiser_candidates() } else { self.consistent_frigate_candidates() };
+        if raw.is_empty() || raw.len() > MAX_HYPOTHESES {
+            return Vec::new();
+        }
+        let hyps = if size == 3 { raw } else { self.cross_reasoned_frigate_candidates() };
+        let distinct = Self::distinct_hypotheses(&hyps);
+        if distinct.len() != 1 {
+            return Vec::new();
+        }
+        let mut cells: Vec<(usize, usize)> = distinct[0].iter().copied().filter(|&(r, c)| !self.fired[r][c]).collect();
+        cells.sort_unstable();
+        cells
     }
 
     /// Whether `size` is done as far as HUNTING goes: fully sunk, or — for

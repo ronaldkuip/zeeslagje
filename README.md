@@ -173,6 +173,20 @@ times). Measured on the fixed 50,000/20,000-board sets: 15.986 →
 15.927 and 15.976 → 15.928, about 10–15% more compute. See
 `bag_blind_cell` in `model/ai/heatmap_ops.rs`.
 
+**Kill shots once the layout is known.** The line-wise FSM that drives
+hunting never sees cross-salvo deductions, so once the Cruiser or
+Frigate layout was already down to a single hypothesis it kept probing
+cells it still thought could hold a ship — e.g. Battleship B4–E4 with
+only C4 unfired and the last Frigate pinned to I3–I4, yet the advisor
+suggested H4 · E2 · I9. Now, while hunting size 3 or 2, if that size's
+hypotheses collapse to one layout its unfired cells (plus any pending
+Battleship cells) are fired first. Frigates use the cross-reasoned
+list (cheap by then); Cruisers only the raw list, since cross-checking
+them mid-hunt means enumerating still-open Frigate triples (~4× solve
+time for a further ~0.05 salvo). Measured on the fixed 50,000/20,000-
+board sets: 15.927 → 15.298 and 15.928 → 15.299, ~1.5× compute. See
+`known_unfired_cells` in `model/ai/heatmap_ops.rs`.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that
