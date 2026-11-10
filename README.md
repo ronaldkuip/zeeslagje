@@ -202,7 +202,7 @@ per-salvo counts complete the bag, a hash lookup. The hunt (Cruiser
 and Frigate phases) excludes every cell outside that set, and
 `with_pending_battleship_cells` treats them as free slots. A randomized
 test checks no real ship cell is ever ruled out. Measured on the fixed
-50,000/20,000-board sets: 15.298 → 14.717 and 15.299 → 14.722, ~30%
+50,000/20,000-board sets: 15.298 → 14.717 and 15.299 → 14.727, ~30%
 more single-thread compute.
 
 **Disambiguation, once hunting is done.** After every ship of size ≥2
