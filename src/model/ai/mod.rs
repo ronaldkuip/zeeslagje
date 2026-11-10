@@ -2,6 +2,7 @@ use crate::fsm_tables::*;
 use std::cell::RefCell;
 
 mod battleship;
+mod exact;
 mod fsm;
 mod heatmap_gen;
 mod heatmap_ops;
@@ -250,6 +251,9 @@ pub struct AiPlayer {
     /// `update_fsm_and_resolve` — those clear on a lock-in event that
     /// doesn't change `salvo_history.len()`, so keying alone isn't enough.
     joint_pairs_cache: RefCell<Option<(usize, Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)>)>>,
+    /// `exact::possible_ship_cells`, keyed by `salvo_history.len()` (it
+    /// depends on nothing else).
+    possible_cells_cache: RefCell<Option<(usize, u128)>>,
 }
 
 const INNER_LO: usize = 1;
@@ -288,6 +292,7 @@ impl AiPlayer {
             cruiser_candidates_cache: RefCell::new(None),
             frigate_candidates_cache: RefCell::new(None),
             joint_pairs_cache: RefCell::new(None),
+            possible_cells_cache: RefCell::new(None),
         }
     }
 
@@ -297,6 +302,23 @@ impl AiPlayer {
     /// centralized here next to the fields themselves, so a bucket module
     /// invalidating the caches doesn't need to know their exact field
     /// names. See the refactor plan's cross-dependency item #4.
+    /// Whether bag arithmetic over the whole salvo history proves that no
+    /// ship of size >= 2 can be at (r, c) — see `exact`. Outer-ring cells
+    /// always qualify.
+    pub(crate) fn provably_no_big_ship(&self, r: usize, c: usize) -> bool {
+        let key = self.salvo_history.len();
+        let cached = *self.possible_cells_cache.borrow();
+        let possible = match cached {
+            Some((k, m)) if k == key => m,
+            _ => {
+                let m = exact::possible_ship_cells(&self.salvo_history);
+                *self.possible_cells_cache.borrow_mut() = Some((key, m));
+                m
+            }
+        };
+        possible & exact::bit((r, c)) == 0
+    }
+
     pub(crate) fn invalidate_candidate_caches(&mut self) {
         *self.cruiser_candidates_cache.borrow_mut() = None;
         *self.frigate_candidates_cache.borrow_mut() = None;

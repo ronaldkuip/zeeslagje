@@ -861,6 +861,21 @@ impl AiPlayer {
         }
         let allow_refired = self.is_refire_allowed(size);
 
+        // Never hunt a cell the salvo history already proves empty of every
+        // ship of size >= 2 (see `exact`); the line FSM can't see those
+        // cross-salvo deductions and keeps scoring such cells as alive.
+        // Only from the Cruiser hunt on: during the Battleship hunt the
+        // audit found few provably-empty shots (0.3 per game), and checking
+        // there too bought ~0.007 salvo for ~10% more solve time.
+        let mut avoid_as_filler = avoid_as_filler;
+        for r in if size <= 3 { INNER_LO..=INNER_HI } else { 1..=0 } {
+            for c in INNER_LO..=INNER_HI {
+                if !self.fired[r][c] && self.provably_no_big_ship(r, c) && !avoid_as_filler.contains(&(r, c)) {
+                    avoid_as_filler.push((r, c));
+                }
+            }
+        }
+
         while chosen.len() < 3 {
             let is_first_pick = chosen.is_empty();
             // Only the first pick is allowed anywhere, including the candidate
@@ -925,7 +940,7 @@ impl AiPlayer {
         let greedy = [chosen[0], chosen[1], chosen[2]];
         if size == 2 || size == 3 {
             if let Some(redundant) = self.bag_blind_cell(&greedy, size) {
-                if avoid_as_filler.len() < 6 {
+                if avoid_as_filler.iter().filter(|&&(r, c)| !self.provably_no_big_ship(r, c)).count() < 6 {
                     let mut avoid = avoid_as_filler.clone();
                     avoid.push(redundant);
                     return self.choose_shots_avoiding(avoid);
@@ -1178,7 +1193,7 @@ impl AiPlayer {
             } else {
                 // The outer ring can only ever hold Submarines.
                 let inner = (INNER_LO..=INNER_HI).contains(&r) && (INNER_LO..=INNER_HI).contains(&c);
-                !inner || (self.alive_value(r, c, 2) == 0 && self.alive_value(r, c, 3) == 0)
+                !inner || (self.alive_value(r, c, 2) == 0 && self.alive_value(r, c, 3) == 0) || self.provably_no_big_ship(r, c)
             };
             if wasted {
                 *slot = next;

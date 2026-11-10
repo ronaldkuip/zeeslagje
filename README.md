@@ -187,6 +187,24 @@ time for a further ~0.05 salvo). Measured on the fixed 50,000/20,000-
 board sets: 15.927 → 15.298 and 15.928 → 15.299, ~1.5× compute. See
 `known_unfired_cells` in `model/ai/heatmap_ops.rs`.
 
+**Never fire at provably empty cells.** The waste auditor (below)
+showed the solver spending ~3 shots per game — mostly while hunting
+Cruisers — on cells the salvo history already proves empty of every
+ship of size >= 2: the line-wise FSM can't see deductions spanning
+several salvos. `model/ai/exact.rs` computes the exact set of cells
+that could still hold a ship, as u128 bitmasks: per class, a placement
+must match every bag's count for that class; while the Battleship and
+Cruisers are down to a few placements each, those are branched on so
+the no-touching rule between classes prunes too (nothing can lie next
+to an identified Battleship). Frigate triples (112,872 of them) are
+never enumerated: each window looks for partners whose packed
+per-salvo counts complete the bag, a hash lookup. The hunt (Cruiser
+and Frigate phases) excludes every cell outside that set, and
+`with_pending_battleship_cells` treats them as free slots. A randomized
+test checks no real ship cell is ever ruled out. Measured on the fixed
+50,000/20,000-board sets: 15.298 → 14.717 and 15.299 → 14.722, ~30%
+more single-thread compute.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that
@@ -328,6 +346,25 @@ The `Game` class exposed to JS, grouped by purpose (see
 | Toggles | `set_refire_allowed(size, bool)`, `is_refire_allowed(size)`, `set_freeze_before_frigates(bool)`, `is_freeze_before_frigates()` |
 
 Flat index convention throughout: `row * 10 + col`, both 0-based.
+
+## Waste auditor
+
+`src/bin/audit_waste.rs` replays the AI on boards from a batch file and
+classifies every shot against an independent, first-principles model
+of what was knowable at that moment (every placement of every class
+consistent with the bags, cross-checked for touching when small enough;
+sunk messages unused, so it never knows more than the AI). Each shot is
+`kill` (certain ship cell), `probe` (uncertain), `dead` / `dead-joint`
+(provably empty, per class / only via the no-touching rule between
+classes), `outer` (Submarine-only ring — waste in the Submarine-free
+batch format, not in a real game), or a refire whose value was still
+uncertain / already certain. It also reports bag-blind salvos and the
+slack after the layout became unique, and writes the most wasteful
+games, shot by shot, to `audit_examples.txt`.
+
+```bash
+cargo run --release --bin audit_waste -- boards.txt 2000 8   # file, games, threads
+```
 
 ## Cruiser/Frigate identifiability measurement
 
