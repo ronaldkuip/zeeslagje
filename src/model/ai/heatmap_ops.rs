@@ -180,7 +180,7 @@ impl AiPlayer {
             return None;
         }
 
-        let mut best: Option<([(usize, usize); 3], (usize, usize))> = None;
+        let mut best: Option<([(usize, usize); 3], (usize, usize, std::cmp::Reverse<usize>))> = None;
         for i in 0..pool.len() {
             for j in (i + 1)..pool.len() {
                 for k in (j + 1)..pool.len() {
@@ -196,9 +196,16 @@ impl AiPlayer {
                         buckets[hits] += 1;
                     }
                     let worst = *buckets.iter().max().unwrap();
+                    // Expected number of hypotheses left (times `total`):
+                    // breaks minimax ties toward salvos that more often
+                    // settle it outright — e.g. 4 layouts {D4|E5}x{E4|D5}:
+                    // D4+E4+D5 always leaves 2 (E4/D5 is bag-blind), while
+                    // D4+E4+filler resolves half the time, same worst case.
+                    let spread: usize = buckets.iter().map(|b| b * b).sum();
                     let owed = salvo.iter().filter(|cell| pending.contains(cell)).count();
-                    if best.as_ref().is_none_or(|(_, (best_worst, best_owed))| worst < *best_worst || (worst == *best_worst && owed > *best_owed)) {
-                        best = Some((salvo, (worst, owed)));
+                    let score = (worst, spread, std::cmp::Reverse(owed));
+                    if best.as_ref().is_none_or(|(_, best_score)| score < *best_score) {
+                        best = Some((salvo, score));
                     }
                 }
             }
@@ -1201,5 +1208,30 @@ impl AiPlayer {
             }
         }
         shots
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Last Frigate somewhere in the D4/E4/D5/E5 square, all four cells
+    /// already fired: one of {D4, E5} plus one of {E4, D5}. Firing E4 and D5
+    /// together is bag-blind (exactly one of them always hits), so the
+    /// refire must not include both; D4+E4(+filler) resolves half the time.
+    #[test]
+    fn disambiguation_avoids_bag_blind_refire_pair() {
+        let (d4, e4, d5, e5) = ((3, 3), (3, 4), (4, 3), (4, 4));
+        let mut ai = AiPlayer::new();
+        for &(r, c) in &[d4, e4, d5, e5] {
+            ai.fired[r][c] = true;
+        }
+        let set = |a: (usize, usize), b: (usize, usize)| [a, b].into_iter().collect::<std::collections::HashSet<_>>();
+        let candidates = vec![set(d4, e4), set(d4, d5), set(e5, e4), set(e5, d5)];
+        let salvo = ai.disambiguation_shots(&candidates, true, true).expect("a refire salvo");
+        let informative = salvo.iter().filter(|cell| [d4, e4, d5, e5].contains(cell)).count();
+        assert!(!(salvo.contains(&e4) && salvo.contains(&d5)), "E4+D5 together is bag-blind: {salvo:?}");
+        assert!(!(salvo.contains(&d4) && salvo.contains(&e5)), "D4+E5 together is bag-blind: {salvo:?}");
+        assert_eq!(informative, 2, "two non-blind refires resolve half the time: {salvo:?}");
     }
 }

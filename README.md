@@ -172,6 +172,13 @@ its last-picked cell excluded and the salvo re-picked (at most 6
 times). Measured on the fixed 50,000/20,000-board sets: 15.986 →
 15.927 and 15.976 → 15.928, about 10–15% more compute. See
 `bag_blind_cell` in `model/ai/heatmap_ops.rs`.
+The same trap existed in the minimax disambiguation search, which only
+compared worst cases: with the last Frigate in a D4/E4/D5/E5 square
+({D4|E5} x {E4|D5}), D4+E4+D5 and D4+E4+filler both leave at most 2
+layouts, and the first one found won — but E4+D5 is bag-blind, so it
+always leaves 2, while D4+E4 settles it half the time. Ties are now
+broken by the expected number of layouts left (sum of squared bucket
+sizes): 14.717 → 14.681 on the 50,000-board set.
 
 **Kill shots once the layout is known.** The line-wise FSM that drives
 hunting never sees cross-salvo deductions, so once the Cruiser or
