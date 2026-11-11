@@ -207,7 +207,50 @@ impl AiPlayer {
         computed
     }
 
+    /// Cells a Cruiser/Frigate window may still run through, as a mask —
+    /// the per-cell filters the enumerations below share: not a confirmed
+    /// Battleship cell, and still alive for that size in the FSM
+    /// (`alive_value(_, _, size) == 0` is its live, comprehensive "provably
+    /// not a cell of this size" signal — unlike the aggregate salvo-history
+    /// check, it also sees cells eliminated via adjacency/propagation that
+    /// were never individually fired). Frigates additionally exclude the
+    /// locked-in Cruisers and everything touching them.
+    fn window_cells_allowed(&self, size: usize) -> exact::Mask {
+        let confirmed_battleship = self.cells_confirmed_battleship();
+        let cruiser_exclusion = if size == 2 { Some(self.cells_confirmed_cruiser_or_adjacent()) } else { None };
+        let mut allowed = 0;
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=INNER_HI {
+                let excluded = confirmed_battleship[r][c] || cruiser_exclusion.as_ref().is_some_and(|x| x[r][c]) || self.alive_value(r, c, size) == 0;
+                if !excluded {
+                    allowed |= exact::bit((r, c));
+                }
+            }
+        }
+        allowed
+    }
+
+    /// Placements of `class` consistent with every bag, through allowed
+    /// cells only and covering every cell in `must` — via the signature
+    /// index in `exact.rs`. None when the history is too long to index
+    /// (see `exact::MAX_SALVOS`); the callers then fall back to the
+    /// original nested-loop enumeration, kept below as `*_slow`.
+    fn indexed_candidates(&self, class: &'static exact::Class, must: &std::collections::HashSet<(usize, usize)>) -> Option<Vec<std::collections::HashSet<(usize, usize)>>> {
+        let index = exact::Index::new(class, &self.salvo_history)?;
+        let allowed = class.windows_within(self.window_cells_allowed(class.value));
+        let must_mask = must.iter().fold(0, |m, &cell| m | exact::bit(cell));
+        let placements = index.placements(allowed, usize::MAX)?;
+        Some(placements.into_iter().filter(|&p| p & must_mask == must_mask).map(|p| exact::cells(p).collect()).collect())
+    }
+
     fn consistent_cruiser_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        match self.indexed_candidates(exact::cruisers(), &self.cells_confirmed_individually_cruiser()) {
+            Some(out) => out,
+            None => self.consistent_cruiser_candidates_slow(),
+        }
+    }
+
+    fn consistent_cruiser_candidates_slow(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let confirmed_battleship = self.cells_confirmed_battleship();
         let confirmed_cruiser_cells = self.cells_confirmed_individually_cruiser();
         let windows: Vec<[(usize, usize); 3]> = Self::all_cruiser_windows()
@@ -277,6 +320,13 @@ impl AiPlayer {
     }
 
     fn consistent_frigate_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        match self.indexed_candidates(exact::frigates(), &self.cells_confirmed_individually_frigate()) {
+            Some(out) => out,
+            None => self.consistent_frigate_candidates_slow(),
+        }
+    }
+
+    fn consistent_frigate_candidates_slow(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
         let windows = Self::all_frigate_windows();
         let possible = Self::cells_possibly_size(&self.salvo_history, 2);
         let confirmed_battleship = self.cells_confirmed_battleship();

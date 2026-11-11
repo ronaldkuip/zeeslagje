@@ -212,6 +212,21 @@ test checks no real ship cell is ever ruled out. Measured on the fixed
 50,000/20,000-board sets: 15.298 → 14.717 and 15.299 → 14.727, ~30%
 more single-thread compute.
 
+**Signature index for placements.** Enumerating the consistent Cruiser
+pairs and Frigate triples used to be nested loops over windows with a
+pass over the whole salvo history per candidate (up to 112,872 Frigate
+triples), and together with `exact.rs` that was ~55% of solve time.
+`exact::Index` now packs each window's per-salvo hit counts into one
+u128 (a hex digit per salvo), so the partner that completes a bag is a
+signature subtraction plus a binary search; and since a class has at
+most 112 windows, "windows with that signature", "windows apart from
+this one" and "windows inside the allowed cells" are window-set u128s —
+a candidate partner set is a few ANDs. The same index drives the
+provably-empty-cell check. Output is unchanged (a brute-force
+equivalence test checks that), results are bit-identical, and the
+single-thread solve time dropped ~36%. Histories longer than 32 salvos
+don't fit a signature and fall back to the original loops.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that
