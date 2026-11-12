@@ -243,7 +243,7 @@ impl AiPlayer {
     /// (see `exact::MAX_SALVOS`); the callers then fall back to the
     /// original nested-loop enumeration, kept below as `*_slow`.
     fn indexed_candidates(&self, class: &'static exact::Class, must: &std::collections::HashSet<(usize, usize)>) -> Option<Vec<exact::Mask>> {
-        let index = exact::Index::new(class, &self.salvo_history)?;
+        let index = exact::Index::new(class, &self.salvo_history, self.sunk_events_if_tracked())?;
         let allowed = class.windows_within(self.window_cells_allowed(class.value));
         let must_mask = must.iter().fold(0, |m, &cell| m | exact::bit(cell));
         let placements = index.placements(allowed, usize::MAX)?;

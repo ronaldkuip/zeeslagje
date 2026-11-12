@@ -258,6 +258,25 @@ identification, heatmaps — reads the masks; cell sets are only built
 for tests. Results are bit-identical; single-thread solve time 13.0 →
 7.7 s per 5,000 boards (1.6× the pre-planner solver, for −0.6 salvos).
 
+**Sunk reports as evidence.** The "Cruiser sunk" message was only used
+to switch hunting phases; the exact model ignored it. It carries one
+more count per salvo and class: the number of a layout's windows that
+became fully fired in that salvo must equal the number of sunk reports
+of that size the salvo brought — and the silence is the valuable half:
+a layout in which this salvo would have completed a ship, when nothing
+was reported sunk, is dead. That is exactly the "which of the two cells
+was the hit" ambiguity the end-of-game refires were spent on. Measured
+first with the auditor (`SUNK=1`): about one shot per game went to
+cells the reports had already settled, and 8% of games spent a salvo
+after the layout was fully determined. Implemented as a second packed
+signature per window ("completed at salvo t") in `exact::Index`, with
+the recorded reports as the target, so every list and both planners
+got it at once. The AI only trusts the reports when every salvo came
+with them (`apply_salvo_and_sunk`, which is what `Game::fire` uses);
+histories fed through the bare `apply_salvo` keep the bags-only model.
+20,000-board set: 14.074 → 13.735; 50,000-board set: 14.082 → 13.735;
++15% single-thread time; auditor slack-after-known 8.3% → 0.3%.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that

@@ -265,10 +265,7 @@ impl Game {
         let before_ruled_out = self.ai.cross3_ruled_out_snapshot();
 
         let values_arr: [usize; 3] = [results[0], results[1], results[2]];
-        self.ai.apply_salvo(cells_to_fire, values_arr);
-        for size in sunk_sizes {
-            self.ai.mark_sunk(size);
-        }
+        self.ai.apply_salvo_and_sunk(cells_to_fire, values_arr, &sunk_sizes);
         for (r, c) in extra_refire_cells {
             self.ai.mark_disambiguation_extra_refire_used(r, c);
         }

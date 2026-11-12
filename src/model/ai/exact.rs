@@ -10,31 +10,40 @@
 //!    cells the bags had already proven empty.
 //! 2. `Index::placements`: enumerate every placement of a class (2 Cruiser
 //!    windows, 3 Frigate windows, no two touching) consistent with every
-//!    bag — what `consistent_cruiser_candidates`/`consistent_frigate_
-//!    candidates` need, without the O(windows^3) nested loops and a
-//!    per-triple pass over the history.
+//!    bag — what `cruiser_masks`/`frigate_masks` need, without the
+//!    O(windows^3) nested loops and a per-triple pass over the history.
 //!
 //! A placement is consistent with a salvo iff the number of its cells
-//! among the 3 fired equals the number of that class's value in the bag.
-//! Each window's per-salvo counts are packed into one u128 "signature"
-//! (one hex digit per salvo), so "the partner that completes the bag" is
-//! a signature subtraction plus a lookup; and because every class has at
-//! most 112 windows, the windows sharing a signature, the windows apart
-//! from a given one, and the windows allowed by a cell mask are all
-//! window-set u128s — a candidate partner set is a few ANDs.
+//! among the 3 fired equals the number of that class's value in the bag,
+//! and — when the sunk reports are tracked (see `AiPlayer::apply_salvo_
+//! and_sunk`) — the number of its windows that became fully fired in that
+//! salvo equals the number of "size-s sunk" reports it brought. The
+//! silence matters as much as the report: a layout in which this salvo
+//! would have completed a ship, when no ship was reported sunk, is dead.
+//!
+//! Each window's per-salvo counts are packed into u128 "signatures" (one
+//! hex digit per salvo; one signature for hits, one for completions), so
+//! "the partner that completes the bag" is a signature subtraction plus a
+//! lookup; and because every class has at most 112 windows, the windows
+//! sharing a signature, the windows apart from a given one, and the
+//! windows allowed by a cell mask are all window-set u128s — a candidate
+//! partner set is a few ANDs.
 //!
 //! For `possible_ship_cells`, while the Battleship and the Cruisers are
 //! down to a few placements each, those are branched on explicitly so the
 //! no-touching rule BETWEEN classes prunes too (nothing can lie next to an
 //! identified Battleship). Sound by construction: the true layout always
-//! satisfies every salvo and the touching rule, so it is never filtered
-//! out — `never_rules_out_a_real_ship_cell` checks that at random.
+//! satisfies every salvo, every sunk report and the touching rule, so it
+//! is never filtered out — `never_rules_out_a_real_ship_cell` checks that
+//! at random.
 
 use std::sync::OnceLock;
 
 pub(crate) type Mask = u128;
 /// A set of window indices of one class (at most 112 windows).
 type WSet = u128;
+/// Packed per-salvo counts: (cells hit, windows completed).
+type Sig = (u128, u128);
 
 const CELLS: Mask = (1u128 << 100) - 1;
 
@@ -84,9 +93,13 @@ pub(crate) const MAX_SALVOS: usize = 128 / FIELD_BITS;
 const GUARD: u128 = 0x8888_8888_8888_8888_8888_8888_8888_8888;
 
 /// `n - used`, digit by digit, or None if any digit would go negative.
-fn remainder(n: u128, used: u128) -> Option<u128> {
+fn remainder1(n: u128, used: u128) -> Option<u128> {
     let d = (n | GUARD).wrapping_sub(used);
     (d & GUARD == GUARD).then_some(d & !GUARD)
+}
+
+fn remainder(n: Sig, used: Sig) -> Option<Sig> {
+    Some((remainder1(n.0, used.0)?, remainder1(n.1, used.1)?))
 }
 
 /// One ship class: its windows, each window's halo (the window plus every
@@ -153,33 +166,54 @@ fn above(i: usize) -> WSet {
     !0u128 << 1 << i
 }
 
-/// One class indexed against one salvo history: each window's signature,
-/// the class's target signature `n` (the bag counts of its value), and a
-/// sorted (signature, window-set) table for partner lookups.
+/// A salvo as the AI records it: 3 coordinates and the unordered bag.
+pub(crate) type Salvo = ([(usize, usize); 3], [usize; 3]);
+/// A sunk report: (index of the salvo that sank it, ship size).
+pub(crate) type SunkEvent = (usize, usize);
+
+/// One class indexed against one salvo history: each window's signatures,
+/// the class's target signatures `n` (the bag counts of its value, and
+/// its sunk reports per salvo), and a sorted (signature, window-set)
+/// table for partner lookups. With `sunk == None` the completion half is
+/// all zeros on both sides and only the bags constrain.
 pub(crate) struct Index {
     class: &'static Class,
-    sig: Vec<u128>,
-    n: u128,
-    table: Vec<(u128, WSet)>,
+    sig: Vec<Sig>,
+    n: Sig,
+    table: Vec<(Sig, WSet)>,
 }
 
 impl Index {
     /// None once the history no longer fits a signature (see `MAX_SALVOS`).
-    pub(crate) fn new(class: &'static Class, history: &[([(usize, usize); 3], [usize; 3])]) -> Option<Index> {
+    pub(crate) fn new(class: &'static Class, history: &[Salvo], sunk: Option<&[SunkEvent]>) -> Option<Index> {
         if history.len() > MAX_SALVOS {
             return None;
         }
-        let mut n = 0u128;
-        let mut sig = vec![0u128; class.windows.len()];
+        let mut n: Sig = (0, 0);
+        let mut sig = vec![(0u128, 0u128); class.windows.len()];
+        let mut fired: Mask = 0;
         for (i, (coords, values)) in history.iter().enumerate() {
             let shift = i * FIELD_BITS;
-            n |= (values.iter().filter(|&&v| v == class.value).count() as u128) << shift;
+            n.0 |= (values.iter().filter(|&&v| v == class.value).count() as u128) << shift;
             let salvo = coords.iter().fold(0, |m, &cell| m | bit(cell));
+            let before = fired;
+            fired |= salvo;
             for (s, &w) in sig.iter_mut().zip(&class.windows) {
-                *s |= ((w & salvo).count_ones() as u128) << shift;
+                s.0 |= ((w & salvo).count_ones() as u128) << shift;
+                // Completed in this salvo: fully fired now, not before.
+                if sunk.is_some() && w & !fired == 0 && w & !before != 0 {
+                    s.1 |= 1u128 << shift;
+                }
             }
         }
-        let mut table: Vec<(u128, WSet)> = Vec::new();
+        if let Some(events) = sunk {
+            for &(t, size) in events {
+                if size == class.value && t < history.len() {
+                    n.1 += 1u128 << (t * FIELD_BITS);
+                }
+            }
+        }
+        let mut table: Vec<(Sig, WSet)> = Vec::new();
         for (i, &s) in sig.iter().enumerate() {
             match table.binary_search_by_key(&s, |&(k, _)| k) {
                 Ok(pos) => table[pos].1 |= 1u128 << i,
@@ -189,7 +223,7 @@ impl Index {
         Some(Index { class, sig, n, table })
     }
 
-    fn with_sig(&self, s: u128) -> WSet {
+    fn with_sig(&self, s: Sig) -> WSet {
         self.table.binary_search_by_key(&s, |&(k, _)| k).map_or(0, |pos| self.table[pos].1)
     }
 
@@ -206,7 +240,7 @@ impl Index {
             }
             let Some(rest) = remainder(self.n, self.sig[a]) else { continue };
             let found = match self.class.count {
-                1 => rest == 0,
+                1 => rest == (0, 0),
                 2 => self.with_sig(rest) & allowed & apart[a] != 0,
                 _ => set_iter(allowed & apart[a]).any(|b| remainder(rest, self.sig[b]).is_some_and(|last| self.with_sig(last) & allowed & apart[a] & apart[b] != 0)),
             };
@@ -227,7 +261,7 @@ impl Index {
             let Some(rest) = remainder(self.n, self.sig[a]) else { continue };
             match self.class.count {
                 1 => {
-                    if rest == 0 {
+                    if rest == (0, 0) {
                         out.push(ws[a]);
                     }
                 }
@@ -286,12 +320,13 @@ fn explore(indexes: &[Index], idx: usize, forbidden: Mask) -> Option<Mask> {
     Some(possible)
 }
 
-/// Cells that could still hold a ship of size >= 2 given `history`. With
-/// more than `MAX_SALVOS` salvos it gives up and reports every cell as
-/// possible (never wrong, just no deduction) — only reachable in long
-/// manual games, never in the 30-salvo-capped batch runs.
-pub(crate) fn possible_ship_cells(history: &[([(usize, usize); 3], [usize; 3])]) -> Mask {
-    let Some(indexes) = classes().iter().map(|c| Index::new(c, history)).collect::<Option<Vec<_>>>() else {
+/// Cells that could still hold a ship of size >= 2 given `history` (and
+/// the sunk reports, when tracked). With more than `MAX_SALVOS` salvos it
+/// gives up and reports every cell as possible (never wrong, just no
+/// deduction) — only reachable in long manual games, never in the
+/// 30-salvo-capped batch runs.
+pub(crate) fn possible_ship_cells(history: &[Salvo], sunk: Option<&[SunkEvent]>) -> Mask {
+    let Some(indexes) = classes().iter().map(|c| Index::new(c, history, sunk)).collect::<Option<Vec<_>>>() else {
         return !0;
     };
     match explore(&indexes, 0, 0) {
@@ -343,66 +378,75 @@ pub(crate) mod tests {
         }
     }
 
-    /// A random salvo (3 distinct cells anywhere) and its bag for `ships`.
-    pub(crate) fn random_salvo(rng: &mut Rng, ships: &[(usize, Mask)]) -> ([(usize, usize); 3], [usize; 3]) {
-        let mut cells = Vec::new();
-        while cells.len() < 3 {
-            let cell = (rng.next(10), rng.next(10));
-            if !cells.contains(&cell) {
-                cells.push(cell);
+    /// A random game of `n` salvos (3 distinct cells anywhere, refires
+    /// included) against `ships`: the history and the sunk reports exactly
+    /// as `Game::fire` would produce them.
+    pub(crate) fn random_game(rng: &mut Rng, ships: &[(usize, Mask)], n: usize) -> (Vec<Salvo>, Vec<SunkEvent>) {
+        let mut history = Vec::new();
+        let mut sunk = Vec::new();
+        let mut fired: Mask = 0;
+        for t in 0..n {
+            let mut cells = Vec::new();
+            while cells.len() < 3 {
+                let cell = (rng.next(10), rng.next(10));
+                if !cells.contains(&cell) {
+                    cells.push(cell);
+                }
+            }
+            let coords = [cells[0], cells[1], cells[2]];
+            let value = |cell| ships.iter().find(|&&(_, w)| w & bit(cell) != 0).map_or(0, |&(v, _)| v);
+            history.push((coords, [value(coords[0]), value(coords[1]), value(coords[2])]));
+            let before = fired;
+            fired |= coords.iter().fold(0, |m, &cell| m | bit(cell));
+            for &(v, w) in ships {
+                if w & !fired == 0 && w & !before != 0 {
+                    sunk.push((t, v));
+                }
             }
         }
-        let coords = [cells[0], cells[1], cells[2]];
-        let value = |cell| ships.iter().find(|&&(_, w)| w & bit(cell) != 0).map_or(0, |&(v, _)| v);
-        (coords, [value(coords[0]), value(coords[1]), value(coords[2])])
+        (history, sunk)
     }
 
     /// Soundness: no true ship cell is ever reported impossible, whatever
-    /// the salvos (random cells, refires included).
+    /// the salvos, with and without the sunk reports.
     #[test]
     fn never_rules_out_a_real_ship_cell() {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        for _ in 0..400 {
+        for game in 0..400 {
             let ships = random_layout(&mut rng);
             let truth: Mask = ships.iter().fold(0, |m, &(_, w)| m | w);
-            let mut history = Vec::new();
-            for _ in 0..30 {
-                history.push(random_salvo(&mut rng, &ships));
-                let possible = possible_ship_cells(&history);
-                assert_eq!(truth & !possible, 0, "a real ship cell was ruled out after {} salvos", history.len());
+            let (history, sunk) = random_game(&mut rng, &ships, 30);
+            for len in 1..=history.len() {
+                let events: Vec<SunkEvent> = sunk.iter().copied().filter(|&(t, _)| t < len).collect();
+                let with = possible_ship_cells(&history[..len], Some(&events));
+                let without = possible_ship_cells(&history[..len], None);
+                assert_eq!(truth & !with, 0, "game {game}: a real ship cell was ruled out (with sunk) after {len} salvos");
+                assert_eq!(truth & !without, 0, "game {game}: a real ship cell was ruled out (bags only) after {len} salvos");
+                assert_eq!(with & !without, 0, "game {game}: the sunk reports can only narrow, never widen");
             }
         }
     }
 
     /// `Index::placements` against brute force over every window
-    /// combination with a per-salvo recount.
+    /// combination with a per-salvo recount, with and without the sunk
+    /// reports.
     #[test]
     fn placements_match_brute_force() {
         let mut rng = Rng(0x5DEE_CE66_D1CE_5EED);
         for _ in 0..150 {
             let ships = random_layout(&mut rng);
-            let mut history = Vec::new();
-            for _ in 0..rng.next(12) + 1 {
-                history.push(random_salvo(&mut rng, &ships));
-            }
+            let n = rng.next(12) + 1;
+            let (history, sunk) = random_game(&mut rng, &ships, n);
             for class in classes() {
-                let ix = Index::new(class, &history).unwrap();
-                let fast = ix.placements(!0, usize::MAX).unwrap();
                 let ws = &class.windows;
-                let consistent = |p: Mask| {
-                    history.iter().all(|(coords, values)| {
-                        let fired = coords.iter().fold(0, |m, &cell| m | bit(cell));
-                        (p & fired).count_ones() as usize == values.iter().filter(|&&v| v == class.value).count()
-                    })
-                };
-                let mut slow = Vec::new();
+                let mut all: Vec<Mask> = Vec::new();
                 for a in 0..ws.len() {
                     match class.count {
-                        1 => slow.push(ws[a]),
+                        1 => all.push(ws[a]),
                         2 => {
                             for b in (a + 1)..ws.len() {
                                 if ws[b] & class.halos[a] == 0 {
-                                    slow.push(ws[a] | ws[b]);
+                                    all.push(ws[a] | ws[b]);
                                 }
                             }
                         }
@@ -413,15 +457,33 @@ pub(crate) mod tests {
                                 }
                                 for c in (b + 1)..ws.len() {
                                     if ws[c] & (class.halos[a] | class.halos[b]) == 0 {
-                                        slow.push(ws[a] | ws[b] | ws[c]);
+                                        all.push(ws[a] | ws[b] | ws[c]);
                                     }
                                 }
                             }
                         }
                     }
                 }
-                slow.retain(|&p| consistent(p));
-                assert_eq!(fast, slow, "class {} after {} salvos", class.value, history.len());
+                let bags_ok = |p: Mask| {
+                    history.iter().all(|(coords, values)| {
+                        let s = coords.iter().fold(0, |m, &cell| m | bit(cell));
+                        (p & s).count_ones() as usize == values.iter().filter(|&&v| v == class.value).count()
+                    })
+                };
+                let sunk_ok = |p: Mask| {
+                    let mut fired: Mask = 0;
+                    history.iter().enumerate().all(|(t, (coords, _))| {
+                        let before = fired;
+                        fired |= coords.iter().fold(0, |m, &cell| m | bit(cell));
+                        let completed = ws.iter().filter(|&&w| p & w == w && w & !fired == 0 && w & !before != 0).count();
+                        completed == sunk.iter().filter(|&&(st, v)| st == t && v == class.value).count()
+                    })
+                };
+                for (events, check) in [(None, false), (Some(sunk.as_slice()), true)] {
+                    let fast = Index::new(class, &history, events).unwrap().placements(!0, usize::MAX).unwrap();
+                    let slow: Vec<Mask> = all.iter().copied().filter(|&p| bags_ok(p) && (!check || sunk_ok(p))).collect();
+                    assert_eq!(fast, slow, "class {} after {} salvos, sunk tracked: {check}", class.value, history.len());
+                }
             }
         }
     }

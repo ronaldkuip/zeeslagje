@@ -202,6 +202,13 @@ pub struct AiPlayer {
     /// cells hold that ship size), and skipping it would understate how
     /// much is actually known.
     salvo_history: Vec<([(usize, usize); 3], [usize; 3])>,
+    /// Sunk reports as (salvo index, size), recorded by
+    /// `apply_salvo_and_sunk`. Only trusted — see `sunk_events_if_tracked`
+    /// — when every salvo so far came through that method, so a history
+    /// fed through the bare `apply_salvo` (most unit tests) never has
+    /// layouts ruled out for reports it never received.
+    sunk_events: Vec<exact::SunkEvent>,
+    sunk_tracked_salvos: usize,
     /// The Cruisers' exact 6-cell layout, once `update_fsm_and_resolve` has
     /// locked it in — `None` until then. Unlike the old always-automatic
     /// elimination this replaced, this is only ever set by that explicit,
@@ -289,6 +296,8 @@ impl AiPlayer {
             refire_allowed: [false; 5],
             freeze_before_frigates: false,
             salvo_history: Vec::new(),
+            sunk_events: Vec::new(),
+            sunk_tracked_salvos: 0,
             cruiser_candidates_cache: RefCell::new(None),
             frigate_candidates_cache: RefCell::new(None),
             joint_pairs_cache: RefCell::new(None),
@@ -311,12 +320,38 @@ impl AiPlayer {
         let possible = match cached {
             Some((k, m)) if k == key => m,
             _ => {
-                let m = exact::possible_ship_cells(&self.salvo_history);
+                let m = exact::possible_ship_cells(&self.salvo_history, self.sunk_events_if_tracked());
                 *self.possible_cells_cache.borrow_mut() = Some((key, m));
                 m
             }
         };
         possible & exact::bit((r, c)) == 0
+    }
+
+    /// The sunk reports, if every salvo was applied with them (see
+    /// `apply_salvo_and_sunk`); None means "bags only".
+    pub(crate) fn sunk_events_if_tracked(&self) -> Option<&[exact::SunkEvent]> {
+        (self.sunk_tracked_salvos == self.salvo_history.len()).then_some(self.sunk_events.as_slice())
+    }
+
+    /// `apply_salvo` plus the sunk reports that salvo brought (ship sizes,
+    /// as `Game::fire` collects them) — the one entry point the game uses,
+    /// so the exact model can count on the reports being complete. The
+    /// reports are recorded before `mark_sunk` runs, and the candidate
+    /// caches cleared, so nothing computed in between sees a history whose
+    /// last salvo lacks its reports.
+    pub fn apply_salvo_and_sunk(&mut self, coords: [(usize, usize); 3], values: [usize; 3], sunk_sizes: &[usize]) {
+        self.apply_salvo(coords, values);
+        let t = self.salvo_history.len() - 1;
+        for &size in sunk_sizes {
+            self.sunk_events.push((t, size));
+        }
+        self.sunk_tracked_salvos += 1;
+        self.invalidate_candidate_caches();
+        *self.possible_cells_cache.borrow_mut() = None;
+        for &size in sunk_sizes {
+            self.mark_sunk(size);
+        }
     }
 
     pub(crate) fn invalidate_candidate_caches(&mut self) {
