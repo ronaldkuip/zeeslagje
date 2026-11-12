@@ -139,13 +139,13 @@ impl AiPlayer {
     /// one size down.
     fn cells_confirmed_cruiser_or_adjacent(&self) -> [[bool; 10]; 10] {
         let mut out = [[false; 10]; 10];
-        let candidates = self.consistent_cruiser_candidates();
         let real: Option<Vec<(usize, usize)>> = if let Some(locked) = &self.cruiser_layout_locked {
             Some(locked.clone())
-        } else if candidates.len() == 1 {
-            Some(candidates[0].iter().copied().collect())
         } else {
-            None
+            match self.cruiser_masks().as_slice() {
+                [only] => Some(exact::cells(*only).collect()),
+                _ => None,
+            }
         };
         if let Some(cells) = real {
             for &(r, c) in &cells {
@@ -195,7 +195,7 @@ impl AiPlayer {
     /// enough (`consistent_frigate_candidates` one size down even more so)
     /// that recomputing it on every one of the several independent JSON
     /// accessors that call it per game state would otherwise be wasteful.
-    pub(crate) fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+    pub(crate) fn cruiser_masks(&self) -> Vec<exact::Mask> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.cruiser_candidates_cache.borrow().as_ref() {
             if *cached_key == key {
@@ -205,6 +205,13 @@ impl AiPlayer {
         let computed = self.consistent_cruiser_candidates_uncached();
         *self.cruiser_candidates_cache.borrow_mut() = Some((key, computed.clone()));
         computed
+    }
+
+    /// `cruiser_masks` as cell sets — for tests that want to iterate
+    /// cells; everything on the solve path reads the masks.
+    #[cfg(test)]
+    pub(crate) fn consistent_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        self.cruiser_masks().into_iter().map(|m| exact::cells(m).collect()).collect()
     }
 
     /// Cells a Cruiser/Frigate window may still run through, as a mask —
@@ -235,18 +242,22 @@ impl AiPlayer {
     /// index in `exact.rs`. None when the history is too long to index
     /// (see `exact::MAX_SALVOS`); the callers then fall back to the
     /// original nested-loop enumeration, kept below as `*_slow`.
-    fn indexed_candidates(&self, class: &'static exact::Class, must: &std::collections::HashSet<(usize, usize)>) -> Option<Vec<std::collections::HashSet<(usize, usize)>>> {
+    fn indexed_candidates(&self, class: &'static exact::Class, must: &std::collections::HashSet<(usize, usize)>) -> Option<Vec<exact::Mask>> {
         let index = exact::Index::new(class, &self.salvo_history)?;
         let allowed = class.windows_within(self.window_cells_allowed(class.value));
         let must_mask = must.iter().fold(0, |m, &cell| m | exact::bit(cell));
         let placements = index.placements(allowed, usize::MAX)?;
-        Some(placements.into_iter().filter(|&p| p & must_mask == must_mask).map(|p| exact::cells(p).collect()).collect())
+        Some(placements.into_iter().filter(|&p| p & must_mask == must_mask).collect())
     }
 
-    fn consistent_cruiser_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+    fn mask_of(cells: &std::collections::HashSet<(usize, usize)>) -> exact::Mask {
+        cells.iter().fold(0, |m, &cell| m | exact::bit(cell))
+    }
+
+    fn consistent_cruiser_candidates_uncached(&self) -> Vec<exact::Mask> {
         match self.indexed_candidates(exact::cruisers(), &self.cells_confirmed_individually_cruiser()) {
             Some(out) => out,
-            None => self.consistent_cruiser_candidates_slow(),
+            None => self.consistent_cruiser_candidates_slow().iter().map(Self::mask_of).collect(),
         }
     }
 
@@ -307,7 +318,7 @@ impl AiPlayer {
     /// `consistent_cruiser_candidates`, including the same "depends on
     /// `cells_confirmed_individually_frigate` too, but that never
     /// invalidates the cache on its own" reasoning.
-    pub(crate) fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+    pub(crate) fn frigate_masks(&self) -> Vec<exact::Mask> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.frigate_candidates_cache.borrow().as_ref() {
             if *cached_key == key {
@@ -319,10 +330,16 @@ impl AiPlayer {
         computed
     }
 
-    fn consistent_frigate_candidates_uncached(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+    /// See `consistent_cruiser_candidates`.
+    #[cfg(test)]
+    pub(crate) fn consistent_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
+        self.frigate_masks().into_iter().map(|m| exact::cells(m).collect()).collect()
+    }
+
+    fn consistent_frigate_candidates_uncached(&self) -> Vec<exact::Mask> {
         match self.indexed_candidates(exact::frigates(), &self.cells_confirmed_individually_frigate()) {
             Some(out) => out,
-            None => self.consistent_frigate_candidates_slow(),
+            None => self.consistent_frigate_candidates_slow().iter().map(Self::mask_of).collect(),
         }
     }
 
@@ -373,21 +390,6 @@ impl AiPlayer {
         out
     }
 
-    /// Whether two ship-placement hypotheses (each a full cell-set for one
-    /// ship type) can coexist on the same board under the no-adjacent-ships
-    /// rule — same Chebyshev-distance-1 check as `windows_overlap_or_adjacent`,
-    /// generalized to arbitrary-sized sets so a Cruiser hypothesis can be
-    /// checked against a Frigate hypothesis.
-    fn hypotheses_compatible(a: &std::collections::HashSet<(usize, usize)>, b: &std::collections::HashSet<(usize, usize)>) -> bool {
-        a.iter().all(|&(ar, ac)| {
-            b.iter().all(|&(br, bc)| {
-                let dr = (ar as isize - br as isize).unsigned_abs();
-                let dc = (ac as isize - bc as isize).unsigned_abs();
-                dr > 1 || dc > 1
-            })
-        })
-    }
-
     /// Every (Cruiser hypothesis, Frigate hypothesis) pair from
     /// `consistent_cruiser_candidates`/`consistent_frigate_candidates` that
     /// is mutually consistent under `hypotheses_compatible`. Each of those
@@ -422,30 +424,34 @@ impl AiPlayer {
     /// cache exactly, including relying on `update_fsm_and_resolve` to
     /// clear it on a lock-in event that leaves `salvo_history.len()`
     /// unchanged.
-    pub(crate) fn jointly_consistent_hypothesis_pairs(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
+    pub(crate) fn joint_pairs_masks(&self) -> Vec<(exact::Mask, exact::Mask)> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.joint_pairs_cache.borrow().as_ref() {
             if *cached_key == key {
                 return cached.clone();
             }
         }
-        let computed = self.jointly_consistent_hypothesis_pairs_uncached();
+        let computed = self.joint_pairs_masks_uncached();
         *self.joint_pairs_cache.borrow_mut() = Some((key, computed.clone()));
         computed
     }
 
-    fn jointly_consistent_hypothesis_pairs_uncached(&self) -> Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)> {
+    /// Two placements can coexist iff neither has a cell in the other's
+    /// halo (the placement plus every cell touching it, including
+    /// diagonally) — one AND per pair.
+    fn joint_pairs_masks_uncached(&self) -> Vec<(exact::Mask, exact::Mask)> {
         const CROSS_REASONING_PAIR_BUDGET: usize = 100_000;
-        let cruiser = self.consistent_cruiser_candidates();
-        let frigate = self.consistent_frigate_candidates();
+        let cruiser = self.cruiser_masks();
+        let frigate = self.frigate_masks();
         if cruiser.len().saturating_mul(frigate.len()) > CROSS_REASONING_PAIR_BUDGET {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for c in &cruiser {
-            for f in &frigate {
-                if Self::hypotheses_compatible(c, f) {
-                    out.push((c.clone(), f.clone()));
+        for &c in &cruiser {
+            let halo = exact::halo(c);
+            for &f in &frigate {
+                if f & halo == 0 {
+                    out.push((c, f));
                 }
             }
         }
@@ -468,12 +474,12 @@ impl AiPlayer {
     /// jointly consistent with itself, so that would mean a bug elsewhere,
     /// not genuine new information, and showing the un-refined heatmap is
     /// the safer fallback over showing a false blank slate.
-    pub(crate) fn cross_reasoned_cruiser_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
-        let cruiser = self.consistent_cruiser_candidates();
+    pub(crate) fn cross_reasoned_cruiser_masks(&self) -> Vec<exact::Mask> {
+        let cruiser = self.cruiser_masks();
         if cruiser.len() <= 1 {
             return cruiser;
         }
-        let pairs = self.jointly_consistent_hypothesis_pairs();
+        let pairs = self.joint_pairs_masks();
         if pairs.is_empty() {
             return cruiser;
         }
@@ -481,12 +487,12 @@ impl AiPlayer {
     }
 
     /// Same idea as `cross_reasoned_cruiser_candidates`, one size down.
-    pub(crate) fn cross_reasoned_frigate_candidates(&self) -> Vec<std::collections::HashSet<(usize, usize)>> {
-        let frigate = self.consistent_frigate_candidates();
+    pub(crate) fn cross_reasoned_frigate_masks(&self) -> Vec<exact::Mask> {
+        let frigate = self.frigate_masks();
         if frigate.len() <= 1 {
             return frigate;
         }
-        let pairs = self.jointly_consistent_hypothesis_pairs();
+        let pairs = self.joint_pairs_masks();
         if pairs.is_empty() {
             return frigate;
         }
@@ -506,16 +512,10 @@ impl AiPlayer {
     /// there is exactly the wrong complexity at exactly the size where it
     /// matters most. Dedup via a sorted canonical key through a `HashSet`
     /// instead, for O(n log k) (k = hypothesis cell count, always small).
-    pub(crate) fn distinct_hypotheses(hyps: &[std::collections::HashSet<(usize, usize)>]) -> Vec<&std::collections::HashSet<(usize, usize)>> {
-        let mut seen: std::collections::HashSet<Vec<(usize, usize)>> = std::collections::HashSet::new();
-        let mut out: Vec<&std::collections::HashSet<(usize, usize)>> = Vec::new();
-        for h in hyps {
-            let mut key: Vec<(usize, usize)> = h.iter().copied().collect();
-            key.sort_unstable();
-            if seen.insert(key) {
-                out.push(h);
-            }
-        }
+    pub(crate) fn distinct_masks(hyps: &[exact::Mask]) -> Vec<exact::Mask> {
+        let mut out = hyps.to_vec();
+        out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -527,10 +527,10 @@ impl AiPlayer {
     /// yet — every hypothesis is equally "consistent" so no single cell
     /// stands out; returning a flat 0 rather than a flat nonzero avoids
     /// implying false precision).
-    fn heatmap_from_candidates(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Vec<Vec<f64>> {
+    fn heatmap_from_masks(&self, candidates: &[exact::Mask]) -> Vec<Vec<f64>> {
         let mut counts = [[0u32; 10]; 10];
-        for cand in candidates {
-            for &(r, c) in cand {
+        for &cand in candidates {
+            for (r, c) in exact::cells(cand) {
                 counts[r][c] += 1;
             }
         }
@@ -550,7 +550,7 @@ impl AiPlayer {
     /// uniform prior over every currently-consistent pair of Cruiser
     /// windows. See `heatmap_from_candidates`.
     pub fn cruiser_heatmap(&self) -> Vec<Vec<f64>> {
-        self.heatmap_from_candidates(&self.consistent_cruiser_candidates())
+        self.heatmap_from_masks(&self.cruiser_masks())
     }
 
     /// Same idea as `cruiser_heatmap`, one size down: per-cell probability
@@ -558,7 +558,7 @@ impl AiPlayer {
     /// currently-consistent TRIPLE of Frigate windows. See
     /// `heatmap_from_candidates`.
     pub fn frigate_heatmap(&self) -> Vec<Vec<f64>> {
-        self.heatmap_from_candidates(&self.consistent_frigate_candidates())
+        self.heatmap_from_masks(&self.frigate_masks())
     }
 
     /// Same marginalization as `heatmap_from_candidates`, but returning the
@@ -566,10 +566,10 @@ impl AiPlayer {
     /// the divided float — for displaying the underlying fraction directly
     /// (e.g. "1/3") rather than a percentage. Same all-zero-pair
     /// convention before any salvo has been fired.
-    fn heatmap_fraction_from_candidates(&self, candidates: &[std::collections::HashSet<(usize, usize)>]) -> Vec<Vec<(u32, u32)>> {
+    fn heatmap_fraction_from_masks(&self, candidates: &[exact::Mask]) -> Vec<Vec<(u32, u32)>> {
         let mut counts = [[0u32; 10]; 10];
-        for cand in candidates {
-            for &(r, c) in cand {
+        for &cand in candidates {
+            for (r, c) in exact::cells(cand) {
                 counts[r][c] += 1;
             }
         }
@@ -587,12 +587,12 @@ impl AiPlayer {
 
     /// See `heatmap_fraction_from_candidates`.
     pub fn cruiser_heatmap_fraction(&self) -> Vec<Vec<(u32, u32)>> {
-        self.heatmap_fraction_from_candidates(&self.consistent_cruiser_candidates())
+        self.heatmap_fraction_from_masks(&self.cruiser_masks())
     }
 
     /// See `heatmap_fraction_from_candidates`.
     pub fn frigate_heatmap_fraction(&self) -> Vec<Vec<(u32, u32)>> {
-        self.heatmap_fraction_from_candidates(&self.consistent_frigate_candidates())
+        self.heatmap_fraction_from_masks(&self.frigate_masks())
     }
 
     /// Same idea as `cruiser_heatmap`, but marginalized over
@@ -603,23 +603,23 @@ impl AiPlayer {
     /// `cruiser_heatmap` (can only narrow probabilities further, never
     /// widen them); this is the one the UI shows.
     pub fn cruiser_heatmap_refined(&self) -> Vec<Vec<f64>> {
-        self.heatmap_from_candidates(&self.cross_reasoned_cruiser_candidates())
+        self.heatmap_from_masks(&self.cross_reasoned_cruiser_masks())
     }
 
     /// Same idea as `cruiser_heatmap_refined`, one size down.
     pub fn frigate_heatmap_refined(&self) -> Vec<Vec<f64>> {
-        self.heatmap_from_candidates(&self.cross_reasoned_frigate_candidates())
+        self.heatmap_from_masks(&self.cross_reasoned_frigate_masks())
     }
 
     /// See `cruiser_heatmap_refined` — same idea, returning the raw
     /// (count, total) pair instead of the divided float. See
     /// `heatmap_fraction_from_candidates`.
     pub fn cruiser_heatmap_fraction_refined(&self) -> Vec<Vec<(u32, u32)>> {
-        self.heatmap_fraction_from_candidates(&self.cross_reasoned_cruiser_candidates())
+        self.heatmap_fraction_from_masks(&self.cross_reasoned_cruiser_masks())
     }
 
     /// See `cruiser_heatmap_fraction_refined`, one size down.
     pub fn frigate_heatmap_fraction_refined(&self) -> Vec<Vec<(u32, u32)>> {
-        self.heatmap_fraction_from_candidates(&self.cross_reasoned_frigate_candidates())
+        self.heatmap_fraction_from_masks(&self.cross_reasoned_frigate_masks())
     }
 }

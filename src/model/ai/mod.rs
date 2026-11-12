@@ -236,8 +236,8 @@ pub struct AiPlayer {
     /// early-game move take well over a minute; caching by salvo count
     /// (the only thing these lists depend on) means each is computed once
     /// per real game state and reused everywhere else.
-    cruiser_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
-    frigate_candidates_cache: RefCell<Option<(usize, Vec<std::collections::HashSet<(usize, usize)>>)>>,
+    cruiser_candidates_cache: RefCell<Option<(usize, Vec<exact::Mask>)>>,
+    frigate_candidates_cache: RefCell<Option<(usize, Vec<exact::Mask>)>>,
     /// Memoized `jointly_consistent_hypothesis_pairs`, same `salvo_history.
     /// len()` key as `cruiser_candidates_cache`/`frigate_candidates_cache`.
     /// This one was the actual gap: every caller of the cross-reasoned
@@ -250,7 +250,7 @@ pub struct AiPlayer {
     /// alongside the other two at both invalidation points in
     /// `update_fsm_and_resolve` — those clear on a lock-in event that
     /// doesn't change `salvo_history.len()`, so keying alone isn't enough.
-    joint_pairs_cache: RefCell<Option<(usize, Vec<(std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>)>)>>,
+    joint_pairs_cache: RefCell<Option<(usize, Vec<(exact::Mask, exact::Mask)>)>>,
     /// `exact::possible_ship_cells`, keyed by `salvo_history.len()` (it
     /// depends on nothing else).
     possible_cells_cache: RefCell<Option<(usize, u128)>>,

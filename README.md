@@ -249,6 +249,15 @@ more layouts alive for longer, so every list consumer runs on bigger
 lists — ~2.7× single-thread solve time, which is the next thing to
 bring down.
 
+**Masks all the way down.** The three candidate caches (Cruiser pairs,
+Frigate triples, joint pairs) now hold u128 cell masks instead of
+`HashSet`s, joint compatibility is one AND against the Cruiser
+placement's halo, and every consumer on the solve path — both planners,
+the bag-blind check, known-cell kill shots, the disambiguation search,
+identification, heatmaps — reads the masks; cell sets are only built
+for tests. Results are bit-identical; single-thread solve time 13.0 →
+7.7 s per 5,000 boards (1.6× the pre-planner solver, for −0.6 salvos).
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that

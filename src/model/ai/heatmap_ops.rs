@@ -68,7 +68,7 @@ impl AiPlayer {
     /// fully resolve it. Should only ever be reached once
     /// `disambiguation_shots(..., true, false)` has already come back
     /// empty — see `disambiguation_shots_last_resort`'s doc comment.
-    fn disambiguation_shots(&self, candidates: &[std::collections::HashSet<(usize, usize)>], allow_refire: bool, ignore_refire_cap: bool) -> Option<[(usize, usize); 3]> {
+    fn disambiguation_shots(&self, candidates: &[exact::Mask], allow_refire: bool, ignore_refire_cap: bool) -> Option<[(usize, usize); 3]> {
         // Was 80 — measured empirically to be far too conservative: the cost
         // of this search is dominated by the O(pool^3) triple loop below
         // (pool capped at MAX_POOL=14 regardless of candidates.len()), with
@@ -86,29 +86,25 @@ impl AiPlayer {
             return None;
         }
 
-        // BTreeMap (not HashMap): iteration order feeds directly into
-        // `informative`'s ordering below, which in turn decides tie-breaks
-        // whenever multiple cells score equally — a HashMap's iteration
-        // order isn't guaranteed stable across separate instances, which
-        // made 2 calls against the identical AiPlayer state able to return
-        // different salvos for a tied scenario. The advisory must be
-        // deterministic for a given board state.
-        let mut counts: std::collections::BTreeMap<(usize, usize), usize> = std::collections::BTreeMap::new();
-        for cand in candidates {
-            for &cell in cand {
-                *counts.entry(cell).or_insert(0) += 1;
+        let mut counts = [[0usize; 10]; 10];
+        for &cand in candidates {
+            for (r, c) in exact::cells(cand) {
+                counts[r][c] += 1;
             }
         }
         let total = candidates.len();
-        let mut informative: Vec<(usize, usize)> = counts
-            .iter()
-            .filter(|&(&(r, c), &n)| {
+        // Row-major order (what the BTreeMap this replaced iterated in):
+        // it feeds the tie-breaks below, so the advisory for a given board
+        // state stays deterministic.
+        let mut informative: Vec<(usize, usize)> = (0..10)
+            .flat_map(|r| (0..10).map(move |c| (r, c)))
+            .filter(|&(r, c)| {
+                let n = counts[r][c];
                 n > 0
                     && n < total
                     && (!self.fired[r][c]
                         || (allow_refire && (ignore_refire_cap || !self.disambiguation_extra_refire_used[r][c])))
             })
-            .map(|(&cell, _)| cell)
             .collect();
 
         if informative.is_empty() {
@@ -128,7 +124,7 @@ impl AiPlayer {
         const MAX_POOL: usize = 14;
         if informative.len() > MAX_POOL {
             informative.sort_by_key(|cell| {
-                let n = counts[cell];
+                let n = counts[cell.0][cell.1];
                 (n as isize - (total as isize - n as isize)).unsigned_abs()
             });
             informative.truncate(MAX_POOL);
@@ -190,10 +186,10 @@ impl AiPlayer {
                     // bag's count of matching values can ever reveal about
                     // which hypothesis is real (see
                     // `consistent_with_salvo_history`).
+                    let salvo_mask = salvo.iter().fold(0u128, |m, &cell| m | exact::bit(cell));
                     let mut buckets = [0usize; 4];
-                    for cand in candidates {
-                        let hits = salvo.iter().filter(|cell| cand.contains(cell)).count();
-                        buckets[hits] += 1;
+                    for &cand in candidates {
+                        buckets[(cand & salvo_mask).count_ones() as usize] += 1;
                     }
                     let worst = *buckets.iter().max().unwrap();
                     // Expected number of hypotheses left (times `total`):
@@ -294,7 +290,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_cruiser_candidates(), false, false)
+        self.disambiguation_shots(&self.cruiser_masks(), false, false)
     }
 
     /// Same idea as `cruiser_disambiguation_shots`, one size down.
@@ -302,7 +298,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_frigate_candidates(), false, false)
+        self.disambiguation_shots(&self.frigate_masks(), false, false)
     }
 
     /// Same idea as `cruiser_disambiguation_shots`, but allows the salvo to
@@ -321,7 +317,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_cruiser_candidates(), true, false)
+        self.disambiguation_shots(&self.cruiser_masks(), true, false)
     }
 
     /// Same idea as `cruiser_disambiguation_shots_with_refire`, one size down.
@@ -329,7 +325,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_frigate_candidates(), true, false)
+        self.disambiguation_shots(&self.frigate_masks(), true, false)
     }
 
     /// Combined entry point for the UI's "disambiguate (allow 1 refire)"
@@ -358,7 +354,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_cruiser_candidates(), true, true)
+        self.disambiguation_shots(&self.cruiser_masks(), true, true)
     }
 
     /// Same idea as `cruiser_disambiguation_shots_last_resort`, one size down.
@@ -366,7 +362,7 @@ impl AiPlayer {
         if self.salvo_history.is_empty() {
             return None;
         }
-        self.disambiguation_shots(&self.consistent_frigate_candidates(), true, true)
+        self.disambiguation_shots(&self.frigate_masks(), true, true)
     }
 
     /// Combined entry point for the last-resort tier — same Cruiser-before-
@@ -445,39 +441,6 @@ impl AiPlayer {
         self.fired[row][col] && self.anchored_isolation_shot().is_some_and(|shots| shots.contains(&(row, col)))
     }
 
-    /// The Cruisers' exact 6-cell layout (both ships combined), once
-    /// `consistent_cruiser_candidates` has narrowed to a single remaining
-    /// hypothesis — treated as ground truth (see
-    /// `cells_confirmed_cruiser_or_adjacent`'s doc comment for the
-    /// empirical validation behind that). Empty until then. Unlike
-    /// `found_battleship_cells`, no separate permanent snapshot is needed:
-    /// `consistent_cruiser_candidates` is a pure function of
-    /// `salvo_history` alone, and once narrowed to 1 it can only ever stay
-    /// at that same single candidate (more evidence can only shrink the
-    /// consistent set further, never revive an eliminated hypothesis —
-    /// and the true layout, by construction, is never eliminated).
-    pub fn cruiser_identified_cells(&self) -> Vec<(usize, usize)> {
-        let candidates = self.consistent_cruiser_candidates();
-        if candidates.len() == 1 {
-            candidates[0].iter().copied().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Same idea as `cruiser_identified_cells`, one size down: the
-    /// Frigates' exact 6-cell layout (all 3 ships combined), once
-    /// `consistent_frigate_candidates` has narrowed to a single remaining
-    /// hypothesis. Empty until then.
-    pub fn frigate_identified_cells(&self) -> Vec<(usize, usize)> {
-        let candidates = self.consistent_frigate_candidates();
-        if candidates.len() == 1 {
-            candidates[0].iter().copied().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Same idea as `cruiser_identified_cells`, but checked against
     /// `cross_reasoned_cruiser_candidates` instead of the raw
     /// `consistent_cruiser_candidates` — resolves cases where the Cruiser
@@ -489,23 +452,17 @@ impl AiPlayer {
     /// one DISTINCT cell-set, not exactly one list entry — see
     /// `distinct_hypotheses`.
     pub fn cruiser_identified_cells_refined(&self) -> Vec<(usize, usize)> {
-        let candidates = self.cross_reasoned_cruiser_candidates();
-        let distinct = Self::distinct_hypotheses(&candidates);
-        if distinct.len() == 1 {
-            distinct[0].iter().copied().collect()
-        } else {
-            Vec::new()
+        match Self::distinct_masks(&self.cross_reasoned_cruiser_masks()).as_slice() {
+            [only] => exact::cells(*only).collect(),
+            _ => Vec::new(),
         }
     }
 
     /// Same idea as `cruiser_identified_cells_refined`, one size down.
     pub fn frigate_identified_cells_refined(&self) -> Vec<(usize, usize)> {
-        let candidates = self.cross_reasoned_frigate_candidates();
-        let distinct = Self::distinct_hypotheses(&candidates);
-        if distinct.len() == 1 {
-            distinct[0].iter().copied().collect()
-        } else {
-            Vec::new()
+        match Self::distinct_masks(&self.cross_reasoned_frigate_masks()).as_slice() {
+            [only] => exact::cells(*only).collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -990,12 +947,11 @@ impl AiPlayer {
         // planner traded Frigate information away for tiny Cruiser gains.
         const FRIGATE_CREDIT: f64 = 0.3;
 
-        let candidates = self.consistent_cruiser_candidates();
-        if candidates.len() <= 1 || candidates.len() > MAX_HYPOTHESES {
+        let hyps = self.cruiser_masks();
+        if hyps.len() <= 1 || hyps.len() > MAX_HYPOTHESES {
             return None;
         }
         let bit = |(r, c): (usize, usize)| 1u128 << (r * 10 + c);
-        let hyps: Vec<u128> = candidates.iter().map(|h| h.iter().fold(0u128, |m, &cell| m | bit(cell))).collect();
         let total = hyps.len();
 
         let mut fired = 0u128;
@@ -1149,13 +1105,11 @@ impl AiPlayer {
         const MAX_HYPOTHESES: usize = 1000;
         const INFORMATIVE: usize = 10;
 
-        let pairs = self.jointly_consistent_hypothesis_pairs();
-        if pairs.len() <= 1 || pairs.len() > MAX_HYPOTHESES {
+        let hyps = self.joint_pairs_masks();
+        if hyps.len() <= 1 || hyps.len() > MAX_HYPOTHESES {
             return None;
         }
         let bit = |(r, c): (usize, usize)| 1u128 << (r * 10 + c);
-        let mask = |cells: &std::collections::HashSet<(usize, usize)>| cells.iter().fold(0u128, |m, &cell| m | bit(cell));
-        let hyps: Vec<(u128, u128)> = pairs.iter().map(|(c, f)| (mask(c), mask(f))).collect();
 
         let mut fired = 0u128;
         for r in 0..10 {
@@ -1298,12 +1252,13 @@ impl AiPlayer {
         if subsets.len() >= 2 {
             subsets.push(vec![0, 1, 2]);
         }
-        let hyps = if size == 3 { self.consistent_cruiser_candidates() } else { self.consistent_frigate_candidates() };
+        let hyps = if size == 3 { self.cruiser_masks() } else { self.frigate_masks() };
         if hyps.len() < 2 || hyps.len() > MAX_HYPOTHESES {
             return None;
         }
         let varies = |cell: &(usize, usize)| {
-            let n = hyps.iter().filter(|h| h.contains(cell)).count();
+            let b = exact::bit(*cell);
+            let n = hyps.iter().filter(|&&h| h & b != 0).count();
             n > 0 && n < hyps.len()
         };
         let varying: Vec<bool> = salvo.iter().map(varies).collect();
@@ -1311,9 +1266,10 @@ impl AiPlayer {
             if !subset.iter().all(|&i| varying[i]) {
                 continue;
             }
-            let count = |h: &std::collections::HashSet<(usize, usize)>| subset.iter().filter(|&&i| h.contains(&salvo[i])).count();
-            let first = count(&hyps[0]);
-            if hyps.iter().all(|h| count(h) == first) {
+            let sub_mask = subset.iter().fold(0u128, |m, &i| m | exact::bit(salvo[i]));
+            let count = |h: u128| (h & sub_mask).count_ones();
+            let first = count(hyps[0]);
+            if hyps.iter().all(|&h| count(h) == first) {
                 return Some(salvo[*subset.last().unwrap()]);
             }
         }
@@ -1329,18 +1285,16 @@ impl AiPlayer {
     /// still wide open, roughly quadrupling solve time for ~0.1 salvo.
     fn known_unfired_cells(&self, size: usize) -> Vec<(usize, usize)> {
         const MAX_HYPOTHESES: usize = 20_000;
-        let raw = if size == 3 { self.consistent_cruiser_candidates() } else { self.consistent_frigate_candidates() };
+        let raw = if size == 3 { self.cruiser_masks() } else { self.frigate_masks() };
         if raw.is_empty() || raw.len() > MAX_HYPOTHESES {
             return Vec::new();
         }
-        let hyps = if size == 3 { raw } else { self.cross_reasoned_frigate_candidates() };
-        let distinct = Self::distinct_hypotheses(&hyps);
-        if distinct.len() != 1 {
-            return Vec::new();
+        let hyps = if size == 3 { raw } else { self.cross_reasoned_frigate_masks() };
+        match Self::distinct_masks(&hyps).as_slice() {
+            // Row-major, as `exact::cells` yields.
+            [only] => exact::cells(*only).filter(|&(r, c)| !self.fired[r][c]).collect(),
+            _ => Vec::new(),
         }
-        let mut cells: Vec<(usize, usize)> = distinct[0].iter().copied().filter(|&(r, c)| !self.fired[r][c]).collect();
-        cells.sort_unstable();
-        cells
     }
 
     /// Whether `size` is done as far as HUNTING goes: fully sunk, or — for
@@ -1408,7 +1362,7 @@ mod tests {
         for &(r, c) in &[d4, e4, d5, e5] {
             ai.fired[r][c] = true;
         }
-        let set = |a: (usize, usize), b: (usize, usize)| [a, b].into_iter().collect::<std::collections::HashSet<_>>();
+        let set = |a: (usize, usize), b: (usize, usize)| exact::bit(a) | exact::bit(b);
         let candidates = vec![set(d4, e4), set(d4, d5), set(e5, e4), set(e5, d5)];
         let salvo = ai.disambiguation_shots(&candidates, true, true).expect("a refire salvo");
         let informative = salvo.iter().filter(|cell| [d4, e4, d5, e5].contains(cell)).count();

@@ -46,7 +46,7 @@ pub(crate) fn cells(mask: Mask) -> impl Iterator<Item = (usize, usize)> {
     (0..100).filter(move |i| mask & (1u128 << i) != 0).map(|i| (i / 10, i % 10))
 }
 
-fn halo(m: Mask) -> Mask {
+pub(crate) fn halo(m: Mask) -> Mask {
     let mut out = 0;
     for (r, c) in cells(m) {
         for nr in r.saturating_sub(1)..=(r + 1).min(9) {
