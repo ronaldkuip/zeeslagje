@@ -296,12 +296,22 @@ point, tried in order:
 See `anchored_isolation_shot` and `disambiguation_shots` in
 `model/ai/heatmap_ops.rs`.
 
-**Summary.** The system is an exact, incrementally-maintained
-constraint-propagation engine over a discretized hypothesis space —
-per-axis FSM compression plus full-board combinatorial filtering and
-cross-type reasoning for the larger ships — not a stochastic estimator.
-Behavior is deterministic given the observation history; probabilities
-come from exact counting over surviving logical hypotheses.
+**Summary.** The system is an exact, deterministic deduction engine
+over the discrete space of ship layouts — not a stochastic estimator.
+Two models run side by side: the per-axis line FSM (cheap, incremental,
+the carrier of sunk-phase bookkeeping and the UI's line states), and
+the exact placement model in `exact.rs`, which keeps every Cruiser pair
+and Frigate triple consistent with the bags and the sunk reports, with
+cross-class no-touching pruning. Shot selection is a greedy FSM pick,
+vetoed by the exact model (provably empty cells, bag-blind groups,
+known cells first) and overridden by one-step lookahead planners in the
+Cruiser and Frigate phases that score candidate salvos by the expected
+salvos still needed, with the ambiguity of n remaining layouts costed
+at log2(n). Probabilities shown in the UI are exact frequencies over
+the surviving layouts. Progress is measured, not guessed: fixed
+20,000/50,000-board A/B sets, the waste auditor, and full 34.5M-board
+production runs on the VPS (run_004 17.36 → run_008 15.60 salvos per
+board; the current solver measures 13.74 on the A/B sets).
 
 ## Architecture (after the MVC/module refactor)
 
@@ -319,10 +329,15 @@ src/
 │   └── ai/
 │       ├── mod.rs                  # AiPlayer struct + per-round coordinators
 │       ├── fsm.rs                    # line-state FSM, confirmed-hit-by-elimination
-│       ├── heatmap_gen.rs             # candidate enumeration, cross-reasoning, heatmaps
-│       ├── heatmap_ops.rs             # shot scoring, disambiguation, choose_shots
+│       ├── exact.rs                   # exact placement model: signature index, provably-empty cells
+│       ├── heatmap_gen.rs             # candidate enumeration (via exact.rs), cross-reasoning, heatmaps
+│       ├── heatmap_ops.rs             # shot scoring, Cruiser/Frigate planners, disambiguation, choose_shots
 │       ├── battleship.rs              # the Battleship cross-4 candidate-mask subsystem
 │       └── hypothetical.rs             # scratch-state FSM lookups used only by hunt scoring
+├── bin/
+│   ├── solve_boards_file.rs    # batch solver over a file of boards (the VPS production runs)
+│   ├── audit_waste.rs          # replays the AI and classifies every shot against an independent model
+│   └── measure_identifiability.rs  # is the Cruiser/Frigate layout recoverable from the bags alone?
 ├── controller/
 │   └── game.rs                 # the #[wasm_bindgen] Game API — the only thing JS calls
 └── view/
