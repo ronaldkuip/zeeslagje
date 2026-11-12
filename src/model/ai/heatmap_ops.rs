@@ -954,12 +954,181 @@ impl AiPlayer {
                 }
             }
         }
+        if size == 3 {
+            if let Some(better) = self.cruiser_hunt_salvo(greedy) {
+                return better;
+            }
+        }
         if size == 2 {
             if let Some(better) = self.frigate_endgame_salvo(greedy) {
                 return better;
             }
         }
         greedy
+    }
+
+    /// One-step lookahead for the Cruiser hunt — the Cruiser-phase
+    /// counterpart of `frigate_endgame_salvo`. The greedy FSM pick scores
+    /// cells one at a time by line eliminations and can't see which
+    /// salvos actually split the surviving Cruiser layouts (nor bag
+    /// ambiguity between its own 3 cells). This scores a salvo by the
+    /// expected number of salvos still needed to pin down AND sink both
+    /// Cruisers, averaged over every consistent Cruiser placement grouped
+    /// by the bag it would produce, and replaces `greedy` only when some
+    /// salvo is strictly better. Pool: the greedy cells, the cells closest
+    /// to splitting the layouts in half, certain-hit cells, and pending
+    /// Battleship cells (hits owed, known value, never split anything).
+    fn cruiser_hunt_salvo(&self, greedy: [(usize, usize); 3]) -> Option<[(usize, usize); 3]> {
+        // Beyond this many layouts no 3-cell salvo splits them much and the
+        // greedy pick is as good (measured: 200/1000/4000 caps identical),
+        // so the planner only pays its cost late in the phase.
+        const MAX_HYPOTHESES: usize = 300;
+        const INFORMATIVE: usize = 10;
+        const CERTAIN: usize = 2;
+        // Small credit per salvo cell that can still hold a Frigate: the
+        // estimate below only counts Cruiser work, and without this the
+        // planner traded Frigate information away for tiny Cruiser gains.
+        const FRIGATE_CREDIT: f64 = 0.3;
+
+        let candidates = self.consistent_cruiser_candidates();
+        if candidates.len() <= 1 || candidates.len() > MAX_HYPOTHESES {
+            return None;
+        }
+        let bit = |(r, c): (usize, usize)| 1u128 << (r * 10 + c);
+        let hyps: Vec<u128> = candidates.iter().map(|h| h.iter().fold(0u128, |m, &cell| m | bit(cell))).collect();
+        let total = hyps.len();
+
+        let mut fired = 0u128;
+        for r in 0..10 {
+            for c in 0..10 {
+                if self.fired[r][c] {
+                    fired |= bit((r, c));
+                }
+            }
+        }
+        let pending = self.pending_battleship_cells();
+        let pending_mask = pending.iter().fold(0u128, |m, &cell| m | bit(cell));
+
+        // Per-cell hypothesis counts, for ranking pool cells.
+        let mut counts = [[0usize; 10]; 10];
+        for &h in &hyps {
+            let mut m = h;
+            while m != 0 {
+                let i = m.trailing_zeros() as usize;
+                counts[i / 10][i % 10] += 1;
+                m &= m - 1;
+            }
+        }
+        let mut pool: Vec<(usize, usize)> = greedy.to_vec();
+        for &cell in &pending {
+            if !pool.contains(&cell) {
+                pool.push(cell);
+            }
+        }
+        let mut informative: Vec<((usize, usize), usize)> = Vec::new();
+        let mut certain: Vec<(usize, usize)> = Vec::new();
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=INNER_HI {
+                if self.fired[r][c] || pool.contains(&(r, c)) {
+                    continue;
+                }
+                let n = counts[r][c];
+                if n == total {
+                    certain.push((r, c));
+                } else if n > 0 {
+                    informative.push(((r, c), (2 * n).abs_diff(total)));
+                }
+            }
+        }
+        informative.sort_by_key(|&(_, d)| d);
+        pool.extend(informative.iter().take(INFORMATIVE).map(|&(cell, _)| cell));
+        pool.extend(certain.iter().take(CERTAIN));
+        if pool.len() < 3 {
+            return None;
+        }
+
+        // Cells still worth probing for Frigates: unfired inner cells the
+        // salvo history hasn't proven empty.
+        let mut frigate_probe = 0u128;
+        for r in INNER_LO..=INNER_HI {
+            for c in INNER_LO..=INNER_HI {
+                if !self.fired[r][c] && !self.provably_no_big_ship(r, c) {
+                    frigate_probe |= bit((r, c));
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        struct Group { n: usize, rem_max: u32, or: u128, and: u128 }
+        let evaluate = |salvo: [(usize, usize); 3]| -> (f64, usize) {
+            let s = salvo.iter().fold(0u128, |m, &cell| m | bit(cell));
+            let fired_after = fired | s;
+            let frig_value = (s & frigate_probe).count_ones() as f64 / 3.0;
+            let mut groups = [Group { n: 0, rem_max: 0, or: 0, and: !0 }; 4];
+            for &h in &hyps {
+                let g = &mut groups[(s & h).count_ones() as usize];
+                g.n += 1;
+                g.rem_max = g.rem_max.max((h & !fired_after).count_ones());
+                g.or |= h;
+                g.and &= h;
+            }
+            let pending_left = (pending_mask & !fired_after).count_ones();
+            let mut weighted = 0.0;
+            let mut worst = 0;
+            for g in groups.iter().filter(|g| g.n > 0) {
+                let hits_left = (g.rem_max + pending_left).div_ceil(3) as f64;
+                let estimate = if g.n == 1 {
+                    hits_left
+                } else if (g.or ^ g.and) & !fired_after == 0 {
+                    // Only a refire can still separate these.
+                    hits_left + 1.0
+                } else {
+                    Self::salvos_to_resolve(g.n, hits_left)
+                };
+                weighted += estimate * g.n as f64;
+                worst = worst.max(g.n);
+            }
+            (weighted / total as f64 - FRIGATE_CREDIT * frig_value, worst)
+        };
+
+        let greedy_score = evaluate(greedy);
+        let mut best: Option<([(usize, usize); 3], (f64, usize))> = None;
+        for i in 0..pool.len() {
+            for j in (i + 1)..pool.len() {
+                for k in (j + 1)..pool.len() {
+                    let salvo = [pool[i], pool[j], pool[k]];
+                    let score = evaluate(salvo);
+                    let better = match &best {
+                        None => true,
+                        Some((_, (cost, worst))) => score.0 < cost - 1e-9 || ((score.0 - cost).abs() <= 1e-9 && score.1 < *worst),
+                    };
+                    if better {
+                        best = Some((salvo, score));
+                    }
+                }
+            }
+        }
+        let (salvo, (cost, worst)) = best?;
+        if cost < greedy_score.0 - 1e-9 || ((cost - greedy_score.0).abs() <= 1e-9 && worst < greedy_score.1) {
+            Some(salvo)
+        } else {
+            None
+        }
+    }
+
+    /// Estimated salvos still needed when `n` (> 1) layouts remain that
+    /// some unfired cell can still separate, and `hits_left` salvos' worth
+    /// of hits are owed regardless. Disambiguating and sinking overlap
+    /// (kill shots anchor probes and vice versa), so the two are not
+    /// added; resolving `n` layouts costs about log2(n) further salvos (a
+    /// bag has 4 outcomes for one class, so a good salvo cuts the layouts
+    /// by a factor of 2-3), plus half a salvo of slack. Replaced a flat
+    /// "+0.5 whatever n is", which made both planners prefer kill shots
+    /// over splitting shots: 14.69 -> 14.07 on the 20,000-board set, the
+    /// divisor on log2 swept from 2.0 to 0.8 with 1.0-1.2 flat at the
+    /// optimum.
+    fn salvos_to_resolve(n: usize, hits_left: f64) -> f64 {
+        hits_left.max((n as f64).log2()) + 0.5
     }
 
     /// One-step lookahead for the Frigate endgame (Battleship and both
@@ -978,7 +1147,7 @@ impl AiPlayer {
     /// them alongside other useful cells resolves it outright.
     fn frigate_endgame_salvo(&self, greedy: [(usize, usize); 3]) -> Option<[(usize, usize); 3]> {
         const MAX_HYPOTHESES: usize = 1000;
-        const MAX_POOL: usize = 30;
+        const INFORMATIVE: usize = 10;
 
         let pairs = self.jointly_consistent_hypothesis_pairs();
         if pairs.len() <= 1 || pairs.len() > MAX_HYPOTHESES {
@@ -1005,26 +1174,39 @@ impl AiPlayer {
         let pending = self.pending_battleship_cells();
         let pending_mask = pending.iter().fold(0u128, |m, &cell| m | bit(cell));
 
-        let mut pool: Vec<(usize, usize)> = pending.clone();
+        // Pool: the greedy cells, pending Battleship cells, the cells that
+        // split the hypotheses most evenly (top `INFORMATIVE`; 8-30 all
+        // measure the same, 6 starts to lose, and the triple loop is cubic
+        // in the pool), and 2 known-empty fillers so a salvo can hold fewer
+        // than 3 informative cells (see `disambiguation_shots`' padding
+        // comment for why that matters).
+        let mut pool: Vec<(usize, usize)> = greedy.iter().copied().filter(|&(r, c)| !self.fired[r][c]).collect();
+        for &cell in &pending {
+            if !pool.contains(&cell) {
+                pool.push(cell);
+            }
+        }
+        let total = hyps.len();
+        let mut informative: Vec<((usize, usize), usize)> = Vec::new();
         let mut fillers = 0;
         for r in 0..10 {
             for c in 0..10 {
                 let b = bit((r, c));
-                if fired & b != 0 || pending_mask & b != 0 {
+                if fired & b != 0 || pool.contains(&(r, c)) {
                     continue;
                 }
                 if any_cell & b != 0 {
-                    pool.push((r, c));
+                    let n = hyps.iter().filter(|&&(cm, fm)| (cm | fm) & b != 0).count();
+                    informative.push(((r, c), (2 * n).abs_diff(total)));
                 } else if fillers < 2 {
-                    // Known-empty cells: let a salvo hold fewer than 3
-                    // informative cells (see `disambiguation_shots`'
-                    // padding comment for why that matters).
                     pool.push((r, c));
                     fillers += 1;
                 }
             }
         }
-        if pool.len() < 3 || pool.len() > MAX_POOL {
+        informative.sort_by_key(|&(_, d)| d);
+        pool.extend(informative.iter().take(INFORMATIVE).map(|&(cell, _)| cell));
+        if pool.len() < 3 {
             return None;
         }
 
@@ -1057,7 +1239,7 @@ impl AiPlayer {
                     // fired: only a refire can still separate them.
                     hits_left + 1.0
                 } else {
-                    hits_left.max(1.0) + 0.5
+                    Self::salvos_to_resolve(g.n, hits_left)
                 };
                 weighted += estimate * g.n as f64;
                 worst = worst.max(g.n);

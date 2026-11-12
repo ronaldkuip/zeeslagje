@@ -227,6 +227,28 @@ equivalence test checks that), results are bit-identical, and the
 single-thread solve time dropped ~36%. Histories longer than 32 salvos
 don't fit a signature and fall back to the original loops.
 
+**Cruiser-hunt lookahead, and a size-aware ambiguity cost.** The Cruiser
+phase got the same one-step planner the Frigate endgame has
+(`cruiser_hunt_salvo`): once at most 300 Cruiser layouts survive, each
+candidate salvo — the greedy FSM pick, the 10 cells that split the
+layouts most evenly, certain-hit cells and pending Battleship cells —
+is scored by the expected salvos still needed, averaged over the
+layouts grouped by the bag they'd produce, with a small credit per cell
+that can still hold a Frigate (without it the planner traded Frigate
+information for tiny Cruiser gains and was a net loss). The decisive
+change, though, was the cost of ambiguity, now shared by both planners
+(`salvos_to_resolve`): resolving n layouts costs about log2(n) further
+salvos (a bag has 4 outcomes for one class), not the flat +0.5 both
+planners used before, which made them prefer kill shots over splitting
+shots. With the flat cost the Cruiser planner was worse (14.69 → 14.74);
+with the log cost both planners together give 14.69 → 14.07 on the
+20,000-board set and 14.68 → 14.08 on the 50,000-board set. The Frigate
+planner's pool is now ranked the same way and capped at 10 informative
+cells (8–30 measure identical). The cost is compute: better salvos keep
+more layouts alive for longer, so every list consumer runs on bigger
+lists — ~2.7× single-thread solve time, which is the next thing to
+bring down.
+
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that
