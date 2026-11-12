@@ -53,16 +53,23 @@ size-4 ship, one hit on a size-1 ship, one miss — without saying which
 coordinate produced which value. This partial observability rules out
 naïve cell-by-cell inference; the solver has to maintain, and
 continually revise, the set of board configurations still consistent
-with the complete observation history.
+with the complete observation history. Two models of that set run side
+by side; a salvo is chosen by a greedy pick from the first, vetoed and
+overridden by the second.
 
-**Line-wise state compression.** For each row and column independently,
-the solver keeps a finite-state representation of which placements of a
-given ship size remain possible along that line. These automata are
-precomputed offline as lookup tables (`src/fsm_tables.rs`), so each shot
-is an O(1) state transition rather than a re-derivation from scratch.
-This turns what would otherwise be a 2D combinatorial problem into a set
-of tractable 1D subproblems — at the cost of not directly capturing
-cross-axis (row/column) dependencies on its own. See `model/ai/fsm.rs`.
+### Two models of the board
+
+**Line-wise state compression (the FSM).** For each row and column
+independently, the solver keeps a finite-state representation of which
+placements of a given ship size remain possible along that line. These
+automata are precomputed offline as lookup tables (`src/fsm_tables.rs`),
+so each shot is an O(1) state transition rather than a re-derivation
+from scratch. This turns what would otherwise be a 2D combinatorial
+problem into a set of tractable 1D subproblems — at the cost of not
+capturing cross-axis (row/column) dependencies, nor deductions that
+span several salvos. The FSM is also the carrier of the sunk-phase
+bookkeeping (which sizes are still being hunted) and of the line states
+the solver page displays. See `model/ai/fsm.rs`.
 
 **Confirmed-hit-by-elimination.** Because a salvo's result is an
 unordered bag, a single "3" in one salvo doesn't say which of its 3
@@ -83,218 +90,215 @@ can't yet know where the rest of its own ship lies). See
 `derive_confirmed_battleship_hits_by_elimination` and
 `apply_adjacency_elimination_around` in `model/ai/fsm.rs`.
 
-**Global consistency enumeration and cross-reasoning.** For Cruisers and
-Frigates, the solver enumerates every straight-line window still
-consistent with the FSM state and the full salvo history, pairs (or
-triples, for the 3 Frigates) them into full-layout hypotheses, and
-additionally cross-checks Cruiser hypotheses against Frigate hypotheses
-for mutual adjacency — a hypothesis that's individually still
-consistent can be provably wrong if *every* remaining hypothesis of the
-other type happens to sit next to it, something neither ship type's own
-salvo history says anything about on its own. The surviving hypothesis
-set is an implicit posterior over layouts; per-cell occupancy
-probability (the heatmap) is exact frequency-of-appearance across
-survivors, not a sampled approximation. See `model/ai/heatmap_gen.rs`.
+**The exact placement model.** For Cruisers and Frigates, the solver
+keeps every full layout — a pair of Cruiser windows, a triple of Frigate
+windows, no two touching — still consistent with the full salvo history,
+and cross-checks Cruiser layouts against Frigate layouts for mutual
+adjacency: a layout that's individually still consistent is provably
+wrong if *every* remaining layout of the other type sits next to it,
+something neither type's own history says on its own. The surviving set
+is an implicit posterior over layouts; per-cell occupancy probability
+(the heatmap) is exact frequency-of-appearance across survivors, not a
+sampled approximation. A layout is consistent with a salvo iff the
+number of its cells among the 3 fired equals the number of that class's
+value in the bag — and, since the sunk reports became evidence, iff the
+number of its windows that became fully fired in that salvo equals the
+number of "size-s sunk" reports the salvo brought. See
+`model/ai/heatmap_gen.rs` and `model/ai/exact.rs`.
 
-**Hunt-phase shot scoring, with cross-size blending.** Target priority
-is fixed (Battleship → Cruiser → Frigate), and cell scoring for the
-currently-hunted size is read straight from the FSM tables. On top of
-that, scoring also blends in a small, capped contribution from the
-*next smaller* size's current line state — heavily weighted so it can
-only ever break an exact tie in the primary size's own ranking, never
-override it — so that when two cells are genuinely equally good for the
-ship being hunted, the one that's also useful for what's hunted next
-gets picked. Measured to reduce average salvo count by roughly 3% on a
-fixed board set. See `best_cell_for_size_blended` in
-`model/ai/heatmap_ops.rs`.
+- *Sunk reports as evidence.* The "Cruiser sunk" message used to switch
+  hunting phases and nothing else. The silence is the valuable half: a
+  layout in which this salvo would have completed a ship, when nothing
+  was reported sunk, is dead — exactly the "which of the two cells was
+  the hit" ambiguity the end-of-game refires were spent on. Measured
+  first with the auditor (`SUNK=1`): about one shot per game went to
+  cells the reports had already settled, and 8% of games spent a salvo
+  after the layout was fully determined. The AI only trusts the reports
+  when every salvo came with them (`apply_salvo_and_sunk`, which is what
+  `Game::fire` uses); histories fed through the bare `apply_salvo` keep
+  the bags-only model. 20,000-board set: 14.074 → 13.735; 50,000-board
+  set: 14.082 → 13.735; +15% single-thread time; auditor
+  slack-after-known 8.3% → 0.3%.
+- *Provably empty cells.* `exact::possible_ship_cells` computes the
+  exact set of cells that could still hold a ship of size ≥ 2: per
+  class, the union of its consistent layouts; while the Battleship and
+  Cruisers are down to a few placements each, those are branched on so
+  the no-touching rule between classes prunes too (nothing can lie next
+  to an identified Battleship). A randomized test checks no real ship
+  cell is ever ruled out, with and without the sunk reports.
+- *Signature index.* Enumerating the consistent Cruiser pairs and
+  Frigate triples used to be nested loops over windows with a pass over
+  the whole salvo history per candidate (up to 112,872 Frigate triples),
+  and together with the empty-cell check that was ~55% of solve time.
+  `exact::Index` packs each window's per-salvo counts into u128
+  signatures (a hex digit per salvo; one signature for hits, one for
+  completions), so the partner that completes a bag is a signature
+  subtraction plus a binary search; and since a class has at most 112
+  windows, "windows with that signature", "windows apart from this one"
+  and "windows inside the allowed cells" are window-set u128s — a
+  candidate partner set is a few ANDs. A brute-force equivalence test
+  checks the output; results were bit-identical and single-thread solve
+  time dropped ~36%. Histories longer than 32 salvos don't fit a
+  signature and fall back to the original loops.
+- *Masks all the way down.* The three candidate caches (Cruiser pairs,
+  Frigate triples, joint pairs) hold u128 cell masks instead of
+  `HashSet`s, joint compatibility is one AND against the Cruiser
+  placement's halo, and every consumer on the solve path — both
+  planners, the bag-blind check, known-cell kill shots, the
+  disambiguation search, identification, heatmaps — reads the masks;
+  cell sets are only built for tests. Bit-identical results;
+  single-thread solve time 13.0 → 7.7 s per 5,000 boards.
 
-**Sequential (not joint) salvo construction.** Each salvo's 3 cells are
-chosen one at a time — best cell first, then a hypothetical miss is
-folded into a scratch copy of the FSM state, then the next-best cell
-against *that* updated state, and so on. This is a greedy algorithm,
-not an exhaustive search over all candidate triples — an exhaustive
-joint-triple search was implemented and measured against it directly,
-and came back both slower (3–4×) and very slightly worse on average.
-That result lines up with theory: the quantity being maximized (total
+### Choosing a salvo
+
+**The greedy pick.** Target priority is fixed (Battleship → Cruiser →
+Frigate), and cell scoring for the currently-hunted size is read
+straight from the FSM tables. Scoring also blends in a small, capped
+contribution from the *next smaller* size's current line state —
+heavily weighted so it can only ever break an exact tie in the primary
+size's own ranking, never override it — so that when two cells are
+genuinely equally good for the ship being hunted, the one that's also
+useful for what's hunted next gets picked (measured at roughly 3% fewer
+salvos on a fixed board set; see `best_cell_for_size_blended`). The 3
+cells are chosen one at a time — best cell first, then a hypothetical
+miss is folded into a scratch copy of the FSM state, then the next-best
+cell against *that* updated state, and so on. This is a greedy
+algorithm, not an exhaustive search over all candidate triples: an
+exhaustive joint-triple search was implemented and measured against it
+directly, and came back both slower (3–4×) and very slightly worse on
+average. That lines up with theory: the quantity being maximized (total
 alive-placement elimination from a set of misses) is a submodular set
 function, and greedy is a provably strong approximation for exactly
-that class of problem, which the exhaustive search failed to beat in
-practice. See `best_cell_by_score` and `apply_hypothetical_miss` in
-`model/ai/heatmap_ops.rs` / `model/ai/hypothetical.rs`.
+that class of problem. See `best_cell_by_score` and
+`apply_hypothetical_miss` in `model/ai/heatmap_ops.rs` /
+`model/ai/hypothetical.rs`.
 
-**Frigate endgame lookahead.** Greedy construction has one blind spot:
-its hypothetical-miss folding can't see bag ambiguity. With "B4 plus
-either B3 or C4" left, a miss assumed at C4 makes B3 a certain hit, so
-greedy fires B3 and C4 together — and since exactly one of them is
-always the hit, the bag comes back identical either way, forcing an
-extra refire salvo later. So once the Battleship and both Cruisers are
-sunk and at most 1000 joint (Cruiser, Frigate) hypotheses remain, every
-candidate triple is scored by a one-step lookahead: group the surviving
-hypotheses by the bag each would produce, estimate the salvos still
-needed per group (remaining unfired Frigate cells, plus a penalty for
-groups left ambiguous — larger when only a refire could still separate
-them), and replace the greedy salvo only if some triple is strictly
-better. Measured on a fixed 20,000-board set: average salvos to solve
-dropped from 17.08 to 16.04, with every identified layout checked
-against ground truth. (Letting the same lookahead also override the
-minimax disambiguation salvos below was tried and came out slightly
-worse — a one-step estimate is too coarse to beat that search at pure
-information gathering.) See `frigate_endgame_salvo` in
-`model/ai/heatmap_ops.rs`.
+**Vetoes from the exact model.** The FSM can't see cross-salvo
+deductions, so the exact model corrects the greedy pick in four ways,
+each found by looking at concrete games or by the waste auditor:
 
-**Deferred Battleship cells as anchors.** Once the Battleship's exact
-4 cells are identified, its still-unfired cells are no longer fired
-straight away: their value (4) is known in advance, so firing them
-teaches nothing — but they still have to be hit to sink it. Hunting
-moves on to the Cruisers with all 3 shots, and the owed cells are
-slotted into salvos only where they cost nothing: in place of a shot
-that would teach nothing anyway (known-empty filler, an outer-ring
-cell, a refire of an already-hit Battleship cell), as tie-breaking
-fillers in the minimax disambiguation search, and as hits still owed
-in the Frigate endgame lookahead — which is what keeps them from
-piling up into an extra Battleship-only salvo at the very end (without
-that, 455 of 1000 games ended that way and the average got worse).
-Measured on a fixed 50,000-board set: 16.07 → 15.99 average salvos,
-same compute, every identified layout (Battleship included) checked
-against ground truth. See `pending_battleship_cells` and
-`with_pending_battleship_cells` in `model/ai/heatmap_ops.rs`. Over all
-34,537,411 production boards (run_006): 16.361 → 16.269, with boards
-needing 21+ salvos nearly halved (0.235% → 0.129%) and 6% less compute.
+- *Kill shots once the layout is known.* Once the Cruiser or Frigate
+  layout is down to a single hypothesis, the greedy pick kept probing
+  cells the FSM still thought could hold a ship — e.g. Battleship B4–E4
+  with only C4 unfired and the last Frigate pinned to I3–I4, yet the
+  advisor suggested H4 · E2 · I9. Now, while hunting size 3 or 2, if
+  that size's hypotheses collapse to one layout its unfired cells (plus
+  any pending Battleship cells) are fired first. Frigates use the
+  cross-reasoned list (cheap by then); Cruisers only the raw list, since
+  cross-checking them mid-hunt meant enumerating still-open Frigate
+  triples (~4× solve time for a further ~0.05 salvo). 50,000/20,000-
+  board sets: 15.927 → 15.298 and 15.928 → 15.299, ~1.5× compute. See
+  `known_unfired_cells`.
+- *Never fire at provably empty cells.* The auditor showed ~3 shots per
+  game — mostly while hunting Cruisers — on cells the salvo history
+  already proved empty. The Cruiser and Frigate hunts exclude every cell
+  outside `possible_ship_cells`, and `with_pending_battleship_cells`
+  treats such cells as free slots. 50,000/20,000-board sets: 15.298 →
+  14.717 and 15.299 → 14.727, ~30% more single-thread compute (before
+  the signature index).
+- *No bag-blind shot groups.* The greedy hunt's hypothetical-miss
+  folding can pick shots whose combined hit count is the same in every
+  surviving layout — e.g. both possible ends C4 and F4 of a Cruiser
+  already hit at D4+E4: exactly one of them hits, but the unordered bag
+  can't say which, so a refire is needed later anyway. While hunting
+  Cruisers or Frigates, any group of 2–3 nearby shots that each vary
+  across the surviving hypotheses but whose hit count never does gets
+  its last-picked cell excluded and the salvo re-picked (at most 6
+  times). 50,000/20,000-board sets: 15.986 → 15.927 and 15.976 →
+  15.928, about 10–15% more compute. See `bag_blind_cell`.
+- *Deferred Battleship cells as anchors.* Once the Battleship's exact 4
+  cells are identified, its still-unfired cells are no longer fired
+  straight away: their value (4) is known in advance, so firing them
+  teaches nothing — but they still have to be hit to sink it. Hunting
+  moves on to the Cruisers with all 3 shots, and the owed cells are
+  slotted into salvos only where they cost nothing: in place of a shot
+  that would teach nothing anyway (known-empty filler, an outer-ring
+  cell, a refire of an already-hit Battleship cell), as tie-breaking
+  fillers in the minimax disambiguation search, and as hits still owed
+  in the planners — which is what keeps them from piling up into an
+  extra Battleship-only salvo at the very end (without that, 455 of 1000
+  games ended that way and the average got worse). 50,000-board set:
+  16.07 → 15.99, same compute, every identified layout (Battleship
+  included) checked against ground truth; over all 34,537,411 production
+  boards (run_006): 16.361 → 16.269, with boards needing 21+ salvos
+  nearly halved (0.235% → 0.129%) and 6% less compute. See
+  `pending_battleship_cells` and `with_pending_battleship_cells`.
 
-**No bag-blind shot groups.** The greedy hunt's hypothetical-miss
-folding can pick shots whose combined hit count is the same in every
-surviving layout — e.g. both possible ends C4 and F4 of a Cruiser
-already hit at D4+E4: exactly one of them hits, but the unordered bag
-can't say which, so a refire is needed later anyway. While hunting
-Cruisers or Frigates, any group of 2–3 nearby shots that each vary
-across the surviving hypotheses but whose hit count never does gets
-its last-picked cell excluded and the salvo re-picked (at most 6
-times). Measured on the fixed 50,000/20,000-board sets: 15.986 →
-15.927 and 15.976 → 15.928, about 10–15% more compute. See
-`bag_blind_cell` in `model/ai/heatmap_ops.rs`.
-The same trap existed in the minimax disambiguation search, which only
-compared worst cases: with the last Frigate in a D4/E4/D5/E5 square
-({D4|E5} x {E4|D5}), D4+E4+D5 and D4+E4+filler both leave at most 2
-layouts, and the first one found won — but E4+D5 is bag-blind, so it
-always leaves 2, while D4+E4 settles it half the time. Ties are now
-broken by the expected number of layouts left (sum of squared bucket
-sizes): 14.717 → 14.681 on the 50,000-board set.
+**One-step lookahead planners.** Greedy construction has a blind spot
+its vetoes don't cover: it can't see which salvos actually *split* the
+surviving layouts. With "B4 plus either B3 or C4" left, a miss assumed
+at C4 makes B3 a certain hit, so greedy fires B3 and C4 together — and
+since exactly one of them is always the hit, the bag comes back
+identical either way. So in the two phases where the surviving layouts
+are enumerable, every candidate salvo is scored by the expected number
+of salvos still needed, averaged over the surviving layouts grouped by
+the bag each would produce, and replaces the greedy salvo only if some
+candidate is strictly better. The pool is the greedy cells, the 10
+cells that split the layouts most evenly (8–30 measure identical),
+certain-hit cells, pending Battleship cells and 2 known-empty fillers,
+so a salvo can hold fewer than 3 informative cells.
 
-**Kill shots once the layout is known.** The line-wise FSM that drives
-hunting never sees cross-salvo deductions, so once the Cruiser or
-Frigate layout was already down to a single hypothesis it kept probing
-cells it still thought could hold a ship — e.g. Battleship B4–E4 with
-only C4 unfired and the last Frigate pinned to I3–I4, yet the advisor
-suggested H4 · E2 · I9. Now, while hunting size 3 or 2, if that size's
-hypotheses collapse to one layout its unfired cells (plus any pending
-Battleship cells) are fired first. Frigates use the cross-reasoned
-list (cheap by then); Cruisers only the raw list, since cross-checking
-them mid-hunt means enumerating still-open Frigate triples (~4× solve
-time for a further ~0.05 salvo). Measured on the fixed 50,000/20,000-
-board sets: 15.927 → 15.298 and 15.928 → 15.299, ~1.5× compute. See
-`known_unfired_cells` in `model/ai/heatmap_ops.rs`.
-
-**Never fire at provably empty cells.** The waste auditor (below)
-showed the solver spending ~3 shots per game — mostly while hunting
-Cruisers — on cells the salvo history already proves empty of every
-ship of size >= 2: the line-wise FSM can't see deductions spanning
-several salvos. `model/ai/exact.rs` computes the exact set of cells
-that could still hold a ship, as u128 bitmasks: per class, a placement
-must match every bag's count for that class; while the Battleship and
-Cruisers are down to a few placements each, those are branched on so
-the no-touching rule between classes prunes too (nothing can lie next
-to an identified Battleship). Frigate triples (112,872 of them) are
-never enumerated: each window looks for partners whose packed
-per-salvo counts complete the bag, a hash lookup. The hunt (Cruiser
-and Frigate phases) excludes every cell outside that set, and
-`with_pending_battleship_cells` treats them as free slots. A randomized
-test checks no real ship cell is ever ruled out. Measured on the fixed
-50,000/20,000-board sets: 15.298 → 14.717 and 15.299 → 14.727, ~30%
-more single-thread compute.
-
-**Signature index for placements.** Enumerating the consistent Cruiser
-pairs and Frigate triples used to be nested loops over windows with a
-pass over the whole salvo history per candidate (up to 112,872 Frigate
-triples), and together with `exact.rs` that was ~55% of solve time.
-`exact::Index` now packs each window's per-salvo hit counts into one
-u128 (a hex digit per salvo), so the partner that completes a bag is a
-signature subtraction plus a binary search; and since a class has at
-most 112 windows, "windows with that signature", "windows apart from
-this one" and "windows inside the allowed cells" are window-set u128s —
-a candidate partner set is a few ANDs. The same index drives the
-provably-empty-cell check. Output is unchanged (a brute-force
-equivalence test checks that), results are bit-identical, and the
-single-thread solve time dropped ~36%. Histories longer than 32 salvos
-don't fit a signature and fall back to the original loops.
-
-**Cruiser-hunt lookahead, and a size-aware ambiguity cost.** The Cruiser
-phase got the same one-step planner the Frigate endgame has
-(`cruiser_hunt_salvo`): once at most 300 Cruiser layouts survive, each
-candidate salvo — the greedy FSM pick, the 10 cells that split the
-layouts most evenly, certain-hit cells and pending Battleship cells —
-is scored by the expected salvos still needed, averaged over the
-layouts grouped by the bag they'd produce, with a small credit per cell
-that can still hold a Frigate (without it the planner traded Frigate
-information for tiny Cruiser gains and was a net loss). The decisive
-change, though, was the cost of ambiguity, now shared by both planners
-(`salvos_to_resolve`): resolving n layouts costs about log2(n) further
-salvos (a bag has 4 outcomes for one class), not the flat +0.5 both
-planners used before, which made them prefer kill shots over splitting
-shots. With the flat cost the Cruiser planner was worse (14.69 → 14.74);
-with the log cost both planners together give 14.69 → 14.07 on the
-20,000-board set and 14.68 → 14.08 on the 50,000-board set. The Frigate
-planner's pool is now ranked the same way and capped at 10 informative
-cells (8–30 measure identical). The cost is compute: better salvos keep
-more layouts alive for longer, so every list consumer runs on bigger
-lists — ~2.7× single-thread solve time, which is the next thing to
-bring down.
-
-**Masks all the way down.** The three candidate caches (Cruiser pairs,
-Frigate triples, joint pairs) now hold u128 cell masks instead of
-`HashSet`s, joint compatibility is one AND against the Cruiser
-placement's halo, and every consumer on the solve path — both planners,
-the bag-blind check, known-cell kill shots, the disambiguation search,
-identification, heatmaps — reads the masks; cell sets are only built
-for tests. Results are bit-identical; single-thread solve time 13.0 →
-7.7 s per 5,000 boards (1.6× the pre-planner solver, for −0.6 salvos).
-
-**Sunk reports as evidence.** The "Cruiser sunk" message was only used
-to switch hunting phases; the exact model ignored it. It carries one
-more count per salvo and class: the number of a layout's windows that
-became fully fired in that salvo must equal the number of sunk reports
-of that size the salvo brought — and the silence is the valuable half:
-a layout in which this salvo would have completed a ship, when nothing
-was reported sunk, is dead. That is exactly the "which of the two cells
-was the hit" ambiguity the end-of-game refires were spent on. Measured
-first with the auditor (`SUNK=1`): about one shot per game went to
-cells the reports had already settled, and 8% of games spent a salvo
-after the layout was fully determined. Implemented as a second packed
-signature per window ("completed at salvo t") in `exact::Index`, with
-the recorded reports as the target, so every list and both planners
-got it at once. The AI only trusts the reports when every salvo came
-with them (`apply_salvo_and_sunk`, which is what `Game::fire` uses);
-histories fed through the bare `apply_salvo` keep the bags-only model.
-20,000-board set: 14.074 → 13.735; 50,000-board set: 14.082 → 13.735;
-+15% single-thread time; auditor slack-after-known 8.3% → 0.3%.
+- *Frigate endgame* (`frigate_endgame_salvo`): once the Battleship and
+  both Cruisers are sunk and at most 1000 joint (Cruiser, Frigate)
+  layouts remain. 20,000-board set at introduction: 17.08 → 16.04, every
+  identified layout checked against ground truth. (Letting it also
+  override the minimax disambiguation salvos below was tried and came
+  out slightly worse — a one-step estimate is too coarse to beat that
+  search at pure information gathering.)
+- *Cruiser hunt* (`cruiser_hunt_salvo`): once at most 300 Cruiser
+  layouts survive, with a small credit per salvo cell that can still
+  hold a Frigate — without it the planner traded Frigate information
+  for tiny Cruiser gains and was a net loss.
+- *The ambiguity cost* (`salvos_to_resolve`), shared by both: a group of
+  n layouts that some unfired cell can still separate costs
+  max(hits owed, log2 n) + 0.5 salvos (a bag has 4 outcomes for one
+  class, so a good salvo cuts the layouts by a factor of 2–3); a group
+  only a refire can separate costs one more. This replaced a flat +0.5
+  whatever n was, which made both planners prefer kill shots over
+  splitting shots: with the flat cost the Cruiser planner was worse
+  (14.69 → 14.74); with the log cost both planners together give 14.69
+  → 14.07 on the 20,000-board set and 14.68 → 14.08 on the 50,000-board
+  set (the divisor on log2 swept from 2.0 to 0.8; 1.0–1.2 flat at the
+  optimum). Better salvos keep more layouts alive for longer, so every
+  list consumer runs on bigger lists — ~2.7× single-thread solve time
+  at first, brought back to 1.6× by the mask refactor above.
 
 **Disambiguation, once hunting is done.** After every ship of size ≥2
 is sunk, the exact layout can still be ambiguous (see
 `measure_identifiability` below). Two dedicated strategies run at that
 point, tried in order:
-- **Anchored isolation** — if the heatmaps show one cell that's
-  provably Cruiser-only and a different cell that's provably
-  Frigate-only, firing both together alongside a confirmed Battleship
-  cell (whose value is unambiguous) lets the resulting bag be decoded
-  by elimination instead of probability, resolving both cells in one
-  salvo.
-- **Minimax disambiguation search** — otherwise, an exhaustive search
-  over candidate triples (small pool, capped) picks the salvo that
-  narrows the surviving hypothesis set as evenly as possible in the
-  worst case — the "20 questions" strategy an exhaustive triple search
-  is actually the right tool for, unlike the hunt phase above.
+
+- *Anchored isolation* — if the heatmaps show one cell that's provably
+  Cruiser-only and a different cell that's provably Frigate-only, firing
+  both together alongside a confirmed Battleship cell (whose value is
+  unambiguous) lets the resulting bag be decoded by elimination instead
+  of probability, resolving both cells in one salvo.
+- *Minimax disambiguation search* — otherwise, an exhaustive search over
+  candidate triples (small pool, capped) picks the salvo that narrows
+  the surviving hypothesis set as evenly as possible in the worst case —
+  the "20 questions" strategy an exhaustive triple search is actually
+  the right tool for, unlike the hunt phase above. Ties on the worst
+  case are broken by the expected number of layouts left (sum of
+  squared bucket sizes): with the last Frigate in a D4/E4/D5/E5 square
+  ({D4|E5} × {E4|D5}), D4+E4+D5 and D4+E4+filler both leave at most 2
+  layouts, but E4+D5 is bag-blind and always leaves 2, while D4+E4
+  settles it half the time. 50,000-board set: 14.717 → 14.681.
 
 See `anchored_isolation_shot` and `disambiguation_shots` in
 `model/ai/heatmap_ops.rs`.
+
+### How progress is measured
+
+Every change is judged the same way: an A/B run on fixed 20,000- and
+50,000-board sets (`solve_boards_file`, 0 unresolved required), the
+waste auditor (`audit_waste`, below), which classifies every shot
+against an independent model of what was knowable and ranks where
+salvos are still lost, and full production runs over all 34,537,411
+boards on the VPS: run_004 17.36 → run_005 16.36 (Frigate endgame
+planner) → run_006 16.27 (deferred Battleship cells) → run_007 16.21
+(no bag-blind groups) → run_008 15.60 (kill shots once the layout is
+known) salvos per board; the current solver measures 13.74 on the A/B
+sets.
 
 **Summary.** The system is an exact, deterministic deduction engine
 over the discrete space of ship layouts — not a stochastic estimator.
@@ -308,10 +312,7 @@ known cells first) and overridden by one-step lookahead planners in the
 Cruiser and Frigate phases that score candidate salvos by the expected
 salvos still needed, with the ambiguity of n remaining layouts costed
 at log2(n). Probabilities shown in the UI are exact frequencies over
-the surviving layouts. Progress is measured, not guessed: fixed
-20,000/50,000-board A/B sets, the waste auditor, and full 34.5M-board
-production runs on the VPS (run_004 17.36 → run_008 15.60 salvos per
-board; the current solver measures 13.74 on the A/B sets).
+the surviving layouts.
 
 ## Architecture (after the MVC/module refactor)
 
