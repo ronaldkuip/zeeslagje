@@ -269,6 +269,8 @@ fn knowledge(lists: &[Vec<Mask>; 3], halos: &[Vec<Mask>; 3]) -> Knowledge {
 }
 
 fn audit_game(line: &str, base: &[Vec<Mask>; 3], base_halos: &[Vec<Mask>; 3], st: &mut Stats) {
+    let sunk_aware = std::env::var_os("SUNK").is_some();
+    let class_windows: [Vec<Mask>; 3] = [windows(4), windows(3), windows(2)];
     let Some(g) = parse_board(line) else { return };
     let ships = ships_from_grid(&g);
     let mut board = vec![vec![None; 10]; 10];
@@ -277,7 +279,7 @@ fn audit_game(line: &str, base: &[Vec<Mask>; 3], base_halos: &[Vec<Mask>; 3], st
             board[cell.row][cell.col] = Some(s.id);
         }
     }
-    let layout = BoardLayout { board, ships };
+    let layout = BoardLayout { board, ships: ships.clone() };
     let mut game = Game::new();
     if game.load_board_layout_json(&serde_json::to_string(&layout).unwrap()).contains("\"error\"") {
         return;
@@ -378,6 +380,7 @@ fn audit_game(line: &str, base: &[Vec<Mask>; 3], base_halos: &[Vec<Mask>; 3], st
         let _ = game.fire(&idx);
         salvos += 1;
         fired |= smask;
+        // (`fired` now includes this salvo: the completion checks below rely on it.)
         if k.unique {
             st.salvos_after_known += 1;
         }
@@ -385,7 +388,14 @@ fn audit_game(line: &str, base: &[Vec<Mask>; 3], base_halos: &[Vec<Mask>; 3], st
         for v in [4u8, 3, 2] {
             let n = vals.iter().filter(|&&x| x == v).count() as u32;
             let cls = class_of(v);
-            let keep: Vec<usize> = (0..lists[cls].len()).filter(|&i| (lists[cls][i] & smask).count_ones() == n).collect();
+            // Sunk messages this salvo for this class, from the truth:
+            // ships now fully fired that had a cell in this salvo.
+            let sunk_now = ships.iter().filter(|sh| sh.size == v as usize).filter(|sh| {
+                let m = sh.cells.iter().fold(0, |m, cell| m | bit(cell.row, cell.col));
+                m & !fired == 0 && m & smask != 0
+            }).count();
+            let completes = |p: Mask| class_windows[cls].iter().filter(|&&w| p & w == w && fired & w == w && w & smask != 0).count();
+            let keep: Vec<usize> = (0..lists[cls].len()).filter(|&i| (lists[cls][i] & smask).count_ones() == n && (!sunk_aware || completes(lists[cls][i]) == sunk_now)).collect();
             lists[cls] = keep.iter().map(|&i| lists[cls][i]).collect();
             halos[cls] = keep.iter().map(|&i| halos[cls][i]).collect();
         }
@@ -441,7 +451,7 @@ fn main() {
     }
 
     let g = st.games as f64;
-    println!("games {}  unresolved {}  mean salvos {:.3}", st.games, st.unresolved, st.salvos as f64 / g);
+    println!("games {}  unresolved {}  mean salvos {:.3}  model: {}", st.games, st.unresolved, st.salvos as f64 / g, if std::env::var_os("SUNK").is_some() { "bags + sunk messages" } else { "bags only" });
     println!();
     println!("shots per game by phase and kind (phase = AI target size, or after the layout was already unique):");
     let mut phases: Vec<String> = st.shots.keys().map(|(p, _)| p.clone()).collect();
