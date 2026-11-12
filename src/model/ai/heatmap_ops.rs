@@ -441,6 +441,41 @@ impl AiPlayer {
         self.fired[row][col] && self.anchored_isolation_shot().is_some_and(|shots| shots.contains(&(row, col)))
     }
 
+    /// The Cruisers' exact 6-cell layout (both ships combined), once
+    /// `consistent_cruiser_candidates` has narrowed to a single remaining
+    /// hypothesis — treated as ground truth (see
+    /// `cells_confirmed_cruiser_or_adjacent`'s doc comment for the
+    /// empirical validation behind that). Empty until then. Unlike
+    /// `found_battleship_cells`, no separate permanent snapshot is needed:
+    /// `consistent_cruiser_candidates` is a pure function of
+    /// `salvo_history` alone, and once narrowed to 1 it can only ever stay
+    /// at that same single candidate (more evidence can only shrink the
+    /// consistent set further, never revive an eliminated hypothesis —
+    /// and the true layout, by construction, is never eliminated).
+    #[cfg(test)]
+    pub fn cruiser_identified_cells(&self) -> Vec<(usize, usize)> {
+        let candidates = self.consistent_cruiser_candidates();
+        if candidates.len() == 1 {
+            candidates[0].iter().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Same idea as `cruiser_identified_cells`, one size down: the
+    /// Frigates' exact 6-cell layout (all 3 ships combined), once
+    /// `consistent_frigate_candidates` has narrowed to a single remaining
+    /// hypothesis. Empty until then.
+    #[cfg(test)]
+    pub fn frigate_identified_cells(&self) -> Vec<(usize, usize)> {
+        let candidates = self.consistent_frigate_candidates();
+        if candidates.len() == 1 {
+            candidates[0].iter().copied().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Same idea as `cruiser_identified_cells`, but checked against
     /// `cross_reasoned_cruiser_candidates` instead of the raw
     /// `consistent_cruiser_candidates` — resolves cases where the Cruiser
