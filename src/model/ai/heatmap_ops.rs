@@ -980,7 +980,14 @@ impl AiPlayer {
         // Small credit per salvo cell that can still hold a Frigate: the
         // estimate below only counts Cruiser work, and without this the
         // planner traded Frigate information away for tiny Cruiser gains.
-        const FRIGATE_CREDIT: f64 = 0.3;
+        // Swept on 199,970 boards: 14.04146 at 0.0, 14.03201 at 0.3,
+        // 14.02983 at 0.8, then a plateau of 14.02841 from 1.8 up — past
+        // that the term stops trading off against Cruiser cost and just
+        // breaks ties toward probing Frigate-capable cells. Confirmed on a
+        // held-out 199,624 boards: 14.03005 at 0.3 vs 14.02603 at 2.0.
+        // Sitting inside the plateau rather than at its knee, so the exact
+        // value doesn't matter.
+        const FRIGATE_CREDIT: f64 = 2.0;
 
         let hyps = self.cruiser_masks();
         if hyps.len() <= 1 || hyps.len() > MAX_HYPOTHESES {
