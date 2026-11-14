@@ -195,6 +195,33 @@ impl AiPlayer {
     /// enough (`consistent_frigate_candidates` one size down even more so)
     /// that recomputing it on every one of the several independent JSON
     /// accessors that call it per game state would otherwise be wasteful.
+    /// Every Battleship placement still consistent with the whole salvo
+    /// history (and the sunk reports, when tracked), as cell masks.
+    ///
+    /// Deliberately derived from nothing but the history: no `alive_value`
+    /// filter and no "must contain the confirmed cells" filter. The
+    /// signature test is already complete, so both would be redundant, and
+    /// `cells_confirmed_battleship` would recurse straight back into
+    /// `battleship_identified`. An empty result means "don't know" (the
+    /// history outgrew `MAX_SALVOS`), never "impossible".
+    ///
+    /// Only 80 placements exist, so this is cheap enough to enumerate every
+    /// salvo, unlike the 3164 Cruiser pairs or 112872 Frigate triples.
+    pub(crate) fn battleship_masks(&self) -> Vec<exact::Mask> {
+        let key = self.salvo_history.len();
+        if let Some((cached_key, cached)) = self.battleship_candidates_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return cached.clone();
+            }
+        }
+        let class = exact::battleship();
+        let computed = exact::Index::new(class, &self.salvo_history, self.sunk_events_if_tracked())
+            .and_then(|index| index.placements(class.windows_within(!0), usize::MAX))
+            .unwrap_or_default();
+        *self.battleship_candidates_cache.borrow_mut() = Some((key, computed.clone()));
+        computed
+    }
+
     pub(crate) fn cruiser_masks(&self) -> Vec<exact::Mask> {
         let key = self.salvo_history.len();
         if let Some((cached_key, cached)) = self.cruiser_candidates_cache.borrow().as_ref() {

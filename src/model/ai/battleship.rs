@@ -199,15 +199,86 @@ impl AiPlayer {
     /// and requiring the mask to be pixel-perfect would make the deduction far
     /// more fragile than the underlying logic actually is.
     pub(crate) fn battleship_identified(&self) -> Option<[(usize, usize); 4]> {
-        if self.four_bearing_salvo_count < 2 {
+        if self.four_bearing_salvo_count >= 2 {
+            let windows = self.battleship_candidate_windows();
+            if let [only] = windows[..] {
+                return Some(only);
+            }
+        }
+        self.battleship_identified_exactly()
+    }
+
+    /// The layout when the exact model has only one Battleship placement
+    /// left. The cross-4 route above recognises a specific probing shape:
+    /// a candidate set narrowed by intersecting unions of crosses until a
+    /// single straight-4 window survives. A planner picking salvos for
+    /// information value produces salvos that never form that shape, so
+    /// without this route those games would sink the ship but never
+    /// identify it, and the board would never count as resolved.
+    pub(crate) fn battleship_identified_exactly(&self) -> Option<[(usize, usize); 4]> {
+        // `battleship_identified` is a live, hunting-only view that goes
+        // empty the moment the ship sinks; `found_battleship` is the
+        // permanent record. The exact model would keep pinning the layout
+        // forever, so stop at the same boundary.
+        if self.found_battleship.is_some() {
             return None;
         }
-        let windows = self.battleship_candidate_windows();
-        if let [only] = windows[..] {
-            Some(only)
-        } else {
-            None
+        let key = (self.salvo_history.len(), self.found_battleship.is_some());
+        if let Some((cached_key, cached)) = *self.battleship_exact_cache.borrow() {
+            if cached_key == key {
+                return cached;
+            }
         }
+        let answer = self.battleship_identified_exactly_uncached();
+        *self.battleship_exact_cache.borrow_mut() = Some((key, answer));
+        answer
+    }
+
+    fn battleship_identified_exactly_uncached(&self) -> Option<[(usize, usize); 4]> {
+        let masks = self.battleship_masks();
+        let [only] = masks[..] else { return None };
+        if !self.battleship_completes_a_fleet(only) {
+            return None;
+        }
+        let cells: Vec<(usize, usize)> = exact::cells(only).collect();
+        cells.try_into().ok()
+    }
+
+    /// Is `bs` part of at least one complete fleet layout still consistent
+    /// with the history?
+    ///
+    /// A single surviving Battleship placement is not on its own safe to act
+    /// on. Identification drives irreversible eliminations (the ship's halo
+    /// can hold no Cruiser or Frigate), and a history that no board can
+    /// satisfy will pass through states where exactly one placement survives
+    /// before collapsing to none. Requiring the rest of the fleet to fit
+    /// beside it is the joint check that rules those out; on a real board,
+    /// where the history always describes some real layout, it always holds.
+    fn battleship_completes_a_fleet(&self, bs: exact::Mask) -> bool {
+        let (cruisers, frigates) = (exact::cruisers(), exact::frigates());
+        let sunk = self.sunk_events_if_tracked();
+        let (Some(cruiser_index), Some(frigate_index)) = (
+            exact::Index::new(cruisers, &self.salvo_history, sunk),
+            exact::Index::new(frigates, &self.salvo_history, sunk),
+        ) else {
+            return false;
+        };
+        let forbidden = exact::halo(bs);
+        // Past this many Cruiser options the board is plainly roomy; stop
+        // paying for the nested search.
+        const ENOUGH: usize = 64;
+        let Some(options) = cruiser_index.placements(cruisers.windows_within(!forbidden), ENOUGH) else {
+            return true;
+        };
+        options.iter().any(|&pair| {
+            let blocked = forbidden | exact::halo(pair);
+            // `placements` returns None the moment it exceeds the limit, so
+            // None here means "more than one exists".
+            match frigate_index.placements(frigates.windows_within(!blocked), 1) {
+                None => true,
+                Some(found) => !found.is_empty(),
+            }
+        })
     }
 
     /// Every valid straight-4 window still consistent with the current

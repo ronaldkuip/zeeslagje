@@ -137,6 +137,9 @@ impl Class {
     }
 }
 
+pub(crate) fn battleship() -> &'static Class {
+    &classes()[0]
+}
 pub(crate) fn cruisers() -> &'static Class {
     &classes()[1]
 }

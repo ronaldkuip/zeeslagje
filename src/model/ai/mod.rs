@@ -243,6 +243,15 @@ pub struct AiPlayer {
     /// early-game move take well over a minute; caching by salvo count
     /// (the only thing these lists depend on) means each is computed once
     /// per real game state and reused everywhere else.
+    /// Consistent Battleship placements per the exact model, keyed the same
+    /// way as `cruiser_candidates_cache`. At most 80 entries, so unlike the
+    /// Cruiser/Frigate lists this one is always cheap to enumerate in full.
+    battleship_candidates_cache: RefCell<Option<(usize, Vec<exact::Mask>)>>,
+    /// `battleship_identified_exactly`'s answer, keyed by salvo count plus
+    /// whether the ship has sunk. Separate from the mask list because the
+    /// joint fleet check behind it is the expensive part and the answer is
+    /// read many times per salvo.
+    battleship_exact_cache: RefCell<Option<((usize, bool), Option<[(usize, usize); 4]>)>>,
     cruiser_candidates_cache: RefCell<Option<(usize, Vec<exact::Mask>)>>,
     frigate_candidates_cache: RefCell<Option<(usize, Vec<exact::Mask>)>>,
     /// Memoized `jointly_consistent_hypothesis_pairs`, same `salvo_history.
@@ -298,6 +307,8 @@ impl AiPlayer {
             salvo_history: Vec::new(),
             sunk_events: Vec::new(),
             sunk_tracked_salvos: 0,
+            battleship_candidates_cache: RefCell::new(None),
+            battleship_exact_cache: RefCell::new(None),
             cruiser_candidates_cache: RefCell::new(None),
             frigate_candidates_cache: RefCell::new(None),
             joint_pairs_cache: RefCell::new(None),
@@ -355,6 +366,8 @@ impl AiPlayer {
     }
 
     pub(crate) fn invalidate_candidate_caches(&mut self) {
+        *self.battleship_candidates_cache.borrow_mut() = None;
+        *self.battleship_exact_cache.borrow_mut() = None;
         *self.cruiser_candidates_cache.borrow_mut() = None;
         *self.frigate_candidates_cache.borrow_mut() = None;
         *self.joint_pairs_cache.borrow_mut() = None;
