@@ -867,11 +867,48 @@ impl AiPlayer {
         // audit found few provably-empty shots (0.3 per game), and checking
         // there too bought ~0.007 salvo for ~10% more solve time.
         let mut avoid_as_filler = avoid_as_filler;
-        for r in if size <= 3 { INNER_LO..=INNER_HI } else { 1..=0 } {
-            for c in INNER_LO..=INNER_HI {
-                if !self.fired[r][c] && self.provably_no_big_ship(r, c) && !avoid_as_filler.contains(&(r, c)) {
-                    avoid_as_filler.push((r, c));
+        if size <= 3 {
+            for r in INNER_LO..=INNER_HI {
+                for c in INNER_LO..=INNER_HI {
+                    if !self.fired[r][c] && self.provably_no_big_ship(r, c) && !avoid_as_filler.contains(&(r, c)) {
+                        avoid_as_filler.push((r, c));
+                    }
                 }
+            }
+        } else {
+            // The Battleship hunt vetoes the same cells, but guarded. It is
+            // the longest phase and it runs while most of the board is still
+            // unfired, so the veto reaches far more cells here; on a board
+            // whose ships all hug the edges nearly every central cell is
+            // provably empty and a hard veto leaves no legal pick at all
+            // (one such board ran to the 30-salvo cap unresolved).
+            //
+            // The Cruiser and Frigate phases keep the plain unguarded veto:
+            // it has gone through nine production runs at zero unresolved,
+            // and adding the guard there costs 0.0016 salvo.
+            let mut veto: Vec<(usize, usize)> = Vec::new();
+            let mut usable = 0usize;
+            for r in INNER_LO..=INNER_HI {
+                for c in INNER_LO..=INNER_HI {
+                    if self.fired[r][c] {
+                        continue;
+                    }
+                    if self.provably_no_big_ship(r, c) {
+                        if !avoid_as_filler.contains(&(r, c)) {
+                            veto.push((r, c));
+                        }
+                    } else {
+                        usable += 1;
+                    }
+                }
+            }
+            // Double the 3 cells a salvo needs, and the same figure the
+            // bag-blind guard above uses. 4 is the lowest value that resolves
+            // every board in 400k, which is too close to the edge; 6 costs
+            // 0.0002 salvo over that.
+            const USABLE_MIN: usize = 6;
+            if usable >= USABLE_MIN {
+                avoid_as_filler.extend(veto);
             }
         }
 
