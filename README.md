@@ -287,6 +287,46 @@ point, tried in order:
 See `anchored_isolation_shot` and `disambiguation_shots` in
 `model/ai/heatmap_ops.rs`.
 
+**Identifying the Battleship from the exact model.** Identification
+recognised only one probing shape: a candidate set narrowed by
+intersecting unions of crosses until a single straight-4 window
+survived. But the exact placement model often pins the ship earlier,
+and nothing was done with that — the solver kept hunting a ship it had
+already located. `battleship_identified_exactly` adds the exact model
+as a fallback, cached per salvo.
+
+One surviving placement is not on its own safe to act on, because
+identification drives irreversible eliminations: nothing can sit in the
+ship's halo. A salvo history that no board can satisfy passes through
+states where exactly one placement survives before collapsing to none,
+and acting on that corrupts the FSM permanently. So
+`battleship_completes_a_fleet` requires the Cruisers and Frigates to
+still fit beside it. On real boards the check never fires — the
+measurement is identical with and without it — but it is what keeps
+contrived histories from poisoning the model. 199,970-board set: 14.028
+→ 13.998, at about 26% more solve time. See `model/ai/battleship.rs`.
+
+**The empty-cell veto during the Battleship hunt.** Never firing at a
+cell where the exact model proves no ship can be only ran from the
+Cruiser hunt onward; a comment recorded that extending it to the
+Battleship hunt bought about 0.007 salvo for 10% more compute, so it
+was left off. That measurement predated the identification route above.
+With the ship pinned earlier the Battleship phase has far more it can
+rule out, and the same veto is now worth **0.053** — the two changes
+multiply rather than add: 0.030 and 0.007 apart, 0.085 together. The
+general lesson is that every constant and every enable/disable decision
+here was measured against the code of its day, and a later change can
+invalidate it; a 0.007 verdict is not permanent.
+
+A hard veto can starve the chooser. On a board whose ships all hug the
+edges nearly every central cell is provably empty, and one board in
+199,624 ran to the 30-salvo cap. The veto is therefore dropped when
+fewer than 6 usable cells remain — 4 is the lowest that resolves every
+board in 400k, too close to the edge for 34.5M, and 6 costs only 0.0002
+over it. The Cruiser and Frigate phases keep the plain unguarded veto,
+because adding the guard there costs 0.0016. See `choose_shots_avoiding`
+in `model/ai/heatmap_ops.rs`.
+
 ### How progress is measured
 
 Every change is judged the same way: an A/B run on fixed 20,000- and
@@ -297,8 +337,34 @@ salvos are still lost, and full production runs over all 34,537,411
 boards on the VPS: run_004 17.36 → run_005 16.36 (Frigate endgame
 planner) → run_006 16.27 (deferred Battleship cells) → run_007 16.21
 (no bag-blind groups) → run_008 15.60 (kill shots once the layout is
-known) salvos per board; the current solver measures 13.74 on the A/B
-sets.
+known) → run_009 14.033 (log2 ambiguity cost in both planners) →
+**run_010 13.946** (Battleship identified from the exact model, and
+the empty-cell veto extended to the Battleship hunt) salvos per board;
+the current solver measures 13.636 on the 20,000-board set and 13.644
+on the 50,000-board set.
+
+A full production run costs about 29 hours on the VPS, so run_010 was
+predicted before it was launched, and the prediction is worth
+describing because it holds up. The data files are ordered by
+Battleship placement and each file holds exactly one placement, so a
+valid sample has to stride *within* all 346 files — sampling whole
+files covers only half the placements and gives a false null. Run both
+binaries over such a sample, aggregate the delta per placement, then
+weight each placement's delta by its board count in the full set. From
+200,000 boards (2,500 per placement) that predicted 13.94785 against an
+actual 13.94637, a miss of 0.0015 over 34.5M boards. Per single
+placement it is rough, ±0.1, but the errors cancel; per placement group
+of nine files or more it was within 0.002 every time.
+
+run_010 in full: 34,537,411 boards, 0 unresolved, 0 invalid, 28h53m on
+one thread. All 79 Battleship placements present in the data improved
+and none got worse; 337 of 346 files improved and the 9 that did not
+are all within +0.043. 810,134 boards moved from the 14-and-up side of
+the distribution to the 13-and-under side, and boards needing 16+
+salvos fell from 14.46% to 13.22%. The gain is concentrated where it is
+worth most: horizontal Battleships low on the board gain up to 0.68
+salvo, while the already-cheap placements barely move, so the spread
+across placements narrows as well as the mean.
 
 **Summary.** The system is an exact, deterministic deduction engine
 over the discrete space of ship layouts — not a stochastic estimator.
